@@ -93,6 +93,7 @@ export class CopilotAuth {
         await this.#fetchAndStoreGitHubToken();
       }
       const finalStatus = await this.checkStatus();
+      console.log("Signed in as user:", finalStatus.user);
       return finalStatus.authenticated && finalStatus.tokenValid;
     } catch (error) {
       console.error("Error signing in:", error);

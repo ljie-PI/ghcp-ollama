@@ -60,10 +60,11 @@ function startAuthRefresh() {
   authRefreshInterval = setInterval(
     async () => {
       try {
-        await authClient.signIn();
+        console.log("Refreshing GitHub Copilot authentication...");
+        await authClient.signIn(true);
         const status = await authClient.checkStatus();
         if (!status.authenticated) {
-          console.error("Sing in to Github Copilot failed.");
+          console.error("Sign in to Github Copilot failed.");
         }
         if (!status.tokenValid) {
           console.error("GitHub token is not valid.");
