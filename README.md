@@ -22,7 +22,6 @@ This project aims to provide an Ollama-compatible API for interacting with the L
 ```bash
 # Clone the repository
 git clone https://github.com/ljie-PI/ghcp-ollama.git
-git submodule update --init --recursive
 
 # Install dependencies
 npm install
