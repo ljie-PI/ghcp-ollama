@@ -9,7 +9,8 @@ let modelClient = null;
 let chatClient = null;
 let authRefreshInterval = null;
 let copilotStatus = null;
-const PORT = process.env.PORT || 11434; // Same port as Ollama
+const PORT = process.env.PORT || 11434;
+const AUTH_REFRESH_INTERVAL = 25 * 60 * 1000;
 
 async function setupCopilotChat() {
   try {
@@ -29,7 +30,6 @@ async function setupCopilotChat() {
       return { success: false, error: "GitHub token is not valid." };
     }
 
-    // Set up auto token refresh - check every hour if token is still valid
     startAuthRefresh();
     copilotStatus = { ready: true };
     return { success: true };
@@ -46,7 +46,6 @@ function startAuthRefresh() {
   if (authRefreshInterval) {
     clearInterval(authRefreshInterval);
   }
-  // Token expires in 30 minutes, refresh every 29 minutes
   authRefreshInterval = setInterval(
     async () => {
       try {
@@ -63,7 +62,7 @@ function startAuthRefresh() {
         console.error("Error checking auth status:", error);
       }
     },
-    29 * 60 * 1000,
+    AUTH_REFRESH_INTERVAL,
   );
 }
 

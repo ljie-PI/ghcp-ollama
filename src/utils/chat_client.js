@@ -128,8 +128,8 @@ export class CopilotChatClient {
 
   async #checkGithubToken(refreshToken) {
     // Quick check if the token is valid
-    const { token } = this.auth.getGithubToken();
-    if (!token) {
+    const { token, expired } = this.auth.getGithubToken();
+    if (!token || expired) {
       if (refreshToken) {
         console.log("GitHub token not valid, attempting to refresh...");
         await this.auth.signIn(true);
@@ -203,7 +203,7 @@ export class CopilotChatClient {
           {
             onResponse,
             parseResp: this.#parseToOllamaResp,
-          }
+          },
         );
       } else {
         const response = await sendHttpRequest(
@@ -276,7 +276,7 @@ export class CopilotChatClient {
           {
             onResponse,
             parseResp: this.#forwardOpenaiResp,
-          }
+          },
         );
       } else {
         return await sendHttpRequest(
