@@ -1,11 +1,9 @@
 import express from "express";
 import { CopilotAuth } from "./utils/auth_client.js";
 import { CopilotChatClient } from "./utils/chat_client.js";
-import { CopilotLSPClient } from "./utils/lsp_client.js";
 import { CopilotModels } from "./utils/model_client.js";
 
 // Global variables
-let lspClient = null;
 let authClient = null;
 let modelClient = null;
 let chatClient = null;
@@ -15,21 +13,13 @@ const PORT = process.env.PORT || 11434; // Same port as Ollama
 
 async function setupCopilotChat() {
   try {
-    console.log("Initializing GitHub Copilot LSP client...");
-    if (!lspClient) {
-      lspClient = new CopilotLSPClient();
-    }
-    if (!lspClient.initialized) {
-      await lspClient.start();
-    }
-
     console.log("Initializing GitHub Copilot chat client...");
-    authClient = new CopilotAuth(lspClient);
-    modelClient = new CopilotModels(lspClient);
-    chatClient = new CopilotChatClient(lspClient);
+    authClient = new CopilotAuth();
+    modelClient = new CopilotModels();
+    chatClient = new CopilotChatClient();
 
     await authClient.signIn(true);
-    const status = await authClient.checkStatus();
+    const status = authClient.checkStatus();
     if (!status.authenticated) {
       copilotStatus = { ready: false, error: "auth" };
       return { success: false, error: "Sing in to Github Copilot failed." };
@@ -249,9 +239,6 @@ function shutdown() {
 
   if (authRefreshInterval) {
     clearInterval(authRefreshInterval);
-  }
-  if (lspClient && lspClient.initialized) {
-    lspClient.stop();
   }
 
   process.exit(0);

@@ -10,8 +10,8 @@ import { sendHttpRequest } from "./http_utils.js";
 import { editorConfig, sysConfigPath } from "../config.js";
 
 export class CopilotModels {
-  constructor(lspClient) {
-    this.auth = new CopilotAuth(lspClient);
+  constructor() {
+    this.auth = new CopilotAuth();
     this.modelConfigFile = path.join(sysConfigPath(), "model-config.json");
   }
 
@@ -29,7 +29,7 @@ export class CopilotModels {
    */
   async getAvailableModels() {
     try {
-      const signInStatus = await this.auth.checkStatus();
+      const signInStatus = this.auth.checkStatus();
       if (!signInStatus.authenticated || !signInStatus.tokenValid) {
         console.log("Not signed in or token is invalid.");
         return { success: false, availableModels: [] };
@@ -163,14 +163,22 @@ export class CopilotModels {
 
   async #requestModels(endpoint, token) {
     const url = new URL(`${endpoint}/models`);
-    const resp = await sendHttpRequest(url.hostname, url.pathname, "GET", {
+    const headers = {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
       "User-Agent": "github-copilot",
       "Content-Type": "application/json",
       "Copilot-Integration-Id": editorConfig.copilotIntegrationId,
       "Editor-Version": `${editorConfig.editorInfo.name}/${editorConfig.editorInfo.version}`,
-    });
+    };
+    const resp = await sendHttpRequest(
+      url.hostname,
+      url.pathname,
+      "GET",
+      headers,
+      null,
+      { timeout: 3000 }
+    );
     if (resp.success) {
       return resp.data;
     }

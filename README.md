@@ -15,7 +15,6 @@ This project aims to provide an Ollama-compatible API for interacting with the L
 
 - Node.js 18.x or newer
 - GitHub Copilot subscription
-- Installed Copilot LSP server (typically installed with copilot.lua Neovim plugin)
 
 ## Installation
 
@@ -35,25 +34,25 @@ There are two main ways to use this tool:
 
 ```bash
 # Check your authentication status
-node src/ghcp.js status
+node src/ghcpo.js status
 
 # Sign in to GitHub Copilot
-node src/ghcp.js signin
+node src/ghcpo.js signin
 
 # Sign out from GitHub Copilot
-node src/ghcp.js signout
+node src/ghcpo.js signout
 
 # List available models
-node src/ghcp.js models
+node src/ghcpo.js models
 
 # Get the active model
-node src/ghcp.js getmodel
+node src/ghcpo.js getmodel
 
 # Set the active model
-node src/ghcp.js setmodel --model gpt-4o-2024-11-20
+node src/ghcpo.js setmodel --model gpt-4o-2024-11-20
 
 # Send a chat message to Copilot
-node src/ghcp.js chat --message "Write quick sort algo in python"
+node src/ghcpo.js chat --message "Write quick sort algo in python"
 ```
 
 ### 2. Ollama-Compatible Server

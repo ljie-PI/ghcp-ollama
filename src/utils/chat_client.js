@@ -9,9 +9,9 @@ import { sendHttpRequest, sendHttpStreamingRequest } from "./http_utils.js";
 import { editorConfig } from "../config.js";
 
 export class CopilotChatClient {
-  constructor(lspClient) {
-    this.auth = new CopilotAuth(lspClient);
-    this.models = new CopilotModels(lspClient);
+  constructor() {
+    this.auth = new CopilotAuth();
+    this.models = new CopilotModels();
   }
 
   /**
@@ -133,7 +133,7 @@ export class CopilotChatClient {
       if (refreshToken) {
         console.log("GitHub token not valid, attempting to refresh...");
         await this.auth.signIn(true);
-        const newStatus = await this.auth.checkStatus();
+        const newStatus = this.auth.checkStatus();
         if (!newStatus.authenticated || !newStatus.tokenValid) {
           return {
             success: false,
@@ -180,6 +180,7 @@ export class CopilotChatClient {
         "Content-Type": "application/json",
         "Copilot-Integration-Id": editorConfig.copilotIntegrationId,
         "Editor-Version": `${editorConfig.editorInfo.name}/${editorConfig.editorInfo.version}`,
+        "Editor-Plugin-Version": `${editorConfig.editorPluginInfo.name}/${editorConfig.editorPluginInfo.version}`,
       };
       if (messages.some((message) => message.images)) {
         headers["Copilot-Vision-Request"] = "true";
@@ -199,8 +200,10 @@ export class CopilotChatClient {
           "POST",
           headers,
           payload,
-          onResponse,
-          this.#parseToOllamaResp,
+          {
+            onResponse,
+            parseResp: this.#parseToOllamaResp,
+          }
         );
       } else {
         const response = await sendHttpRequest(
@@ -270,8 +273,10 @@ export class CopilotChatClient {
           "POST",
           headers,
           payload,
-          onResponse,
-          this.#forwardOpenaiResp,
+          {
+            onResponse,
+            parseResp: this.#forwardOpenaiResp,
+          }
         );
       } else {
         return await sendHttpRequest(
@@ -464,10 +469,12 @@ export class CopilotChatClient {
                         name: toolFunc.name,
                         arguments: "",
                       };
-                      incompleteResult.currentToolFunc = incompleteResult.functions[toolFunc.name];
+                      incompleteResult.currentToolFunc =
+                        incompleteResult.functions[toolFunc.name];
                     }
                     if (toolFunc.arguments) {
-                      incompleteResult.currentToolFunc.arguments += toolFunc.arguments;
+                      incompleteResult.currentToolFunc.arguments +=
+                        toolFunc.arguments;
                     }
                   });
                 }
