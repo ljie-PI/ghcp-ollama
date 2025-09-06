@@ -3,7 +3,7 @@
 
 // Parse command line arguments with a default value of true for stream
 const args = process.argv.slice(2);
-const stream = args.includes('--no-stream') ? false : true;
+const stream = args.includes("--no-stream") ? false : true;
 
 const payload = {
   model: "claude-3.5-sonnet",

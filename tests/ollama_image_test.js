@@ -1,13 +1,13 @@
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from 'url';
+import { fileURLToPath } from "url";
 
 // Usage: node ollama_image_test.js [--no-stream]
 // --no-stream: Use non-streaming mode (default: streaming enabled)
 
 // Parse command line arguments with a default value of true for stream
 const args = process.argv.slice(2);
-const stream = args.includes('--no-stream') ? false : true;
+const stream = args.includes("--no-stream") ? false : true;
 
 function encodeImageToBase64(imagePath) {
   const image = fs.readFileSync(imagePath);

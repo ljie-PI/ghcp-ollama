@@ -29,7 +29,8 @@ export default [
     ignores: [
       'node_modules/',
       'copilot/',
-      'dist/'
+      'dist/',
+      '*.md'
     ]
   }
 ];

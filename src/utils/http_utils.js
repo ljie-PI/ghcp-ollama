@@ -103,7 +103,7 @@ export async function sendHttpStreamingRequest(
   statusCodeErrorMsg = "Returned status code",
   reqErrorMsg = "Error making request to endpoint",
 ) {
-  return await new Promise(async (resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const options = {
       hostname: hostname,
       path: path,
@@ -130,7 +130,7 @@ export async function sendHttpStreamingRequest(
       // buffer is used to hold the incomplete data inputted to the parseResp function
       let buffer = "";
       // incompleteResult is used to hold the incomplete data outputted by parseResp function
-      let incompleteResult = {};
+      const incompleteResult = {};
 
       res.on("data", (chunk) => {
         buffer += chunk.toString();

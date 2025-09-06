@@ -77,7 +77,7 @@ function startAuthRefresh() {
   );
 }
 
-async function ensureCopilotSetup(req, res, next) {
+async function ensureCopilotSetup(_, res, next) {
   if (!copilotStatus.ready) {
     // If it needs authentication specifically, return 401
     if (copilotStatus.error === "auth") {
@@ -96,7 +96,7 @@ async function ensureCopilotSetup(req, res, next) {
   next();
 }
 
-async function handleModelFetchRequest(req, res) {
+async function handleModelFetchRequest(_, res) {
   try {
     const modelsResult = await modelClient.getAvailableModels();
 
@@ -273,7 +273,7 @@ app.post("/v1/chat/completions", ensureCopilotSetup, (req, res) => {
 });
 
 // Add enhanced error handling middleware
-app.use((err, req, res, next) => {
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   console.error("Unhandled server error:", err);
   res.status(500).json({
     error: "Internal server error",

@@ -128,7 +128,7 @@ export class CopilotChatClient {
 
   async #checkGithubToken(refreshToken) {
     // Quick check if the token is valid
-    const { token, _ } = this.auth.getGithubToken();
+    const { token } = this.auth.getGithubToken();
     if (!token) {
       if (refreshToken) {
         console.log("GitHub token not valid, attempting to refresh...");
@@ -348,7 +348,7 @@ export class CopilotChatClient {
   #parseToOllamaResp(buffer, incompleteResult) {
     const respMessages = buffer.split("\n\n");
     const remainBuffer = respMessages.pop();
-    let parsedMessages = [];
+    const parsedMessages = [];
 
     for (const respMessage of respMessages) {
       if (!respMessage || respMessage.trim() === "") continue;
@@ -522,10 +522,10 @@ export class CopilotChatClient {
     };
   }
 
-  #forwardOpenaiResp(buffer, _) {
+  #forwardOpenaiResp(buffer) {
     const respMessages = buffer.split("\n\n");
     const remainBuffer = respMessages.pop();
-    let parsedMessages = [];
+    const parsedMessages = [];
 
     for (const respMessage of respMessages) {
       if (!respMessage || respMessage.trim() === "") continue;

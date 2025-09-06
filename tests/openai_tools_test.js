@@ -75,8 +75,8 @@ async function chat() {
       body: JSON.stringify(payload),
     });
 
+    const toolResponses = {};
     let textResponse = "";
-    let toolResponses = {};
     let currentToolCall = null;
 
     if (stream) {
