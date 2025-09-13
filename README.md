@@ -18,12 +18,23 @@ This project aims to provide an Ollama-compatible API for interacting with the L
 
 ## Installation
 
+You can install this package directly from npm:
+
+```bash
+npm install -g @ljie-pi/ghcp-ollama
+```
+
+Alternatively, you can clone the repository and install locally:
+
 ```bash
 # Clone the repository
 git clone https://github.com/ljie-PI/ghcp-ollama.git
 
 # Install dependencies
 npm install
+
+# Link the package globally (optional)
+npm link
 ```
 
 ## Usage
@@ -31,6 +42,33 @@ npm install
 There are two main ways to use this tool:
 
 ### 1. Command Line Interface
+
+After installing via npm, you can use the `ghcpo` command directly:
+
+```bash
+# Check your authentication status
+ghcpo status
+
+# Sign in to GitHub Copilot
+ghcpo signin
+
+# Sign out from GitHub Copilot
+ghcpo signout
+
+# List available models
+ghcpo models
+
+# Get the active model
+ghcpo getmodel
+
+# Set the active model
+ghcpo setmodel --model gpt-4o-2024-11-20
+
+# Send a chat message to Copilot
+ghcpo chat --message "Write quick sort algo in python"
+```
+
+If you cloned the repository instead, you can use:
 
 ```bash
 # Check your authentication status
@@ -59,9 +97,30 @@ node src/ghcpo.js chat --message "Write quick sort algo in python"
 
 Start the server that provides Ollama-compatible API endpoints:
 
+If installed via npm, you can use the `ghcpo-server` command:
+
+```bash
+# Start the server
+ghcpo-server start
+
+# Check server status
+ghcpo-server status
+
+# Stop the server
+ghcpo-server stop
+
+# Restart the server
+ghcpo-server restart
+```
+
+Alternatively, you can start the server directly with Node.js:
+
 ```bash
 # Using npm start (recommended)
 npm start
+
+# Or directly with Node.js
+node src/server.js
 ```
 
 The server provides the following endpoints:
@@ -79,7 +138,7 @@ You can run some tests after server started:
 -  List available models
 ```bash
 curl http://localhost:11434/api/tags
-````
+```
 
 - Chat with text messages
 ```bash
