@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
 import minimist from "minimist";
+import { CopilotAuth } from "./utils/auth_client.js";
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE;
 const DEFAULT_PID_FILE = path.join(HOME_DIR, ".ghcpo-server", "pidfile");
@@ -89,7 +90,30 @@ function isProcessRunning(pid) {
   }
 }
 
-function startServer() {
+async function setupCopilotChat() {
+  try {
+    console.log("Initializing GitHub Copilot chat client...");
+    const authClient = new CopilotAuth();
+
+    await authClient.signIn();
+    const status = authClient.checkStatus();
+    if (!status.authenticated) {
+      return { success: false, error: "Sing in to Github Copilot failed." };
+    }
+    if (!status.tokenValid) {
+      return { success: false, error: "GitHub token is not valid." };
+    }
+
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: `Failed to initialize Copilot client: ${error.message}.`,
+    };
+  }
+}
+
+async function startServer() {
   const existingPid = readPid();
   if (existingPid && isProcessRunning(existingPid)) {
     console.log(`Server is already running with PID ${existingPid}`);
@@ -97,20 +121,25 @@ function startServer() {
   }
 
   console.log("Starting server...");
+  try {
+    const result = await setupCopilotChat();
+    if (result.success) {
+      console.log("Github Copilot client setup successfully");
+    } else {
+      console.error("Github Copilot client setup failed:", result.error);
+    }
+  } catch (error) {
+    console.error("Error during Github Copilot setup:", error);
+  }
   
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const logFile = path.join(LOG_DIR, `server-${timestamp}.log`);
   
-  const server = spawn("node", ["src/server.js"], {
+  const server = spawn("node", ["src/server.js", "--log-file", logFile], {
     cwd: process.cwd(),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "ignore"],
     detached: true,
   });
-  
-  // Redirect stdout and stderr to log file
-  const logStream = fs.createWriteStream(logFile, { flags: "a" });
-  server.stdout.pipe(logStream);
-  server.stderr.pipe(logStream);
 
   server.on("error", (err) => {
     console.error("Failed to start server:", err.message);

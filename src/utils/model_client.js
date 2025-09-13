@@ -31,18 +31,27 @@ export class CopilotModels {
     try {
       const signInStatus = this.auth.checkStatus();
       if (!signInStatus.authenticated || !signInStatus.tokenValid) {
-        console.log("Not signed in or token is invalid.");
-        return { success: false, availableModels: [] };
+        return {
+          success: false,
+          availableModels: [],
+          error: "Not signed in or token is invalid.",
+        };
       }
 
       const { token, endpoint } = this.auth.getGithubToken();
       if (!token) {
-        console.log("Can't get Github token.");
-        return { success: false, availableModels: [] };
+        return {
+          success: false,
+          availableModels: [],
+          error: "Can't get Github token.",
+        };
       }
       if (!endpoint) {
-        console.log("Can't get Github endpoint.");
-        return { success: false, availableModels: [] };
+        return {
+          success: false,
+          availableModels: [],
+          error: "Can't get Github endpoint.",
+        };
       }
 
       const modelsResponse = await this.#requestModels(endpoint, token);
@@ -67,7 +76,6 @@ export class CopilotModels {
       }
       return { success: true, availableModels: modelsList };
     } catch (error) {
-      console.error("Error in getAvailableModels:", error);
       return { success: false, error: error.message };
     }
   }
@@ -117,7 +125,6 @@ export class CopilotModels {
         modelConfig,
       };
     } catch (error) {
-      console.error("Error setting model:", error);
       return {
         success: false,
         error: error.message,
@@ -153,7 +160,6 @@ export class CopilotModels {
         };
       }
     } catch (error) {
-      console.error("Error getting current model:", error);
       return {
         success: false,
         error: error.message,
@@ -177,7 +183,7 @@ export class CopilotModels {
       "GET",
       headers,
       null,
-      { timeout: 3000 }
+      { timeout: 3000 },
     );
     if (resp.success) {
       return resp.data;

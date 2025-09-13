@@ -40,7 +40,6 @@ export class CopilotChatClient {
 
       return await this.#doSendRequest(messages, onResponse, options, tools);
     } catch (error) {
-      console.error("Error sending chat messages:", error);
       return {
         success: false,
         error: error.message,
@@ -67,7 +66,6 @@ export class CopilotChatClient {
 
       return await this.#doSendRequest(messages, null, options, tools, false);
     } catch (error) {
-      console.error("Error sending chat messages:", error);
       return {
         success: false,
         error: error.message,
@@ -93,7 +91,6 @@ export class CopilotChatClient {
 
       return await this.#doSendOpenaiRequest(payload, onResponse);
     } catch (error) {
-      console.error("Error sending chat messages:", error);
       return {
         success: false,
         error: error.message,
@@ -118,7 +115,6 @@ export class CopilotChatClient {
 
       return await this.#doSendOpenaiRequest(payload);
     } catch (error) {
-      console.error("Error sending chat messages:", error);
       return {
         success: false,
         error: error.message,
@@ -131,7 +127,6 @@ export class CopilotChatClient {
     const { token, expired } = this.auth.getGithubToken();
     if (!token || expired) {
       if (refreshToken) {
-        console.log("GitHub token not valid, attempting to refresh...");
         await this.auth.signIn(true);
         const newStatus = this.auth.checkStatus();
         if (!newStatus.authenticated || !newStatus.tokenValid) {
@@ -140,7 +135,6 @@ export class CopilotChatClient {
             error: "Failed to sign in and refresh GitHub token",
           };
         }
-        console.log("GitHub token refreshed successfully");
       } else {
         return {
           success: false,
@@ -219,7 +213,6 @@ export class CopilotChatClient {
         };
       }
     } catch (error) {
-      console.error("Error sending chat messages:", error);
       return {
         success: false,
         error: error.message,
@@ -288,7 +281,6 @@ export class CopilotChatClient {
         );
       }
     } catch (error) {
-      console.error("Error sending chat messages:", error);
       return {
         success: false,
         error: error.message,
@@ -297,10 +289,10 @@ export class CopilotChatClient {
   }
 
   async #getDefaultModel() {
-    try {
-      return this.models.getCurrentModel();
-    } catch (error) {
-      console.error("Error getting default model:", error);
+    const currentModel = await this.models.getCurrentModel();
+    if (currentModel.success) {
+      return currentModel;
+    } else {
       return {
         success: true,
         modelConfig: {
@@ -400,88 +392,78 @@ export class CopilotChatClient {
             incompleteResult = {};
             break;
           }
-          try {
-            const parsed = JSON.parse(data);
-            const createTimeString = parsed.created
-              ? new Date(parsed.created * 1000).toISOString()
-              : new Date().toISOString();
-            if (parsed.choices && parsed.choices[0]) {
-              const choice = parsed.choices[0];
-              if (choice.finish_reason) {
-                if (
-                  choice.finish_reason === "tool_calls" &&
-                  incompleteResult.functions
-                ) {
-                  Object.values(incompleteResult.functions).forEach((func) => {
-                    if (func.arguments) {
-                      try {
-                        func.arguments = JSON.parse(func.arguments);
-                      } catch (e) {
-                        console.warn(
-                          `Failed to parse arguments for tool ${func.name}(${func.arguments}) : ${e.message}`,
-                        );
-                      }
-                    }
-                  });
-                }
-                const usage = parsed.usage;
-                if (usage) {
-                  incompleteResult = {
-                    ...incompleteResult,
-                    done_reason: "stop",
-                    model: parsed.model,
-                    created_at: createTimeString,
-                    prompt_eval_count: usage.prompt_tokens || 0,
-                    eval_count: usage.completion_tokens || 0,
-                  };
-                }
-              }
-              if (choice.delta) {
-                if (choice.delta.content) {
-                  const parsedMessage = {
-                    done: false,
-                    message: {
-                      role: "assistant",
-                      content: choice.delta.content ?? "",
-                    },
-                    model: parsed.model,
-                    created_at: createTimeString,
-                  };
-                  parsedMessages.push(parsedMessage);
-                }
-                if (
-                  choice.delta.tool_calls &&
-                  choice.delta.tool_calls.length > 0
-                ) {
-                  if (!incompleteResult.functions) {
-                    incompleteResult.functions = {};
-                    incompleteResult.currentToolFunc = null;
+          const parsed = JSON.parse(data);
+          const createTimeString = parsed.created
+            ? new Date(parsed.created * 1000).toISOString()
+            : new Date().toISOString();
+          if (parsed.choices && parsed.choices[0]) {
+            const choice = parsed.choices[0];
+            if (choice.finish_reason) {
+              if (
+                choice.finish_reason === "tool_calls" &&
+                incompleteResult.functions
+              ) {
+                Object.values(incompleteResult.functions).forEach((func) => {
+                  if (func.arguments) {
+                    func.arguments = JSON.parse(func.arguments);
                   }
-                  if (!incompleteResult.model)
-                    incompleteResult.model = parsed.model;
-                  if (!incompleteResult.created_at)
-                    incompleteResult.created_at = createTimeString;
-
-                  choice.delta.tool_calls.forEach((toolCallDelta) => {
-                    const toolFunc = toolCallDelta.function;
-                    if (toolFunc.name) {
-                      incompleteResult.functions[toolFunc.name] = {
-                        name: toolFunc.name,
-                        arguments: "",
-                      };
-                      incompleteResult.currentToolFunc =
-                        incompleteResult.functions[toolFunc.name];
-                    }
-                    if (toolFunc.arguments) {
-                      incompleteResult.currentToolFunc.arguments +=
-                        toolFunc.arguments;
-                    }
-                  });
-                }
+                });
+              }
+              const usage = parsed.usage;
+              if (usage) {
+                incompleteResult = {
+                  ...incompleteResult,
+                  done_reason: "stop",
+                  model: parsed.model,
+                  created_at: createTimeString,
+                  prompt_eval_count: usage.prompt_tokens || 0,
+                  eval_count: usage.completion_tokens || 0,
+                };
               }
             }
-          } catch (error) {
-            console.error("Error parsing data:", error, data);
+            if (choice.delta) {
+              if (choice.delta.content) {
+                const parsedMessage = {
+                  done: false,
+                  message: {
+                    role: "assistant",
+                    content: choice.delta.content ?? "",
+                  },
+                  model: parsed.model,
+                  created_at: createTimeString,
+                };
+                parsedMessages.push(parsedMessage);
+              }
+              if (
+                choice.delta.tool_calls &&
+                choice.delta.tool_calls.length > 0
+              ) {
+                if (!incompleteResult.functions) {
+                  incompleteResult.functions = {};
+                  incompleteResult.currentToolFunc = null;
+                }
+                if (!incompleteResult.model)
+                  incompleteResult.model = parsed.model;
+                if (!incompleteResult.created_at)
+                  incompleteResult.created_at = createTimeString;
+
+                choice.delta.tool_calls.forEach((toolCallDelta) => {
+                  const toolFunc = toolCallDelta.function;
+                  if (toolFunc.name) {
+                    incompleteResult.functions[toolFunc.name] = {
+                      name: toolFunc.name,
+                      arguments: "",
+                    };
+                    incompleteResult.currentToolFunc =
+                      incompleteResult.functions[toolFunc.name];
+                  }
+                  if (toolFunc.arguments) {
+                    incompleteResult.currentToolFunc.arguments +=
+                      toolFunc.arguments;
+                  }
+                });
+              }
+            }
           }
         }
       }
@@ -544,11 +526,7 @@ export class CopilotChatClient {
           if (data === "[DONE]") {
             break;
           }
-          try {
-            parsedMessages.push(JSON.parse(data));
-          } catch (error) {
-            console.error("Error parsing data:", error, data);
-          }
+          parsedMessages.push(JSON.parse(data));
         }
       }
     }

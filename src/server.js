@@ -1,85 +1,58 @@
+import fs from "fs";
 import express from "express";
 import { CopilotAuth } from "./utils/auth_client.js";
 import { CopilotChatClient } from "./utils/chat_client.js";
 import { CopilotModels } from "./utils/model_client.js";
 
-// Global variables
-let authClient = null;
-let modelClient = null;
-let chatClient = null;
 let authRefreshInterval = null;
-let copilotStatus = null;
 const PORT = process.env.PORT || 11434;
 const AUTH_REFRESH_INTERVAL = 25 * 60 * 1000;
 
-async function setupCopilotChat() {
-  try {
-    console.log("Initializing GitHub Copilot chat client...");
-    authClient = new CopilotAuth();
-    modelClient = new CopilotModels();
-    chatClient = new CopilotChatClient();
+function setupLogging() {
+  const logFileIndex = process.argv.indexOf("--log-file");
+  if (logFileIndex !== -1 && logFileIndex + 1 < process.argv.length) {
+    const logFile = process.argv[logFileIndex + 1];
+    const logStream = fs.createWriteStream(logFile, { flags: "a" });
 
-    await authClient.signIn(true);
-    const status = authClient.checkStatus();
-    if (!status.authenticated) {
-      copilotStatus = { ready: false, error: "auth" };
-      return { success: false, error: "Sing in to Github Copilot failed." };
-    }
-    if (!status.tokenValid) {
-      copilotStatus = { ready: false, error: "auth" };
-      return { success: false, error: "GitHub token is not valid." };
-    }
+    process.stdout.write = function (chunk, encoding, callback) {
+      return logStream.write(chunk, encoding, callback);
+    };
 
-    startAuthRefresh();
-    copilotStatus = { ready: true };
-    return { success: true };
-  } catch (error) {
-    copilotStatus = { ready: false, error: "unknown" };
-    return {
-      success: false,
-      error: `Failed to initialize Copilot client: ${error.message}.`,
+    process.stderr.write = function (chunk, encoding, callback) {
+      return logStream.write(chunk, encoding, callback);
     };
   }
 }
 
-function startAuthRefresh() {
+function setupTokenRefresh() {
   if (authRefreshInterval) {
     clearInterval(authRefreshInterval);
   }
-  authRefreshInterval = setInterval(
-    async () => {
-      try {
-        console.log("Refreshing GitHub Copilot authentication...");
-        await authClient.signIn(true);
-        const status = await authClient.checkStatus();
-        if (!status.authenticated) {
-          console.error("Sign in to Github Copilot failed.");
-        }
-        if (!status.tokenValid) {
-          console.error("GitHub token is not valid.");
-        }
-      } catch (error) {
-        console.error("Error checking auth status:", error);
+  authRefreshInterval = setInterval(async () => {
+    try {
+      console.log("Refreshing GitHub Copilot authentication...");
+      const authClient = new CopilotAuth();
+      await authClient.signIn(true);
+      const status = await authClient.checkStatus();
+      if (!status.authenticated) {
+        console.error("Sign in to Github Copilot failed.");
       }
-    },
-    AUTH_REFRESH_INTERVAL,
-  );
+      if (!status.tokenValid) {
+        console.error("GitHub token is not valid.");
+      }
+    } catch (error) {
+      console.error("Error checking auth status:", error);
+    }
+  }, AUTH_REFRESH_INTERVAL);
 }
 
 async function ensureCopilotSetup(_, res, next) {
-  if (!copilotStatus.ready) {
-    // If it needs authentication specifically, return 401
-    if (copilotStatus.error === "auth") {
-      return res.status(401).json({
-        error: "Authentication required",
-        message: "Please sign in to Github Copilot",
-      });
-    }
-
-    // Otherwise return a 500 error
-    return res.status(500).json({
-      error: "Failed to setup GitHub Copilot client",
-      message: "Please check your GitHub Copilot setup",
+  const authClient = new CopilotAuth();
+  const status = await authClient.checkStatus();
+  if (!status.authenticated || !status.tokenValid) {
+    return res.status(401).json({
+      error: "Authentication required",
+      message: "Please sign in to Github Copilot",
     });
   }
   next();
@@ -87,6 +60,7 @@ async function ensureCopilotSetup(_, res, next) {
 
 async function handleModelFetchRequest(_, res) {
   try {
+    const modelClient = new CopilotModels();
     const modelsResult = await modelClient.getAvailableModels();
 
     if (modelsResult.success) {
@@ -128,6 +102,8 @@ async function handleChatRequest(req, res) {
   const options = req.body.options || {};
   options.model = model;
   const tools = req.body.tools || [];
+
+  const chatClient = new CopilotChatClient();
   try {
     if (stream) {
       // Set headers for response
@@ -182,6 +158,7 @@ async function handleChatRequest(req, res) {
 }
 
 async function handleOpenAIChatRequest(req, res) {
+  const chatClient = new CopilotChatClient();
   try {
     const stream = req.body.stream !== undefined ? req.body.stream : false;
     if (stream) {
@@ -259,7 +236,8 @@ app.post("/v1/chat/completions", ensureCopilotSetup, (req, res) => {
 });
 
 // Add enhanced error handling middleware
-app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+app.use((err, req, res, next) => {
+  // eslint-disable-line no-unused-vars
   console.error("Unhandled server error:", err);
   res.status(500).json({
     error: "Internal server error",
@@ -271,18 +249,8 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 // Start the server
 app.listen(PORT, () => {
   console.log(`GitHub Copilot Ollama server running on port ${PORT}`);
-  // Initialize client on startup
-  setupCopilotChat()
-    .then((result) => {
-      if (result.success) {
-        console.log("Github Copilot client setup successfully");
-      } else {
-        console.error("Github Copilot client setup failed:", result.error);
-      }
-    })
-    .catch((error) => {
-      console.error("Error during Github Copilot setup:", error);
-    });
+  setupLogging();
+  setupTokenRefresh();
 });
 
 // Handle shutdown gracefully
