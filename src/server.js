@@ -6,7 +6,8 @@ import { CopilotModels } from "./utils/model_client.js";
 
 let authRefreshInterval = null;
 const PORT = process.env.PORT || 11434;
-const AUTH_REFRESH_INTERVAL = 25 * 60 * 1000;
+const TOKEN_REFRESH_INTERVAL = 30 * 1000;
+const REFRESH_BEFORE_EXPIRY = 5 * 60 * 1000;
 
 function setupLogging() {
   const logFileIndex = process.argv.indexOf("--log-file");
@@ -30,25 +31,38 @@ function setupTokenRefresh() {
   }
   authRefreshInterval = setInterval(async () => {
     try {
-      console.log("Refreshing GitHub Copilot authentication...");
+      console.log("Checking GitHub Copilot authentication status...");
       const authClient = new CopilotAuth();
-      await authClient.signIn(true);
-      const status = await authClient.checkStatus();
-      if (!status.authenticated) {
-        console.error("Sign in to Github Copilot failed.");
-      }
-      if (!status.tokenValid) {
-        console.error("GitHub token is not valid.");
+      const status = authClient.checkStatus();
+
+      if (status.authenticated) {
+        const tokenInfo = authClient.getGithubToken();
+        if (
+          tokenInfo.expired ||
+          (tokenInfo.expires_at &&
+            tokenInfo.expires_at * 1000 - Date.now() < REFRESH_BEFORE_EXPIRY)
+        ) {
+          await authClient.signIn(true);
+          const newStatus = authClient.checkStatus();
+          if (!newStatus.authenticated) {
+            console.error("Sign in to Github Copilot failed.");
+          }
+          if (!newStatus.tokenValid) {
+            console.error("GitHub token is not valid.");
+          }
+        }
+      } else {
+        console.error("Not authenticated with GitHub Copilot.");
       }
     } catch (error) {
       console.error("Error checking auth status:", error);
     }
-  }, AUTH_REFRESH_INTERVAL);
+  }, TOKEN_REFRESH_INTERVAL);
 }
 
 async function ensureCopilotSetup(_, res, next) {
   const authClient = new CopilotAuth();
-  const status = await authClient.checkStatus();
+  const status = authClient.checkStatus();
   if (!status.authenticated || !status.tokenValid) {
     return res.status(401).json({
       error: "Authentication required",
@@ -236,8 +250,7 @@ app.post("/v1/chat/completions", ensureCopilotSetup, (req, res) => {
 });
 
 // Add enhanced error handling middleware
-app.use((err, req, res, next) => {
-  // eslint-disable-line no-unused-vars
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   console.error("Unhandled server error:", err);
   res.status(500).json({
     error: "Internal server error",

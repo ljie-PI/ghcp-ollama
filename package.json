@@ -1,6 +1,6 @@
 {
   "name": "@ljie-pi/ghcp-ollama",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Using LLMs provided by Github Copilot with Ollama APIs",
   "main": "src/server.js",
   "scripts": {

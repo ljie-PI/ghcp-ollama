@@ -140,7 +140,12 @@ export class CopilotAuth {
    *   Returns null if token retrieval fails
    */
   getGithubToken() {
-    const tokenInfo = { endpoint: null, token: null, expired: true };
+    const tokenInfo = {
+      endpoint: null,
+      token: null,
+      expired: true,
+      expires_at: null,
+    };
 
     try {
       if (fs.existsSync(this.githubTokenPath)) {
@@ -151,6 +156,7 @@ export class CopilotAuth {
         }
         tokenInfo.endpoint = tokenData.endpoints.api;
         tokenInfo.token = tokenData.token;
+        tokenInfo.expires_at = tokenData.expires_at;
         tokenInfo.expired = this.#checkTokenExpired(tokenData);
       }
 
@@ -330,7 +336,7 @@ export class CopilotAuth {
       const userInfo = await this.#getUserInfo(data.access_token);
       return {
         status: DeviceAuthStatus.COMPLETE,
-        user: userInfo && userInfo.login || "",
+        user: (userInfo && userInfo.login) || "",
         oauth_token: data.access_token,
       };
     }
@@ -383,7 +389,9 @@ export class CopilotAuth {
       "GET",
       headers,
       null,
-      { timeout: 3000 },
+      {
+        timeout: 3000,
+      },
     );
   }
 }
