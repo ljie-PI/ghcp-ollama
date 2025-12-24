@@ -42,17 +42,20 @@ function setupTokenRefresh() {
           (tokenInfo.expires_at &&
             tokenInfo.expires_at * 1000 - Date.now() < REFRESH_BEFORE_EXPIRY)
         ) {
+          console.log("GitHub token is expired. Resigning in...");
           await authClient.signIn(true);
-          const newStatus = authClient.checkStatus();
-          if (!newStatus.authenticated) {
-            console.error("Sign in to Github Copilot failed.");
-          }
-          if (!newStatus.tokenValid) {
-            console.error("GitHub token is not valid.");
-          }
         }
       } else {
-        console.error("Not authenticated with GitHub Copilot.");
+        console.log("Not authenticated. Attempting to sign in to GitHub Copilot...");
+        await authClient.signIn(true);
+      }
+
+      const newStatus = authClient.checkStatus();
+      if (!newStatus.authenticated) {
+        console.error("Sign in to Github Copilot failed.");
+      }
+      if (!newStatus.tokenValid) {
+        console.error("GitHub token is not valid.");
       }
     } catch (error) {
       console.error("Error checking auth status:", error);
