@@ -242,6 +242,12 @@ const app = express();
 app.use(express.json());
 
 // Ollama API endpoints
+app.get("/", (_, res) => {
+  return res.send("Ollama is running");
+});
+app.get("/api/version", (_, res) => {
+  return res.json({ version: "0.13.5" });
+});
 app.get("/api/tags", ensureCopilotSetup, async (req, res) => {
   return handleModelFetchRequest(req, res);
 });
