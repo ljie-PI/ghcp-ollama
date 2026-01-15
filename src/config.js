@@ -3,14 +3,9 @@ import path from "path";
 
 export function sysConfigPath() {
   if (process.env.XDG_CONFIG_HOME) {
-    return process.env.XDG_CONFIG_HOME;
+    return path.join(process.env.XDG_CONFIG_HOME, "ghcpo-server", "config");
   }
-
-  if (os.platform() === "win32") {
-    return path.join(os.homedir(), "AppData", "Local", "github-copilot");
-  }
-
-  return path.join(os.homedir(), ".config", "github-copilot");
+  return path.join(os.homedir(), ".ghcpo-server", "config");
 }
 
 export const editorConfig = {
