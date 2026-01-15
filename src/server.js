@@ -127,14 +127,13 @@ async function handleChatRequest(req, res) {
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
-      res.write("\n");
 
       const chatResult = await chatClient.sendStreamingRequest(
         messages,
         (respMessages, event) => {
           for (const respMessage of respMessages) {
             if (respMessage.message) {
-              res.write(`${JSON.stringify(respMessage)}\n\n`);
+              res.write(`${JSON.stringify(respMessage)}\n`);
             }
           }
           res.flush && res.flush();

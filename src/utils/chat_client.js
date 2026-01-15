@@ -480,8 +480,8 @@ export class CopilotChatClient {
     const createTimeString = openaiResp.created
       ? new Date(openaiResp.created * 1000).toISOString()
       : new Date().toISOString();
-    const prompt_eval_count = openaiResp.usage.prompt_tokens || 0;
-    const eval_count = openaiResp.usage.completion_tokens || 0;
+    const prompt_eval_count = openaiResp.usage?.prompt_tokens || 0;
+    const eval_count = openaiResp.usage?.completion_tokens || 0;
     const parsedMessage = {
       role: "assistant",
       content: "",
@@ -497,9 +497,11 @@ export class CopilotChatClient {
         parsedMessage.tool_calls.push(...choice.message.tool_calls);
       }
     }
-    for (const toolCall of parsedMessage.tool_calls) {
-      if (!toolCall.function.arguments) continue;
-      toolCall.function.arguments = JSON.parse(toolCall.function.arguments);
+    if (parsedMessage.tool_calls) {
+      for (const toolCall of parsedMessage.tool_calls) {
+        if (!toolCall.function?.arguments) continue;
+        toolCall.function.arguments = JSON.parse(toolCall.function.arguments);
+      }
     }
     return {
       model: model,

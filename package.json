@@ -30,7 +30,9 @@
     "eslint": "^9.35.0",
     "eslint-plugin-node": "^11.1.0",
     "globals": "^15.9.0",
-    "nodemon": "^3.1.9"
+    "nodemon": "^3.1.9",
+    "ollama": "^0.6.3",
+    "openai": "^6.16.0"
   },
   "engines": {
     "node": ">=18.0.0"

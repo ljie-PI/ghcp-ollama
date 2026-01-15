@@ -1,78 +1,57 @@
+import OpenAI from "openai";
+
 // Usage: node openai_textmsg_test.js [--no-stream]
 // --no-stream: Use non-streaming mode (default: streaming enabled)
 
-// Parse command line arguments with a default value of true for stream
 const args = process.argv.slice(2);
-const stream = args.includes("--no-stream") ? false : true;
+const stream = !args.includes("--no-stream");
 
-const payload = {
-  model: "claude-3.5-sonnet",
-  messages: [
-    {
-      role: "user",
-      content: "why is the sky blue?",
-    },
-    {
-      role: "assistant",
-      content: "due to rayleigh scattering.",
-    },
-    {
-      role: "user",
-      content: "how is that different than mie scattering?",
-    },
-  ],
-  stream: stream,
-};
-
-async function chat() {
+async function testTextMessage(openai, stream) {
   try {
-    const response = await fetch("http://localhost:11434/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+    const payload = {
+      model: "gpt-5.2",
+      messages: [
+        {
+          role: "user",
+          content: "why is the sky blue?",
+        },
+        {
+          role: "assistant",
+          content: "due to rayleigh scattering.",
+        },
+        {
+          role: "user",
+          content: "how is that different than mie scattering?",
+        },
+      ],
+      stream: stream,
+    };
 
     let fullResponse = "";
 
     if (stream) {
-      // Create a stream reader
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        // Decode the stream chunk and split by lines
-        const chunk = decoder.decode(value);
-        const lines = chunk.split("\n").filter((line) => line.trim());
-
-        for (const line of lines) {
-          console.log("Chunk received:", line);
-          if (line.includes("[DONE]")) {
-            break;
-          }
-
-          const data = JSON.parse(line.slice(6));
-          if (data.choices.length > 0) {
-            fullResponse += data.choices[0].delta.content;
-          }
+      const response = await openai.chat.completions.create(payload);
+      for await (const chunk of response) {
+        console.log("Chunk received:", JSON.stringify(chunk));
+        if (chunk.choices[0]?.delta?.content) {
+          fullResponse += chunk.choices[0].delta.content;
         }
       }
     } else {
-      const data = await response.json();
-      for (const choice of data.choices) {
-        fullResponse += choice.message.content;
-      }
+      const response = await openai.chat.completions.create(payload);
+      console.log("Response received:", JSON.stringify(response, null, 2));
+      fullResponse = response.choices[0].message.content;
     }
 
     console.log("====================\n");
     console.log("Full Response:\n", fullResponse);
   } catch (error) {
     console.error("Error:", error);
+    throw error;
   }
 }
 
-chat();
+const openai = new OpenAI({
+  baseURL: "http://localhost:11434/v1",
+});
+testTextMessage(openai, stream);
