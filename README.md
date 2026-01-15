@@ -10,6 +10,7 @@ This project aims to provide an Ollama-compatible API for interacting with the L
 - Set active Copilot model
 - Send chat requests and receive streaming responses
 - Ollama-compatible API endpoints for integration with existing tools
+- Anthropic Messages API endpoints for Anthropic SDK compatibility
 
 ## Requirements
 
@@ -131,6 +132,8 @@ The server provides the following endpoints:
 
 - `POST /v1/chat/completions`: The chat API with request/response in OpenAI format (also supported in Ollama).
 
+- `POST /v1/messages`: The chat API with request/response in Anthropic format.
+
 Since the server implements the same API endpoints as Ollama, you can use it with any tool that supports Ollama.
 
 You can run some tests after server started:
@@ -154,6 +157,9 @@ node tests/ollama_tools_test.js [--no-stream]
 
 #or in OpenAI format
 node tests/openai_tools_test.js [--no-stream]
+
+# or in Anthropic format
+node tests/anthropic_tools_test.js [--no-stream]
 ```
 
 - Chat with image input
@@ -162,4 +168,7 @@ node tests/ollama_image_test.js [--no-stream]
 
 # or in OpenAI format
 node tests/openai_image_test.js [--no-stream]
+
+# or in Anthropic format
+node tests/anthropic_image_test.js [--no-stream]
 ```

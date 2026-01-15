@@ -46,7 +46,9 @@ function setupTokenRefresh() {
           await authClient.signIn(true);
         }
       } else {
-        console.log("Not authenticated. Attempting to sign in to GitHub Copilot...");
+        console.log(
+          "Not authenticated. Attempting to sign in to GitHub Copilot...",
+        );
         await authClient.signIn(true);
       }
 
@@ -226,6 +228,66 @@ async function handleOpenAIChatRequest(req, res) {
   }
 }
 
+async function handleAnthropicChatRequest(req, res) {
+  const chatClient = new CopilotChatClient();
+  try {
+    const stream = req.body.stream !== undefined ? req.body.stream : false;
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+
+      const chatResult = await chatClient.sendStreamingAnthropicRequest(
+        req.body,
+        (respMessages, event) => {
+          for (const respMessage of respMessages) {
+            res.write(`event: ${respMessage.type}\n`);
+            res.write(`data: ${JSON.stringify(respMessage)}\n\n`);
+          }
+          res.flush && res.flush();
+          if (event === "end") {
+            res.end();
+          }
+        },
+      );
+
+      if (!chatResult.success) {
+        const resp = {
+          type: "error",
+          error: {
+            type: "internal_error",
+            message: chatResult.error,
+          },
+        };
+        res.write(`event: error\ndata: ${JSON.stringify(resp)}\n\n`);
+        res.end();
+      }
+    } else {
+      const result = await chatClient.sendAnthropicRequest(req.body);
+      if (result.success) {
+        return res.json(result.data);
+      } else {
+        return res.status(500).json({
+          type: "error",
+          error: {
+            type: "internal_error",
+            message: result.error,
+          },
+        });
+      }
+    }
+  } catch (error) {
+    console.error("Error in Anthropic chat request:", error);
+    return res.status(500).json({
+      type: "error",
+      error: {
+        type: "internal_error",
+        message: error.message,
+      },
+    });
+  }
+}
+
 function shutdown() {
   console.log("Shutting down server...");
 
@@ -253,12 +315,19 @@ app.get("/api/tags", ensureCopilotSetup, async (req, res) => {
 app.post("/api/chat", ensureCopilotSetup, (req, res) => {
   return handleChatRequest(req, res);
 });
+
+// OpenAI API endpoints
 app.post("/v1/chat/completions", ensureCopilotSetup, (req, res) => {
   return handleOpenAIChatRequest(req, res);
 });
 
+// Anthropic API endpoints
+app.post("/v1/messages", ensureCopilotSetup, (req, res) => {
+  return handleAnthropicChatRequest(req, res);
+});
+
 // Add enhanced error handling middleware
-app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+app.use((err, req, res, next) => {
   console.error("Unhandled server error:", err);
   res.status(500).json({
     error: "Internal server error",

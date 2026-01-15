@@ -17,6 +17,11 @@ All test files use official SDKs (Ollama and OpenAI) for cleaner API interaction
 - `openai_textmsg_test.js` - Test text message with OpenAI API
 - `openai_image_test.js` - Test image input with OpenAI API
 - `openai_tools_test.js` - Test tool invocation with OpenAI API
+### Anthropic Tests
+
+- `anthropic_textmsg_test.js` - Test text message with Anthropic API
+- `anthropic_image_test.js` - Test image input with Anthropic API
+- `anthropic_tools_test.js` - Test tool invocation with Anthropic API
 
 ## Running Tests
 
@@ -49,8 +54,3 @@ Or start it in the background:
 ```bash
 npm run server:start
 ```
-
-## Prerequisites
-
-- Node.js >= 18.0.0
-- Image file at `tests/images/vergil.jpg` for image input tests
