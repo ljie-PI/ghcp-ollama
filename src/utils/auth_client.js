@@ -38,8 +38,9 @@ const DeviceAuthStatus = Object.freeze({
 export class CopilotAuth {
   constructor() {
     this.configPath = sysConfigPath();
-    this.oauthTokenPath = path.join(this.configPath, "auth-token.json");
+    this.oauthTokenPath = path.join(this.configPath, "apps.json");
     this.githubTokenPath = path.join(this.configPath, "github-token.json");
+    this.appKey = `${GITHUB_HOST}:${CLIENT_ID}`; // "github.com:Iv1.b507a08c87ecfe98"
 
     if (!fs.existsSync(this.configPath)) {
       fs.mkdirSync(this.configPath, { recursive: true });
@@ -114,8 +115,29 @@ export class CopilotAuth {
     }
 
     try {
+      // Remove authentication info for current app from apps.json
       if (fs.existsSync(this.oauthTokenPath)) {
-        fs.unlinkSync(this.oauthTokenPath);
+        try {
+          const appsContent = fs.readFileSync(this.oauthTokenPath, "utf8");
+          const appsData = JSON.parse(appsContent);
+          
+          // Delete current app's data
+          delete appsData[this.appKey];
+          
+          // If there are other apps' data, save; otherwise delete the file
+          if (Object.keys(appsData).length > 0) {
+            fs.writeFileSync(
+              this.oauthTokenPath,
+              JSON.stringify(appsData, null, 2),
+              "utf8"
+            );
+          } else {
+            fs.unlinkSync(this.oauthTokenPath);
+          }
+        } catch (error) {
+          console.warn("Failed to update apps.json, deleting file:", error);
+          fs.unlinkSync(this.oauthTokenPath);
+        }
       }
 
       if (fs.existsSync(this.githubTokenPath)) {
@@ -172,13 +194,20 @@ export class CopilotAuth {
 
     try {
       if (fs.existsSync(this.oauthTokenPath)) {
-        const oauthContent = fs.readFileSync(this.oauthTokenPath, "utf8");
-        const oauthData = JSON.parse(oauthContent);
-        if (oauthData.user) {
-          authInfo.user = oauthData.user;
-        }
-        if (oauthData.oauth_token) {
-          authInfo.oauth_token = oauthData.oauth_token;
+        const appsContent = fs.readFileSync(this.oauthTokenPath, "utf8");
+        const appsData = JSON.parse(appsContent);
+        
+        // Extract data for current appKey from apps.json
+        // Format: {"github.com:Iv1.b507a08c87ecfe98": {"user": "...", "oauth_token": "...", "githubAppId": "..."}}
+        const appData = appsData[this.appKey];
+        
+        if (appData) {
+          if (appData.user) {
+            authInfo.user = appData.user;
+          }
+          if (appData.oauth_token) {
+            authInfo.oauth_token = appData.oauth_token;
+          }
         }
       }
 
@@ -239,11 +268,31 @@ export class CopilotAuth {
       }
 
       if (response.status === DeviceAuthStatus.COMPLETE) {
+        // Read existing apps.json (if exists)
+        let appsData = {};
+        if (fs.existsSync(this.oauthTokenPath)) {
+          try {
+            const existingContent = fs.readFileSync(this.oauthTokenPath, "utf8");
+            appsData = JSON.parse(existingContent);
+          } catch (error) {
+            console.warn("Failed to read existing apps.json, creating new one:", error);
+          }
+        }
+        
+        // Update or add authentication info for current app
+        appsData[this.appKey] = {
+          user: response.user,
+          oauth_token: response.oauth_token,
+          githubAppId: CLIENT_ID,
+        };
+        
+        // Write to apps.json
         fs.writeFileSync(
           this.oauthTokenPath,
-          JSON.stringify(response, null, 2),
+          JSON.stringify(appsData, null, 2),
           "utf8",
         );
+        
         console.log(
           `Successfully authenticated as GitHub user: ${response.user}`,
         );
@@ -375,23 +424,29 @@ export class CopilotAuth {
   }
 
   async #requestGitHubToken(oauthToken) {
-    const headers = {
-      Authorization: `Bearer ${oauthToken}`,
-      Accept: "application/json",
-      "User-Agent": "github-copilot",
-      "Copilot-Integration-Id": editorConfig.copilotIntegrationId,
-      "Editor-Version": `${editorConfig.editorInfo.name}/${editorConfig.editorInfo.version}`,
-      "Editor-Plugin-Version": `${editorConfig.editorPluginInfo.name}/${editorConfig.editorPluginInfo.version}`,
-    };
-    return await sendHttpRequest(
-      GITHUB_API_HOST,
-      COPILOT_API_KEY_ENDPOINT,
-      "GET",
-      headers,
-      null,
-      {
-        timeout: 3000,
-      },
-    );
+    try {
+      const headers = {
+        Authorization: `Bearer ${oauthToken}`,
+        Accept: "application/json",
+        "User-Agent": "github-copilot",
+        "Copilot-Integration-Id": editorConfig.copilotIntegrationId,
+        "Editor-Version": `${editorConfig.editorInfo.name}/${editorConfig.editorInfo.version}`,
+        "Editor-Plugin-Version": `${editorConfig.editorPluginInfo.name}/${editorConfig.editorPluginInfo.version}`,
+      };
+      
+      return await sendHttpRequest(
+        GITHUB_API_HOST,
+        COPILOT_API_KEY_ENDPOINT,
+        "GET",
+        headers,
+        null,
+        {
+          timeout: 3000,
+        },
+      );
+    } catch (error) {
+      console.error("Error requesting GitHub token:", error);
+      throw error;
+    }
   }
 }
