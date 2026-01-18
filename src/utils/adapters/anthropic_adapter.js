@@ -33,7 +33,7 @@ export class AnthropicAdapter extends BaseAdapter {
    */
   convertRequest(payload) {
     const openaiReq = {
-      model: payload.model || "gpt-4o-2024-11-20",
+      model: payload.model,
       messages: [],
       stream: payload.stream !== undefined ? payload.stream : false,
     };

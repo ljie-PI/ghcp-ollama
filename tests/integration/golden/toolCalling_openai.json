@@ -1,0 +1,98 @@
+{
+  "testCase": "toolCalling",
+  "endpoint": "openai",
+  "description": "Tool/function calling",
+  "generatedAt": "2026-01-18T11:19:14.427Z",
+  "request": {
+    "model": "gpt-4o-2024-11-20",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What's the weather in Tokyo?"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the current weather in a location",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string",
+                "description": "City name"
+              }
+            },
+            "required": [
+              "location"
+            ]
+          }
+        }
+      }
+    ],
+    "stream": false
+  },
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "tool_calls",
+        "index": 0,
+        "content_filter_results": {},
+        "message": {
+          "padding": "abcdefghijklmn",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "function": {
+                "arguments": "{\"location\":\"Tokyo\"}",
+                "name": "get_weather"
+              },
+              "id": "call_0DYyl8ia7fIxV2Kpp8cW0jTX",
+              "type": "function"
+            }
+          ]
+        }
+      }
+    ],
+    "id": "chatcmpl-CzL6IDLXKG4WlyqOyhfaaHKWV3ovm",
+    "usage": {
+      "completion_tokens": 15,
+      "completion_tokens_details": {
+        "accepted_prediction_tokens": 0,
+        "rejected_prediction_tokens": 0
+      },
+      "prompt_tokens": 55,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "total_tokens": 70
+    },
+    "model": "gpt-4o-2024-11-20",
+    "prompt_filter_results": [
+      {
+        "content_filter_results": {
+          "hate": {
+            "filtered": false,
+            "severity": "safe"
+          },
+          "self_harm": {
+            "filtered": false,
+            "severity": "safe"
+          },
+          "sexual": {
+            "filtered": false,
+            "severity": "safe"
+          },
+          "violence": {
+            "filtered": false,
+            "severity": "safe"
+          }
+        },
+        "prompt_index": 0
+      }
+    ],
+    "system_fingerprint": "fp_3eed281ddb"
+  }
+}

@@ -126,6 +126,8 @@ node src/server.js
 
 The server provides the following endpoints:
 
+- `GET /api/version`: Get Ollama version information.
+
 - `GET /api/tags`: List available models (similar to Ollama).
 
 - `POST /api/chat`: The chat API with request/response in Ollama format.
@@ -145,30 +147,91 @@ curl http://localhost:11434/api/tags
 
 - Chat with text messages
 ```bash
-node tests/ollama_textmsg_test.js [--no-stream]
+node tests/manual/ollama_textmsg_test.js [--no-stream]
 
 # or in OpenAI format
-node tests/openai_textmsg_test.js [--no-stream]
+node tests/manual/openai_textmsg_test.js [--no-stream]
+
+# or in Anthropic format
+node tests/manual/anthropic_textmsg_test.js [--no-stream]
 ```
 
 - Chat with tools
 ```bash
-node tests/ollama_tools_test.js [--no-stream]
+node tests/manual/ollama_tools_test.js [--no-stream]
 
 #or in OpenAI format
-node tests/openai_tools_test.js [--no-stream]
+node tests/manual/openai_tools_test.js [--no-stream]
 
 # or in Anthropic format
-node tests/anthropic_tools_test.js [--no-stream]
+node tests/manual/anthropic_tools_test.js [--no-stream]
 ```
 
 - Chat with image input
 ```bash
-node tests/ollama_image_test.js [--no-stream]
+node tests/manual/ollama_image_test.js [--no-stream]
 
 # or in OpenAI format
-node tests/openai_image_test.js [--no-stream]
+node tests/manual/openai_image_test.js [--no-stream]
 
 # or in Anthropic format
-node tests/anthropic_image_test.js [--no-stream]
+node tests/manual/anthropic_image_test.js [--no-stream]
+```
+
+## Testing
+
+This project has a comprehensive test suite including unit tests and integration tests.
+
+### Test Structure
+
+```
+tests/
+├── unit/                    # Unit tests (no server required)
+│   ├── adapters/           # Adapter unit tests
+│   ├── fixtures/           # Shared test fixtures
+│   └── helpers/            # Test utilities
+├── integration/            # Integration tests (requires running server)
+│   ├── golden/             # Golden output files for comparison
+│   └── utils/              # Integration test utilities
+└── manual/                 # Manual test scripts
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+npm test
+
+# Run unit tests only (fast, no server required)
+npm run test:unit
+
+# Run integration tests (requires server running)
+npm run test:integration
+
+# Run tests in watch mode
+npm run test:watch
+
+# Run tests with UI
+npm run test:ui
+
+# Run tests with coverage report
+npm run test:coverage
+```
+
+### Integration Tests
+
+Integration tests require the server to be running and authenticated:
+
+```bash
+# 1. Sign in to GitHub Copilot
+node src/ghcpo.js signin
+
+# 2. Start the server
+npm run dev
+
+# 3. Generate golden outputs (one-time, or when test cases change)
+npm run test:golden
+
+# 4. Run integration tests
+npm run test:integration
 ```

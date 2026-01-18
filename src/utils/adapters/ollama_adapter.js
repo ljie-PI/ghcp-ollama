@@ -13,6 +13,7 @@
  */
 
 import { BaseAdapter } from "./base_adapter.js";
+import { detectImageType } from "../image_utils.js";
 
 export class OllamaAdapter extends BaseAdapter {
   /**
@@ -61,12 +62,13 @@ export class OllamaAdapter extends BaseAdapter {
           });
         }
 
-        // Add images as image_url blocks
+        // Add images as image_url blocks with auto-detected media type
         message.images.forEach((base64Image) => {
+          const mediaType = detectImageType(base64Image);
           content.push({
             type: "image_url",
             image_url: {
-              url: `data:image/jpeg;base64,${base64Image}`,
+              url: `data:${mediaType};base64,${base64Image}`,
             },
           });
         });

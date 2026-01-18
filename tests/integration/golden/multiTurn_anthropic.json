@@ -1,0 +1,42 @@
+{
+  "testCase": "multiTurn",
+  "endpoint": "anthropic",
+  "description": "Multi-turn conversation",
+  "generatedAt": "2026-01-18T11:18:56.865Z",
+  "request": {
+    "model": "claude-sonnet-4.5",
+    "max_tokens": 100,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Remember the number 42."
+      },
+      {
+        "role": "assistant",
+        "content": "I will remember the number 42."
+      },
+      {
+        "role": "user",
+        "content": "What number did I ask you to remember?"
+      }
+    ]
+  },
+  "response": {
+    "id": "msg_1768735136860_ipn4vwhme",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "You asked me to remember the number 42."
+      }
+    ],
+    "model": "Claude Sonnet 4.5",
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 36,
+      "output_tokens": 13
+    }
+  }
+}

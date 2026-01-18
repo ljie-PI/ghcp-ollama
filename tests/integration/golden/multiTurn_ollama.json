@@ -1,0 +1,35 @@
+{
+  "testCase": "multiTurn",
+  "endpoint": "ollama",
+  "description": "Multi-turn conversation",
+  "generatedAt": "2026-01-18T11:18:49.764Z",
+  "request": {
+    "model": "gpt-4o-2024-11-20",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Remember the number 42."
+      },
+      {
+        "role": "assistant",
+        "content": "I will remember the number 42."
+      },
+      {
+        "role": "user",
+        "content": "What number did I ask you to remember?"
+      }
+    ],
+    "stream": false
+  },
+  "response": {
+    "model": "gpt-4o-2024-11-20",
+    "created_at": "2026-01-18T11:18:49.759Z",
+    "message": {
+      "role": "assistant",
+      "content": "You asked me to remember the number 42."
+    },
+    "done": true,
+    "prompt_eval_count": 38,
+    "eval_count": 11
+  }
+}

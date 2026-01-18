@@ -136,7 +136,7 @@ async function testMultiTurnWithTools(anthropic, stream) {
         if (toolUse.input && typeof toolUse.input === "string") {
           try {
             toolUse.input = JSON.parse(toolUse.input);
-          } catch (e) {
+          } catch {
             // Keep as string if parsing fails
           }
         }

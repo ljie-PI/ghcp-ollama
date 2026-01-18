@@ -1,0 +1,34 @@
+{
+  "testCase": "simpleText",
+  "endpoint": "anthropic",
+  "description": "Simple text completion",
+  "generatedAt": "2026-01-18T11:18:46.828Z",
+  "request": {
+    "model": "claude-sonnet-4.5",
+    "max_tokens": 100,
+    "messages": [
+      {
+        "role": "user",
+        "content": "What is 2+2? Reply with just the number."
+      }
+    ]
+  },
+  "response": {
+    "id": "msg_1768735126823_660datz2t",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "4"
+      }
+    ],
+    "model": "Claude Sonnet 4.5",
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 20,
+      "output_tokens": 5
+    }
+  }
+}

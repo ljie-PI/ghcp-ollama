@@ -12,3 +12,6 @@ logs
 *.njsproj
 *.sln
 .DS_Store
+
+# Test coverage
+coverage/

@@ -12,7 +12,14 @@
     "server:start": "node src/serverctl.js start",
     "server:stop": "node src/serverctl.js stop",
     "server:restart": "node src/serverctl.js restart",
-    "server:status": "node src/serverctl.js status"
+    "server:status": "node src/serverctl.js status",
+    "test": "vitest",
+    "test:unit": "vitest run tests/unit/",
+    "test:integration": "vitest run tests/integration/",
+    "test:watch": "vitest watch",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage",
+    "test:golden": "node tests/integration/utils/golden_generator.js"
   },
   "bin": {
     "ghcpo": "./src/ghcpo.js",
@@ -28,12 +35,15 @@
     "@types/express": "^4.17.21",
     "@types/minimist": "^1.2.5",
     "@types/node": "^20.14.10",
+    "@vitest/coverage-v8": "^4.0.17",
+    "@vitest/ui": "^4.0.17",
     "eslint": "^9.35.0",
     "eslint-plugin-node": "^11.1.0",
     "globals": "^15.9.0",
     "nodemon": "^3.1.9",
     "ollama": "^0.6.3",
-    "openai": "^6.16.0"
+    "openai": "^6.16.0",
+    "vitest": "^4.0.17"
   },
   "engines": {
     "node": ">=18.0.0"

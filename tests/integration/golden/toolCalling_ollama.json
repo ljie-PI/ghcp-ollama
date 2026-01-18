@@ -1,0 +1,60 @@
+{
+  "testCase": "toolCalling",
+  "endpoint": "ollama",
+  "description": "Tool/function calling",
+  "generatedAt": "2026-01-18T11:19:11.490Z",
+  "request": {
+    "model": "gpt-4o-2024-11-20",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What's the weather in Tokyo?"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get the current weather in a location",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {
+                "type": "string",
+                "description": "City name"
+              }
+            },
+            "required": [
+              "location"
+            ]
+          }
+        }
+      }
+    ],
+    "stream": false
+  },
+  "response": {
+    "model": "gpt-4o-2024-11-20",
+    "created_at": "2026-01-18T11:19:11.487Z",
+    "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": {
+              "location": "Tokyo"
+            },
+            "name": "get_weather"
+          },
+          "id": "call_Urc6vvvv6gi2Gv7Rwl7B8XOd",
+          "type": "function"
+        }
+      ]
+    },
+    "done": true,
+    "prompt_eval_count": 55,
+    "eval_count": 15
+  }
+}

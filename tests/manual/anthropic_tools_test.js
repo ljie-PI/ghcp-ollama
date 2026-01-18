@@ -119,7 +119,9 @@ async function testToolInvocation(anthropic, stream) {
           toolResponses[toolName].input = JSON.parse(
             toolResponses[toolName].input,
           );
-        } catch (e) {}
+        } catch {
+          // Keep as string if parsing fails
+        }
       }
     }
 

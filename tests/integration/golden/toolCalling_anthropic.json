@@ -1,0 +1,56 @@
+{
+  "testCase": "toolCalling",
+  "endpoint": "anthropic",
+  "description": "Tool/function calling",
+  "generatedAt": "2026-01-18T11:19:19.021Z",
+  "request": {
+    "model": "claude-sonnet-4.5",
+    "max_tokens": 200,
+    "messages": [
+      {
+        "role": "user",
+        "content": "What's the weather in Tokyo?"
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get the current weather in a location",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "City name"
+            }
+          },
+          "required": [
+            "location"
+          ]
+        }
+      }
+    ]
+  },
+  "response": {
+    "id": "msg_1768735159018_00feesztc",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "tooluse_YywKnjQbQviBxC-l5ycMKQ",
+        "name": "get_weather",
+        "input": {
+          "location": "Tokyo"
+        }
+      }
+    ],
+    "model": "Claude Sonnet 4.5",
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 572,
+      "output_tokens": 53
+    }
+  }
+}
