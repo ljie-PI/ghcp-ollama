@@ -327,7 +327,7 @@ app.post("/v1/messages", ensureCopilotSetup, (req, res) => {
 });
 
 // Add enhanced error handling middleware
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error("Unhandled server error:", err);
   res.status(500).json({
     error: "Internal server error",

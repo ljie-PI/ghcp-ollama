@@ -19,7 +19,7 @@ export default [
       'linebreak-style': ['error', 'unix'],
       'quotes': ['error', 'double'],
       'semi': ['error', 'always'],
-      'no-unused-vars': 'error',
+      'no-unused-vars': ['error', { 'argsIgnorePattern': '^_' }],
       'prefer-const': 'error',
       'no-var': 'error'
     }

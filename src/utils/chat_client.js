@@ -1,22 +1,42 @@
 /**
  * Client for handling chat interactions with GitHub Copilot.
  * Manages authentication, model selection, and streaming chat requests.
+ * 
+ * This client uses an adapter pattern to support multiple API formats:
+ * - Ollama format
+ * - OpenAI format
+ * - Anthropic format
+ * 
+ * All formats are converted to OpenAI format before sending to GitHub Copilot API,
+ * then responses are converted back to the original format.
  */
 
 import { CopilotAuth } from "./auth_client.js";
 import { CopilotModels } from "./model_client.js";
 import { sendHttpRequest, sendHttpStreamingRequest } from "./http_utils.js";
 import { editorConfig } from "../config.js";
+import { OllamaAdapter } from "./adapters/ollama_adapter.js";
+import { OpenAIAdapter } from "./adapters/openai_adapter.js";
+import { AnthropicAdapter } from "./adapters/anthropic_adapter.js";
 
 export class CopilotChatClient {
   constructor() {
     this.auth = new CopilotAuth();
     this.models = new CopilotModels();
+    
+    // Initialize adapters for each API format
+    this.#adapters = {
+      ollama: new OllamaAdapter(this),
+      openai: new OpenAIAdapter(this),
+      anthropic: new AnthropicAdapter(this),
+    };
   }
 
+  #adapters;
+
   /**
-   * Sends a streaming chat request to the Copilot API.
-   *
+   * Sends a streaming chat request (OLD Ollama API - for backward compatibility).
+   * 
    * @param {Array} messages - Array of chat messages to send
    * @param {Function} onResponse - Callback function to handle streaming responses
    * @param {Object} [options={}] - Additional options for the request
@@ -32,13 +52,24 @@ export class CopilotChatClient {
     tools = null,
     refreshToken = true,
   ) {
+    // Convert old Ollama API to new unified format
+    const defaultModel = await this.#getDefaultModel();
+    const payload = {
+      model: options.model || defaultModel.modelConfig.modelId,
+      messages: messages,
+      options: options,
+      tools: tools,
+      stream: true,
+    };
+    
     try {
       const tokenStatus = await this.#checkGithubToken(refreshToken);
       if (!tokenStatus.success) {
         return tokenStatus;
       }
 
-      return await this.#doSendRequest(messages, onResponse, options, tools);
+      const adapter = this.#adapters.ollama;
+      return await this.#doSendUnified(adapter, payload, onResponse, true);
     } catch (error) {
       return {
         success: false,
@@ -48,7 +79,7 @@ export class CopilotChatClient {
   }
 
   /**
-   * Sends a non-streaming chat request to the Copilot API.
+   * Sends a non-streaming chat request (OLD Ollama API - for backward compatibility).
    *
    * @param {Array} messages - Array of chat messages to send
    * @param {Object} [options={}] - Additional options for the request
@@ -58,13 +89,24 @@ export class CopilotChatClient {
    * @returns {object} Response of the non-streaming call
    */
   async sendRequest(messages, options = {}, tools = null, refreshToken = true) {
+    // Convert old Ollama API to new unified format
+    const defaultModel = await this.#getDefaultModel();
+    const payload = {
+      model: options.model || defaultModel.modelConfig.modelId,
+      messages: messages,
+      options: options,
+      tools: tools,
+      stream: false,
+    };
+    
     try {
       const tokenStatus = await this.#checkGithubToken(refreshToken);
       if (!tokenStatus.success) {
         return tokenStatus;
       }
 
-      return await this.#doSendRequest(messages, null, options, tools, false);
+      const adapter = this.#adapters.ollama;
+      return await this.#doSendUnified(adapter, payload, null, false);
     } catch (error) {
       return {
         success: false,
@@ -76,7 +118,7 @@ export class CopilotChatClient {
   /**
    * Sends a streaming OpenAI chat request to the Copilot API.
    *
-   * @param {Array} payload - The request of OpanAI request
+   * @param {Object} payload - The OpenAI request payload
    * @param {Function} onResponse - Callback function to handle streaming responses
    * @param {boolean} [refreshToken=true] - Whether to attempt token refresh if invalid
    *
@@ -89,7 +131,8 @@ export class CopilotChatClient {
         return tokenStatus;
       }
 
-      return await this.#doSendOpenaiRequest(payload, onResponse);
+      const adapter = this.#adapters.openai;
+      return await this.#doSendUnified(adapter, payload, onResponse, true);
     } catch (error) {
       return {
         success: false,
@@ -101,7 +144,7 @@ export class CopilotChatClient {
   /**
    * Sends a non-streaming OpenAI chat request to the Copilot API.
    *
-   * @param {Array} payload - The request of OpanAI request
+   * @param {Object} payload - The OpenAI request payload
    * @param {boolean} [refreshToken=true] - Whether to attempt token refresh if invalid
    *
    * @returns {object} Response of the non-streaming call
@@ -113,7 +156,8 @@ export class CopilotChatClient {
         return tokenStatus;
       }
 
-      return await this.#doSendOpenaiRequest(payload);
+      const adapter = this.#adapters.openai;
+      return await this.#doSendUnified(adapter, payload, null, false);
     } catch (error) {
       return {
         success: false,
@@ -125,7 +169,7 @@ export class CopilotChatClient {
   /**
    * Sends a streaming Anthropic message request to the Copilot API.
    *
-   * @param {Array} payload - The request of Anthropic message request
+   * @param {Object} payload - The Anthropic request payload
    * @param {Function} onResponse - Callback function to handle streaming responses
    * @param {boolean} [refreshToken=true] - Whether to attempt token refresh if invalid
    *
@@ -142,7 +186,8 @@ export class CopilotChatClient {
         return tokenStatus;
       }
 
-      return await this.#doSendAnthropicRequest(payload, onResponse);
+      const adapter = this.#adapters.anthropic;
+      return await this.#doSendUnified(adapter, payload, onResponse, true);
     } catch (error) {
       return {
         success: false,
@@ -154,7 +199,7 @@ export class CopilotChatClient {
   /**
    * Sends a non-streaming Anthropic message request to the Copilot API.
    *
-   * @param {Array} payload - The request of Anthropic message request
+   * @param {Object} payload - The Anthropic request payload
    * @param {boolean} [refreshToken=true] - Whether to attempt token refresh if invalid
    *
    * @returns {object} Response of the non-streaming call
@@ -166,7 +211,8 @@ export class CopilotChatClient {
         return tokenStatus;
       }
 
-      return await this.#doSendAnthropicRequest(payload);
+      const adapter = this.#adapters.anthropic;
+      return await this.#doSendUnified(adapter, payload, null, false);
     } catch (error) {
       return {
         success: false,
@@ -175,8 +221,11 @@ export class CopilotChatClient {
     }
   }
 
+  /**
+   * Checks if the GitHub token is valid and refreshes if needed.
+   * @private
+   */
   async #checkGithubToken(refreshToken) {
-    // Quick check if the token is valid
     const { token, expired } = this.auth.getGithubToken();
     if (!token || expired) {
       if (refreshToken) {
@@ -198,13 +247,12 @@ export class CopilotChatClient {
     return { success: true };
   }
 
-  async #doSendRequest(
-    messages,
-    onResponse,
-    options = {},
-    tools,
-    stream = true,
-  ) {
+  /**
+   * Unified request handler for all API types.
+   * Uses adapters to convert between API formats and OpenAI format.
+   * @private
+   */
+  async #doSendUnified(adapter, payload, onResponse, stream) {
     const { token, endpoint } = this.auth.getGithubToken();
     if (!token) {
       return {
@@ -221,144 +269,8 @@ export class CopilotChatClient {
 
     try {
       const url = new URL(`${endpoint}/chat/completions`);
-      const defaultModel = await this.#getDefaultModel();
-      const headers = {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "Copilot-Integration-Id": editorConfig.copilotIntegrationId,
-        "Editor-Version": `${editorConfig.editorInfo.name}/${editorConfig.editorInfo.version}`,
-        "Editor-Plugin-Version": `${editorConfig.editorPluginInfo.name}/${editorConfig.editorPluginInfo.version}`,
-      };
-      if (messages.some((message) => message.images)) {
-        headers["Copilot-Vision-Request"] = "true";
-      }
-      const payload = this.#convertToOpenaiReq(
-        messages,
-        tools,
-        options,
-        options.model || defaultModel.modelConfig.modelId,
-        stream,
-      );
-
-      if (stream) {
-        return await sendHttpStreamingRequest(
-          url.hostname,
-          url.pathname,
-          "POST",
-          headers,
-          payload,
-          {
-            onResponse,
-            parseResp: this.#parseToOllamaResp,
-          },
-        );
-      } else {
-        const response = await sendHttpRequest(
-          url.hostname,
-          url.pathname,
-          "POST",
-          headers,
-          payload,
-        );
-        return {
-          success: true,
-          data: this.#parseToNonStreamingOllamaResp(response.data),
-        };
-      }
-    } catch (error) {
-      return {
-        success: false,
-        error: error.message,
-      };
-    }
-  }
-
-  async #doSendOpenaiRequest(payload, onResponse = null) {
-    const { token, endpoint } = this.auth.getGithubToken();
-    if (!token) {
-      return {
-        success: false,
-        error: "Could not determine GitHub token",
-      };
-    }
-    if (!endpoint) {
-      return {
-        success: false,
-        error: "Could not determine API endpoint",
-      };
-    }
-
-    try {
-      const stream = payload.stream !== undefined ? payload.stream : false;
-      const url = new URL(`${endpoint}/chat/completions`);
-      const headers = {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "Copilot-Integration-Id": editorConfig.copilotIntegrationId,
-        "Editor-Version": `${editorConfig.editorInfo.name}/${editorConfig.editorInfo.version}`,
-      };
-      const containsImageInput = payload.messages.some((message) => {
-        const content = message.content;
-        if (content && Array.isArray(content)) {
-          return content.some((item) => item.type === "image_url");
-        }
-        return false;
-      });
-      if (containsImageInput) {
-        headers["Copilot-Vision-Request"] = "true";
-      }
-      const defaultModel = await this.#getDefaultModel();
-      if (!payload.model) {
-        payload.model = defaultModel.modelConfig.modelId;
-      }
-
-      if (stream) {
-        return await sendHttpStreamingRequest(
-          url.hostname,
-          url.pathname,
-          "POST",
-          headers,
-          payload,
-          {
-            onResponse,
-            parseResp: this.#forwardOpenaiResp,
-          },
-        );
-      } else {
-        return await sendHttpRequest(
-          url.hostname,
-          url.pathname,
-          "POST",
-          headers,
-          payload,
-        );
-      }
-    } catch (error) {
-      return {
-        success: false,
-        error: error.message,
-      };
-    }
-  }
-
-  async #doSendAnthropicRequest(payload, onResponse = null) {
-    const { token, endpoint } = this.auth.getGithubToken();
-    if (!token) {
-      return {
-        success: false,
-        error: "Could not determine GitHub token",
-      };
-    }
-    if (!endpoint) {
-      return {
-        success: false,
-        error: "Could not determine API endpoint",
-      };
-    }
-
-    try {
-      const stream = payload.stream !== undefined ? payload.stream : false;
-      const url = new URL(`${endpoint}/chat/completions`);
+      
+      // Build headers
       const headers = {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
@@ -367,19 +279,21 @@ export class CopilotChatClient {
         "Editor-Plugin-Version": `${editorConfig.editorPluginInfo.name}/${editorConfig.editorPluginInfo.version}`,
       };
 
-      const containsImageInput = payload.messages.some((message) => {
-        const content = message.content;
-        if (content && Array.isArray(content)) {
-          return content.some((item) => item.type === "image");
-        }
-        return false;
-      });
-      if (containsImageInput) {
+      // Detect vision request using adapter
+      if (adapter.detectVisionRequest(payload)) {
         headers["Copilot-Vision-Request"] = "true";
       }
 
-      const openaiPayload = this.#convertAnthropicToOpenaiReq(payload);
+      // Convert payload to OpenAI format using adapter
+      const openaiPayload = adapter.convertRequest(payload);
+      
+      // Set default model if not specified
+      if (!openaiPayload.model) {
+        const defaultModel = await this.#getDefaultModel();
+        openaiPayload.model = defaultModel.modelConfig.modelId;
+      }
 
+      // Handle streaming vs non-streaming
       if (stream) {
         return await sendHttpStreamingRequest(
           url.hostname,
@@ -389,7 +303,7 @@ export class CopilotChatClient {
           openaiPayload,
           {
             onResponse,
-            parseResp: this.#parseToAnthropicResp,
+            parseResp: (buffer, state) => adapter.parseStreamChunk(buffer, state || {}),
           },
         );
       } else {
@@ -402,7 +316,7 @@ export class CopilotChatClient {
         );
         return {
           success: true,
-          data: this.#parseToNonStreamingAnthropicResp(response.data),
+          data: adapter.parseResponse(response.data),
         };
       }
     } catch (error) {
@@ -413,6 +327,10 @@ export class CopilotChatClient {
     }
   }
 
+  /**
+   * Gets the default model configuration.
+   * @private
+   */
   async #getDefaultModel() {
     const currentModel = await this.models.getCurrentModel();
     if (currentModel.success) {
@@ -427,665 +345,5 @@ export class CopilotChatClient {
         },
       };
     }
-  }
-
-  #convertToOpenaiReq(messages, tools, options, model, stream) {
-    const openaiReq = {
-      ...options,
-      model: model,
-      tools: tools,
-      stream: stream,
-      messages: [],
-    };
-
-    // Convert each message to OpenAI format
-    // Support: text content (string/array), images, tool_calls, tool results
-    for (const message of messages) {
-      const openaiMessage = {
-        role: message.role,
-      };
-
-      // Handle content: prioritize images > existing content format
-      if (message.images && message.images.length > 0) {
-        // Ollama images format → OpenAI image_url format
-        const content = [];
-
-        // Add text content if present
-        if (message.content) {
-          content.push({
-            type: "text",
-            text: message.content,
-          });
-        }
-
-        // Add images as image_url blocks
-        message.images.forEach((base64Image) => {
-          content.push({
-            type: "image_url",
-            image_url: {
-              url: `data:image/jpeg;base64,${base64Image}`,
-            },
-          });
-        });
-
-        openaiMessage.content = content;
-      } else if (message.content !== undefined) {
-        // Preserve original content format (string or array)
-        openaiMessage.content = message.content;
-      }
-
-      // Handle tool_calls (for assistant messages)
-      if (message.tool_calls && message.tool_calls.length > 0) {
-        openaiMessage.tool_calls = message.tool_calls.map((tc) => {
-          const toolCall = {
-            type: tc.type || "function",
-            function: {
-              name: tc.function.name,
-              arguments:
-                typeof tc.function.arguments === "string"
-                  ? tc.function.arguments
-                  : JSON.stringify(tc.function.arguments),
-            },
-          };
-
-          if (tc.id) {
-            toolCall.id = tc.id;
-          }
-
-          return toolCall;
-        });
-      }
-
-      // Handle tool result messages (role="tool")
-      if (message.tool_call_id) {
-        openaiMessage.tool_call_id = message.tool_call_id;
-      }
-
-      // Handle function messages (role="function")
-      if (
-        message.name &&
-        (message.role === "function" || message.role === "tool")
-      ) {
-        openaiMessage.name = message.name;
-      }
-
-      openaiReq.messages.push(openaiMessage);
-    }
-
-    return openaiReq;
-  }
-
-  #convertAnthropicToOpenaiReq(payload) {
-    const openaiReq = {
-      model: payload.model || "gpt-4o-2024-11-20",
-      messages: [],
-      stream: payload.stream !== undefined ? payload.stream : false,
-    };
-
-    if (payload.max_tokens !== undefined) {
-      openaiReq.max_tokens = payload.max_tokens;
-    }
-    if (payload.temperature !== undefined) {
-      openaiReq.temperature = payload.temperature;
-    }
-    if (payload.top_p !== undefined) {
-      openaiReq.top_p = payload.top_p;
-    }
-    if (payload.top_k !== undefined) {
-      openaiReq.top_k = payload.top_k;
-    }
-
-    if (payload.system) {
-      openaiReq.messages.push({
-        role: "system",
-        content: payload.system,
-      });
-    }
-
-    const convertedTools = [];
-    if (payload.tools && payload.tools.length > 0) {
-      for (const tool of payload.tools) {
-        if (tool.type === "function" && tool.function) {
-          convertedTools.push({
-            type: "function",
-            function: {
-              name: tool.function.name,
-              description: tool.function.description,
-              parameters: tool.function.input_schema,
-            },
-          });
-        } else if (tool.name && tool.input_schema) {
-          convertedTools.push({
-            type: "function",
-            function: {
-              name: tool.name,
-              description: tool.description,
-              parameters: tool.input_schema,
-            },
-          });
-        }
-      }
-      openaiReq.tools = convertedTools;
-    }
-
-    for (const message of payload.messages) {
-      const openaiMessage = {
-        role: message.role === "assistant" ? "assistant" : "user",
-      };
-
-      if (Array.isArray(message.content)) {
-        const content = [];
-        for (const block of message.content) {
-          if (block.type === "text") {
-            content.push({
-              type: "text",
-              text: block.text,
-            });
-          } else if (block.type === "image") {
-            const mediaType = block.source.media_type || "image/jpeg";
-            content.push({
-              type: "image_url",
-              image_url: {
-                url: `data:${mediaType};base64,${block.source.data}`,
-              },
-            });
-          } else if (
-            block.type === "tool_use" &&
-            message.role === "assistant"
-          ) {
-            if (!openaiMessage.tool_calls) {
-              openaiMessage.tool_calls = [];
-            }
-            openaiMessage.tool_calls.push({
-              id: block.id,
-              type: "function",
-              function: {
-                name: block.name,
-                arguments:
-                  typeof block.input === "string"
-                    ? block.input
-                    : JSON.stringify(block.input),
-              },
-            });
-          } else if (block.type === "tool_result") {
-            if (!openaiMessage.tool_calls) {
-              openaiMessage.tool_calls = [];
-            }
-            openaiMessage.tool_calls.push({
-              id: block.tool_use_id,
-              type: "function",
-              function: {
-                name: "tool_result",
-                arguments: JSON.stringify({ result: block.content }),
-              },
-            });
-          }
-        }
-        if (content.length > 0) {
-          openaiMessage.content = content;
-        }
-      } else {
-        openaiMessage.content = message.content;
-      }
-
-      openaiReq.messages.push(openaiMessage);
-    }
-
-    return openaiReq;
-  }
-
-  #parseToOllamaResp(buffer, incompleteResult) {
-    const respMessages = buffer.split("\n\n");
-    const remainBuffer = respMessages.pop();
-    const parsedMessages = [];
-
-    for (const respMessage of respMessages) {
-      if (!respMessage || respMessage.trim() === "") continue;
-
-      const lines = respMessage.split("\n");
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") {
-            if (
-              incompleteResult.functions &&
-              Object.keys(incompleteResult.functions).length > 0
-            ) {
-              const toolCalls = Object.values(incompleteResult.functions).map(
-                (func) => ({
-                  function: { ...func },
-                }),
-              );
-
-              const toolCallMessage = {
-                done: false,
-                message: {
-                  role: "assistant",
-                  content: "",
-                  tool_calls: toolCalls,
-                },
-                model: incompleteResult.model || "",
-                created_at:
-                  incompleteResult.created_at || new Date().toISOString(),
-              };
-              parsedMessages.push(toolCallMessage);
-              incompleteResult.currentToolFunc = null;
-              delete incompleteResult.functions;
-            }
-            const parsedMessage = {
-              ...incompleteResult,
-              done: true,
-              message: {
-                role: "assistant",
-                content: "",
-              },
-            };
-            parsedMessages.push(parsedMessage);
-            incompleteResult = {};
-            break;
-          }
-          const parsed = JSON.parse(data);
-          const createTimeString = parsed.created
-            ? new Date(parsed.created * 1000).toISOString()
-            : new Date().toISOString();
-          if (parsed.choices && parsed.choices[0]) {
-            const choice = parsed.choices[0];
-            if (choice.finish_reason) {
-              if (
-                choice.finish_reason === "tool_calls" &&
-                incompleteResult.functions
-              ) {
-                Object.values(incompleteResult.functions).forEach((func) => {
-                  if (func.arguments) {
-                    func.arguments = JSON.parse(func.arguments);
-                  }
-                });
-              }
-              const usage = parsed.usage;
-              if (usage) {
-                incompleteResult = {
-                  ...incompleteResult,
-                  done_reason: "stop",
-                  model: parsed.model,
-                  created_at: createTimeString,
-                  prompt_eval_count: usage.prompt_tokens || 0,
-                  eval_count: usage.completion_tokens || 0,
-                };
-              }
-            }
-            if (choice.delta) {
-              if (choice.delta.content) {
-                const parsedMessage = {
-                  done: false,
-                  message: {
-                    role: "assistant",
-                    content: choice.delta.content ?? "",
-                  },
-                  model: parsed.model,
-                  created_at: createTimeString,
-                };
-                parsedMessages.push(parsedMessage);
-              }
-              if (
-                choice.delta.tool_calls &&
-                choice.delta.tool_calls.length > 0
-              ) {
-                if (!incompleteResult.functions) {
-                  incompleteResult.functions = {};
-                  incompleteResult.currentToolFunc = null;
-                }
-                if (!incompleteResult.model)
-                  incompleteResult.model = parsed.model;
-                if (!incompleteResult.created_at)
-                  incompleteResult.created_at = createTimeString;
-
-                choice.delta.tool_calls.forEach((toolCallDelta) => {
-                  const toolFunc = toolCallDelta.function;
-                  if (toolFunc.name) {
-                    incompleteResult.functions[toolFunc.name] = {
-                      name: toolFunc.name,
-                      arguments: "",
-                    };
-                    incompleteResult.currentToolFunc =
-                      incompleteResult.functions[toolFunc.name];
-                  }
-                  if (toolFunc.arguments) {
-                    incompleteResult.currentToolFunc.arguments +=
-                      toolFunc.arguments;
-                  }
-                });
-              }
-            }
-          }
-        }
-      }
-    }
-
-    return {
-      parsedMessages,
-      remainBuffer,
-    };
-  }
-
-  #parseToNonStreamingOllamaResp(openaiResp) {
-    const model = openaiResp.model;
-    const createTimeString = openaiResp.created
-      ? new Date(openaiResp.created * 1000).toISOString()
-      : new Date().toISOString();
-    const prompt_eval_count = openaiResp.usage?.prompt_tokens || 0;
-    const eval_count = openaiResp.usage?.completion_tokens || 0;
-    const parsedMessage = {
-      role: "assistant",
-      content: "",
-    };
-    for (const choice of openaiResp.choices) {
-      if (choice.message?.content) {
-        parsedMessage.content += choice.message.content;
-      }
-      if (choice.message?.tool_calls) {
-        if (!parsedMessage.tool_calls) {
-          parsedMessage.tool_calls = [];
-        }
-        parsedMessage.tool_calls.push(...choice.message.tool_calls);
-      }
-    }
-    if (parsedMessage.tool_calls) {
-      for (const toolCall of parsedMessage.tool_calls) {
-        if (!toolCall.function?.arguments) continue;
-        toolCall.function.arguments = JSON.parse(toolCall.function.arguments);
-      }
-    }
-    return {
-      model: model,
-      created_at: createTimeString,
-      message: parsedMessage,
-      done: true,
-      prompt_eval_count: prompt_eval_count,
-      eval_count: eval_count,
-    };
-  }
-
-  #parseToNonStreamingAnthropicResp(openaiResp) {
-    const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const contentBlocks = [];
-
-    for (const choice of openaiResp.choices) {
-      const message = choice.message;
-
-      if (message?.content && message.content !== "") {
-        contentBlocks.push({
-          type: "text",
-          text: message.content,
-        });
-      }
-
-      if (message?.tool_calls && message.tool_calls.length > 0) {
-        for (const toolCall of message.tool_calls) {
-          let input = {};
-          if (toolCall.function?.arguments) {
-            try {
-              input = JSON.parse(toolCall.function.arguments);
-            } catch {
-              input = { arguments: toolCall.function.arguments };
-            }
-          }
-
-          contentBlocks.push({
-            type: "tool_use",
-            id:
-              toolCall.id ||
-              `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-            name: toolCall.function?.name || "unknown",
-            input: input,
-          });
-        }
-      }
-    }
-
-    const finishReason = openaiResp.choices[0]?.finish_reason || "stop";
-    const stopReasonMap = {
-      stop: "end_turn",
-      length: "max_tokens",
-      tool_calls: "tool_use",
-      content_filter: "stop_sequence",
-    };
-
-    return {
-      id: messageId,
-      type: "message",
-      role: "assistant",
-      content: contentBlocks,
-      model: openaiResp.model,
-      stop_reason: stopReasonMap[finishReason] || "end_turn",
-      stop_sequence: null,
-      usage: {
-        input_tokens: openaiResp.usage?.prompt_tokens || 0,
-        output_tokens: openaiResp.usage?.completion_tokens || 0,
-      },
-    };
-  }
-
-  #forwardOpenaiResp(buffer) {
-    const respMessages = buffer.split("\n\n");
-    const remainBuffer = respMessages.pop();
-    const parsedMessages = [];
-
-    for (const respMessage of respMessages) {
-      if (!respMessage || respMessage.trim() === "") continue;
-
-      const lines = respMessage.split("\n");
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") {
-            break;
-          }
-          parsedMessages.push(JSON.parse(data));
-        }
-      }
-    }
-
-    return {
-      parsedMessages,
-      remainBuffer,
-    };
-  }
-
-  #parseToAnthropicResp(buffer, incompleteResult) {
-    const respMessages = buffer.split("\n\n");
-    const remainBuffer = respMessages.pop();
-    const parsedMessages = [];
-
-    for (const respMessage of respMessages) {
-      if (!respMessage || respMessage.trim() === "") continue;
-
-      const lines = respMessage.split("\n");
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") {
-            if (incompleteResult.hasStartedCurrentBlock) {
-              parsedMessages.push({
-                type: "content_block_stop",
-                index: incompleteResult.currentIndex,
-              });
-            }
-            if (incompleteResult.outputTokens > 0) {
-              parsedMessages.push({
-                type: "message_delta",
-                delta: {
-                  stop_reason: incompleteResult.stopReason || "end_turn",
-                  stop_sequence: null,
-                },
-                usage: {
-                  input_tokens: incompleteResult.inputTokens,
-                  output_tokens: incompleteResult.outputTokens,
-                },
-              });
-            }
-            parsedMessages.push({ type: "message_stop" });
-            incompleteResult = {};
-            break;
-          }
-
-          const parsed = JSON.parse(data);
-
-          if (!incompleteResult.hasStarted) {
-            incompleteResult.messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            incompleteResult.model = parsed.model;
-            incompleteResult.currentIndex = -1;
-            incompleteResult.contentBlocks = [];
-            incompleteResult.textAccumulator = "";
-            incompleteResult.hasStarted = true;
-            incompleteResult.hasStartedCurrentBlock = false;
-            incompleteResult.stopReason = null;
-            incompleteResult.outputTokens = 0;
-            incompleteResult.inputTokens = 0;
-
-            parsedMessages.push({
-              type: "message_start",
-              message: {
-                id: incompleteResult.messageId,
-                type: "message",
-                role: "assistant",
-                content: [],
-                model: incompleteResult.model,
-                stop_reason: null,
-                stop_sequence: null,
-                usage: {
-                  input_tokens: parsed.usage?.prompt_tokens || 0,
-                  output_tokens: 0,
-                },
-              },
-            });
-
-            if (parsed.usage?.prompt_tokens) {
-              incompleteResult.inputTokens = parsed.usage.prompt_tokens;
-            }
-          } else if (parsed.usage?.prompt_tokens) {
-            incompleteResult.inputTokens = parsed.usage.prompt_tokens;
-          }
-
-          if (parsed.choices && parsed.choices[0]) {
-            const choice = parsed.choices[0];
-
-            if (choice.delta?.content) {
-              if (!incompleteResult.hasStartedCurrentBlock) {
-                incompleteResult.currentIndex++;
-                incompleteResult.hasStartedCurrentBlock = true;
-                incompleteResult.textAccumulator = "";
-                incompleteResult.currentType = "text";
-                parsedMessages.push({
-                  type: "content_block_start",
-                  index: incompleteResult.currentIndex,
-                  content_block: { type: "text", text: "" },
-                });
-              }
-              parsedMessages.push({
-                type: "content_block_delta",
-                index: incompleteResult.currentIndex,
-                delta: { type: "text", text: choice.delta.content },
-              });
-              incompleteResult.textAccumulator += choice.delta.content;
-            }
-
-            if (
-              choice.delta?.tool_calls &&
-              choice.delta.tool_calls.length > 0
-            ) {
-              if (!incompleteResult.functions) {
-                incompleteResult.functions = {};
-              }
-              if (!incompleteResult.currentToolFunc) {
-                incompleteResult.currentToolFunc = null;
-              }
-
-              choice.delta.tool_calls.forEach((toolCallDelta) => {
-                const toolFunc = toolCallDelta.function;
-                if (toolFunc.name) {
-                  const toolId =
-                    toolCallDelta.id ||
-                    `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-                  if (!incompleteResult.functions[toolFunc.name]) {
-                    incompleteResult.functions[toolFunc.name] = {
-                      id: toolId,
-                      name: toolFunc.name,
-                      input: "",
-                    };
-                    incompleteResult.currentToolFunc =
-                      incompleteResult.functions[toolFunc.name];
-
-                    if (
-                      incompleteResult.hasStartedCurrentBlock &&
-                      incompleteResult.currentType === "text"
-                    ) {
-                      parsedMessages.push({
-                        type: "content_block_stop",
-                        index: incompleteResult.currentIndex,
-                      });
-                    }
-
-                    incompleteResult.currentIndex++;
-                    incompleteResult.hasStartedCurrentBlock = true;
-                    incompleteResult.currentType = "tool_use";
-                    parsedMessages.push({
-                      type: "content_block_start",
-                      index: incompleteResult.currentIndex,
-                      content_block: {
-                        type: "tool_use",
-                        id: toolId,
-                        name: toolFunc.name,
-                        input: "",
-                      },
-                    });
-                  }
-                }
-                if (toolFunc.arguments && incompleteResult.currentToolFunc) {
-                  incompleteResult.currentToolFunc.input += toolFunc.arguments;
-                  parsedMessages.push({
-                    type: "content_block_delta",
-                    index: incompleteResult.currentIndex,
-                    delta: {
-                      type: "input_json_delta",
-                      partial_json: toolFunc.arguments,
-                    },
-                  });
-                }
-              });
-            }
-
-            if (choice.finish_reason) {
-              if (incompleteResult.functions) {
-                Object.values(incompleteResult.functions).forEach((func) => {
-                  if (func.input && typeof func.input === "string") {
-                    try {
-                      func.input = JSON.parse(func.input);
-                    } catch {
-                      // Keep input as string if not valid JSON
-                    }
-                  }
-                });
-              }
-
-              const stopReasonMap = {
-                stop: "end_turn",
-                length: "max_tokens",
-                tool_calls: "tool_use",
-                content_filter: "refusal",
-              };
-              incompleteResult.stopReason =
-                stopReasonMap[choice.finish_reason] || "end_turn";
-              incompleteResult.outputTokens =
-                parsed.usage?.completion_tokens || 0;
-            }
-          }
-        }
-      }
-    }
-
-    return {
-      parsedMessages,
-      remainBuffer,
-    };
   }
 }
