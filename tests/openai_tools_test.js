@@ -129,5 +129,6 @@ async function testToolInvocation(openai, stream) {
 
 const openai = new OpenAI({
   baseURL: "http://localhost:11434/v1",
+  apiKey: "sk-test",
 });
 testToolInvocation(openai, stream);

@@ -435,35 +435,83 @@ export class CopilotChatClient {
       model: model,
       tools: tools,
       stream: stream,
+      messages: [],
     };
-    if (messages.some((message) => message.images)) {
-      openaiReq.messages = messages.map((message) => {
-        if (!message.images) {
-          return message;
-        }
-        const content = [
-          {
+
+    // Convert each message to OpenAI format
+    // Support: text content (string/array), images, tool_calls, tool results
+    for (const message of messages) {
+      const openaiMessage = {
+        role: message.role,
+      };
+
+      // Handle content: prioritize images > existing content format
+      if (message.images && message.images.length > 0) {
+        // Ollama images format → OpenAI image_url format
+        const content = [];
+
+        // Add text content if present
+        if (message.content) {
+          content.push({
             type: "text",
             text: message.content,
-          },
-        ];
-        const images = message.images.map((base64Image) => {
-          return {
+          });
+        }
+
+        // Add images as image_url blocks
+        message.images.forEach((base64Image) => {
+          content.push({
             type: "image_url",
             image_url: {
               url: `data:image/jpeg;base64,${base64Image}`,
             },
-          };
+          });
         });
-        content.push(...images);
-        return {
-          role: message.role,
-          content: content,
-        };
-      });
-    } else {
-      openaiReq.messages = messages;
+
+        openaiMessage.content = content;
+      } else if (message.content !== undefined) {
+        // Preserve original content format (string or array)
+        openaiMessage.content = message.content;
+      }
+
+      // Handle tool_calls (for assistant messages)
+      if (message.tool_calls && message.tool_calls.length > 0) {
+        openaiMessage.tool_calls = message.tool_calls.map((tc) => {
+          const toolCall = {
+            type: tc.type || "function",
+            function: {
+              name: tc.function.name,
+              arguments:
+                typeof tc.function.arguments === "string"
+                  ? tc.function.arguments
+                  : JSON.stringify(tc.function.arguments),
+            },
+          };
+
+          if (tc.id) {
+            toolCall.id = tc.id;
+          }
+
+          return toolCall;
+        });
+      }
+
+      // Handle tool result messages (role="tool")
+      if (message.tool_call_id) {
+        openaiMessage.tool_call_id = message.tool_call_id;
+      }
+
+      // Handle function messages (role="function")
+      if (
+        message.name &&
+        (message.role === "function" || message.role === "tool")
+      ) {
+        openaiMessage.name = message.name;
+      }
+
+      openaiReq.messages.push(openaiMessage);
     }
+
     return openaiReq;
   }
 
@@ -777,7 +825,7 @@ export class CopilotChatClient {
           if (toolCall.function?.arguments) {
             try {
               input = JSON.parse(toolCall.function.arguments);
-            } catch (e) {
+            } catch {
               input = { arguments: toolCall.function.arguments };
             }
           }

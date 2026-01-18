@@ -74,5 +74,6 @@ async function testImageInput(openai, stream) {
 
 const openai = new OpenAI({
   baseURL: "http://localhost:11434/v1",
+  apiKey: "sk-test",
 });
 testImageInput(openai, stream);
