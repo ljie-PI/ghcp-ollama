@@ -17,6 +17,8 @@ import {
   toolCallsResponse,
   textStreamChunks,
   createStreamBuffer,
+  cachedTokensResponse,
+  cachedTokensStreamChunks,
 } from "../fixtures/openai_responses.js";
 
 describe("AnthropicAdapter", () => {
@@ -281,6 +283,24 @@ describe("AnthropicAdapter", () => {
         expect(result.usage.input_tokens).toBe(50);
         expect(result.usage.output_tokens).toBe(20);
       });
+
+      it("should calculate input_tokens excluding cached_tokens", () => {
+        const result = adapter.parseResponse(cachedTokensResponse);
+
+        expect(result.usage.input_tokens).toBe(20);
+        expect(result.usage.output_tokens).toBe(15);
+        expect(result.usage.cache_read_input_tokens).toBe(80);
+        expect(result.usage.cache_creation_input_tokens).toBe(0);
+      });
+
+      it("should include cache fields even when no cached tokens", () => {
+        const result = adapter.parseResponse(textResponse);
+
+        expect(result.usage.input_tokens).toBe(50);
+        expect(result.usage.output_tokens).toBe(20);
+        expect(result.usage.cache_read_input_tokens).toBe(0);
+        expect(result.usage.cache_creation_input_tokens).toBe(0);
+      });
     });
 
     describe("tool calls response", () => {
@@ -409,15 +429,13 @@ describe("AnthropicAdapter", () => {
 
         const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
 
-        // Find the message_start event
         const messageStart = parsedMessages.find(
           (msg) => msg.type === "message_start",
         );
 
         expect(messageStart).toBeDefined();
         expect(messageStart.message.usage).toBeDefined();
-        // Note: input_tokens might be 0 initially if first chunk doesn't contain usage
-        expect(messageStart.message.usage.input_tokens).toBeGreaterThanOrEqual(0);
+        expect(messageStart.message.usage.input_tokens).toBe(50);
         expect(messageStart.message.usage.output_tokens).toBe(0);
       });
 
@@ -427,7 +445,6 @@ describe("AnthropicAdapter", () => {
 
         const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
 
-        // Find the message_delta event (contains final usage stats)
         const messageDelta = parsedMessages.find(
           (msg) => msg.type === "message_delta",
         );
@@ -451,6 +468,112 @@ describe("AnthropicAdapter", () => {
         expect(messageDelta).toBeDefined();
         expect(messageDelta.delta).toBeDefined();
         expect(messageDelta.delta.stop_reason).toBe("end_turn");
+      });
+
+      it("should emit message_stop event at the end", () => {
+        const buffer = createStreamBuffer(textStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const messageStop = parsedMessages.find(
+          (msg) => msg.type === "message_stop",
+        );
+
+        expect(messageStop).toBeDefined();
+        expect(messageStop.type).toBe("message_stop");
+      });
+
+      it("should emit usage info in correct events", () => {
+        const buffer = createStreamBuffer(textStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const messageStart = parsedMessages.find(
+          (msg) => msg.type === "message_start",
+        );
+        const messageDelta = parsedMessages.find(
+          (msg) => msg.type === "message_delta",
+        );
+
+        expect(messageStart.message.usage.input_tokens).toBe(50);
+        expect(messageStart.message.usage.output_tokens).toBe(0);
+
+        expect(messageDelta.usage.input_tokens).toBe(50);
+        expect(messageDelta.usage.output_tokens).toBe(5);
+        expect(messageDelta.usage.cache_read_input_tokens).toBe(0);
+        expect(messageDelta.usage.cache_creation_input_tokens).toBe(0);
+      });
+    });
+
+    describe("cached tokens in streaming", () => {
+      it("should calculate input_tokens excluding cached_tokens in message_start", () => {
+        const buffer = createStreamBuffer(cachedTokensStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const messageStart = parsedMessages.find(
+          (msg) => msg.type === "message_start",
+        );
+
+        expect(messageStart).toBeDefined();
+        expect(messageStart.message.usage.input_tokens).toBe(20);
+        expect(messageStart.message.usage.output_tokens).toBe(0);
+        expect(messageStart.message.usage.cache_read_input_tokens).toBe(80);
+        expect(messageStart.message.usage.cache_creation_input_tokens).toBe(0);
+      });
+
+      it("should emit complete usage info at the end of stream", () => {
+        const buffer = createStreamBuffer(cachedTokensStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const messageStart = parsedMessages.find(
+          (msg) => msg.type === "message_start",
+        );
+        const messageDelta = parsedMessages.find(
+          (msg) => msg.type === "message_delta",
+        );
+        const messageStop = parsedMessages.find(
+          (msg) => msg.type === "message_stop",
+        );
+
+        expect(messageStart).toBeDefined();
+        expect(messageDelta).toBeDefined();
+        expect(messageStop).toBeDefined();
+
+        expect(messageStart.message.usage.input_tokens).toBe(20);
+        expect(messageStart.message.usage.cache_read_input_tokens).toBe(80);
+
+        expect(messageDelta.usage.input_tokens).toBe(20);
+        expect(messageDelta.usage.output_tokens).toBe(8);
+        expect(messageDelta.usage.cache_read_input_tokens).toBe(80);
+        expect(messageDelta.usage.cache_creation_input_tokens).toBe(0);
+
+        expect(messageStop.type).toBe("message_stop");
+      });
+
+      it("should not include cache fields in message_start when no cached tokens", () => {
+        const buffer = createStreamBuffer(textStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const messageStart = parsedMessages.find(
+          (msg) => msg.type === "message_start",
+        );
+        const messageDelta = parsedMessages.find(
+          (msg) => msg.type === "message_delta",
+        );
+
+        expect(messageStart.message.usage.cache_read_input_tokens).toBeUndefined();
+        expect(messageStart.message.usage.cache_creation_input_tokens).toBeUndefined();
+        
+        expect(messageDelta.usage.cache_read_input_tokens).toBe(0);
+        expect(messageDelta.usage.cache_creation_input_tokens).toBe(0);
       });
     });
 

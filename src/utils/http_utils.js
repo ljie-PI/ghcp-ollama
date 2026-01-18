@@ -134,12 +134,14 @@ export async function sendHttpStreamingRequest(
         });
 
         res.on("end", () => {
+          console.error("[HTTP_ERROR] Non-200 status code:", res.statusCode, errorData);
           reject(
             new Error(
               `${statusCodeErrorMsg}: ${res.statusCode}: ${JSON.stringify(errorData)}`,
             ),
           );
         });
+        return;
       }
 
       // buffer is used to hold the incomplete data inputted to the parseResp function
@@ -148,7 +150,8 @@ export async function sendHttpStreamingRequest(
       const incompleteResult = {};
 
       res.on("data", (chunk) => {
-        buffer += chunk.toString();
+        const chunkStr = chunk.toString();
+        buffer += chunkStr;
         if (
           parseResp &&
           typeof parseResp === "function" &&
@@ -160,6 +163,7 @@ export async function sendHttpStreamingRequest(
             onResponse(parsed.parsedMessages, "data");
             buffer = parsed.remainBuffer;
           } catch (error) {
+            console.error("[HTTP_ERROR] Parse error:", error.message);
             reject(new Error(`${respProcErrorMsg}: ${error.message}`));
           }
         }
@@ -176,6 +180,7 @@ export async function sendHttpStreamingRequest(
             const parsed = parseResp(buffer, incompleteResult);
             onResponse(parsed.parsedMessages, "end");
           } catch (error) {
+            console.error("[HTTP_ERROR] Final parse error:", error.message);
             reject(new Error(`${respProcErrorMsg}: ${error.message}`));
           }
         }

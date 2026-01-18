@@ -109,11 +109,39 @@ export const multipleToolCallsResponse = {
 };
 
 /**
+ * Non-streaming response with cached tokens
+ */
+export const cachedTokensResponse = {
+  id: "chatcmpl-cached123",
+  object: "chat.completion",
+  created: 1700000003,
+  model: "gpt-4o",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: "This response uses cached tokens.",
+      },
+      finish_reason: "stop",
+    },
+  ],
+  usage: {
+    prompt_tokens: 100,
+    completion_tokens: 15,
+    total_tokens: 115,
+    prompt_tokens_details: {
+      cached_tokens: 80,
+    },
+  },
+};
+
+/**
  * Streaming chunks for text response
  * These simulate SSE data lines
  */
 export const textStreamChunks = [
-  "data: {\"id\":\"chatcmpl-stream1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":50}}",
   "data: {\"id\":\"chatcmpl-stream1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The \"},\"finish_reason\":null}]}",
   "data: {\"id\":\"chatcmpl-stream1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"sky \"},\"finish_reason\":null}]}",
   "data: {\"id\":\"chatcmpl-stream1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"is \"},\"finish_reason\":null}]}",
@@ -147,6 +175,17 @@ export const multipleToolCallStreamChunks = [
   "data: {\"id\":\"chatcmpl-stream3\",\"object\":\"chat.completion.chunk\",\"created\":1700000002,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_002\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}",
   "data: {\"id\":\"chatcmpl-stream3\",\"object\":\"chat.completion.chunk\",\"created\":1700000002,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"timezone\\\":\\\"UTC\\\"}\"}}]},\"finish_reason\":null}]}",
   "data: {\"id\":\"chatcmpl-stream3\",\"object\":\"chat.completion.chunk\",\"created\":1700000002,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":40}}",
+  "data: [DONE]",
+];
+
+/**
+ * Streaming chunks with cached tokens
+ */
+export const cachedTokensStreamChunks = [
+  "data: {\"id\":\"chatcmpl-stream4\",\"object\":\"chat.completion.chunk\",\"created\":1700000003,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":80}}}",
+  "data: {\"id\":\"chatcmpl-stream4\",\"object\":\"chat.completion.chunk\",\"created\":1700000003,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Cached \"},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream4\",\"object\":\"chat.completion.chunk\",\"created\":1700000003,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"response.\"},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream4\",\"object\":\"chat.completion.chunk\",\"created\":1700000003,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":8,\"prompt_tokens_details\":{\"cached_tokens\":80}}}",
   "data: [DONE]",
 ];
 

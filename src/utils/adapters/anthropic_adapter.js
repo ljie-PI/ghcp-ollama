@@ -221,7 +221,7 @@ export class AnthropicAdapter extends BaseAdapter {
       content_filter: "stop_sequence",
     };
 
-    return {
+    const result = {
       id: messageId,
       type: "message",
       role: "assistant",
@@ -230,10 +230,14 @@ export class AnthropicAdapter extends BaseAdapter {
       stop_reason: stopReasonMap[finishReason] || "end_turn",
       stop_sequence: null,
       usage: {
-        input_tokens: openaiResp.usage?.prompt_tokens || 0,
+        input_tokens: (openaiResp.usage?.prompt_tokens || 0) - (openaiResp.usage?.prompt_tokens_details?.cached_tokens || 0),
         output_tokens: openaiResp.usage?.completion_tokens || 0,
+        cache_read_input_tokens: openaiResp.usage?.prompt_tokens_details?.cached_tokens || 0,
+        cache_creation_input_tokens: 0,
       },
     };
+
+    return result;
   }
 
   /**
@@ -263,6 +267,7 @@ export class AnthropicAdapter extends BaseAdapter {
       for (const line of lines) {
         if (line.startsWith("data: ")) {
           const data = line.slice(6);
+          
           if (data === "[DONE]") {
             if (incompleteResult.hasStartedCurrentBlock) {
               parsedMessages.push({
@@ -271,16 +276,20 @@ export class AnthropicAdapter extends BaseAdapter {
               });
             }
             if (incompleteResult.outputTokens > 0) {
+              const messageDeltaUsage = {
+                input_tokens: (incompleteResult.inputTokens || 0) - (incompleteResult.cachedTokens || 0),
+                output_tokens: incompleteResult.outputTokens,
+                cache_read_input_tokens: incompleteResult.cachedTokens || 0,
+                cache_creation_input_tokens: 0,
+              };
+              
               parsedMessages.push({
                 type: "message_delta",
                 delta: {
                   stop_reason: incompleteResult.stopReason || "end_turn",
                   stop_sequence: null,
                 },
-                usage: {
-                  input_tokens: incompleteResult.inputTokens,
-                  output_tokens: incompleteResult.outputTokens,
-                },
+                usage: messageDeltaUsage,
               });
             }
             parsedMessages.push({ type: "message_stop" });
@@ -301,6 +310,21 @@ export class AnthropicAdapter extends BaseAdapter {
             incompleteResult.stopReason = null;
             incompleteResult.outputTokens = 0;
             incompleteResult.inputTokens = 0;
+            incompleteResult.cachedTokens = 0;
+
+            if (parsed.usage?.prompt_tokens_details?.cached_tokens) {
+              incompleteResult.cachedTokens = parsed.usage.prompt_tokens_details.cached_tokens;
+            }
+
+            const messageStartUsage = {
+              input_tokens: (parsed.usage?.prompt_tokens || 0) - incompleteResult.cachedTokens,
+              output_tokens: 0,
+            };
+
+            if (incompleteResult.cachedTokens > 0) {
+              messageStartUsage.cache_read_input_tokens = incompleteResult.cachedTokens;
+              messageStartUsage.cache_creation_input_tokens = 0;
+            }
 
             parsedMessages.push({
               type: "message_start",
@@ -312,10 +336,7 @@ export class AnthropicAdapter extends BaseAdapter {
                 model: incompleteResult.model,
                 stop_reason: null,
                 stop_sequence: null,
-                usage: {
-                  input_tokens: parsed.usage?.prompt_tokens || 0,
-                  output_tokens: 0,
-                },
+                usage: messageStartUsage,
               },
             });
 
@@ -324,6 +345,9 @@ export class AnthropicAdapter extends BaseAdapter {
             }
           } else if (parsed.usage?.prompt_tokens) {
             incompleteResult.inputTokens = parsed.usage.prompt_tokens;
+            if (parsed.usage?.prompt_tokens_details?.cached_tokens) {
+              incompleteResult.cachedTokens = parsed.usage.prompt_tokens_details.cached_tokens;
+            }
           }
 
           if (parsed.choices && parsed.choices[0]) {
@@ -344,7 +368,7 @@ export class AnthropicAdapter extends BaseAdapter {
               parsedMessages.push({
                 type: "content_block_delta",
                 index: incompleteResult.currentIndex,
-                delta: { type: "text", text: choice.delta.content },
+                delta: { type: "text_delta", text: choice.delta.content },
               });
               incompleteResult.textAccumulator += choice.delta.content;
             }

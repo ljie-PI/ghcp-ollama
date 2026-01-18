@@ -33,7 +33,7 @@ async function testTextMessage(anthropic, stream) {
         console.log("Event received:", JSON.stringify(event));
         if (
           event.type === "content_block_delta" &&
-          event.delta?.type === "text"
+          event.delta?.type === "text_delta"
         ) {
           fullResponse += event.delta.text;
         }
