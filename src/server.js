@@ -300,7 +300,7 @@ function shutdown() {
 
 // Create Express app
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "32mb" }));
 
 // Ollama API endpoints
 app.get("/", (_, res) => {
