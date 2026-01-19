@@ -3,16 +3,6 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// Usage: node ollama_mixed_content_test.js [--no-stream]
-// --no-stream: Use non-streaming mode (default: streaming enabled)
-//
-// This test verifies that mixed content types are correctly handled:
-// 1. User message with image
-// 2. Assistant response (text)
-// 3. User message with text
-// 4. Assistant message with tool_calls
-// 5. User message with image again
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 

@@ -94,6 +94,8 @@ export class AnthropicAdapter extends BaseAdapter {
 
       if (Array.isArray(message.content)) {
         const content = [];
+        const toolResults = [];
+        
         for (const block of message.content) {
           if (block.type === "text") {
             content.push({
@@ -127,27 +129,31 @@ export class AnthropicAdapter extends BaseAdapter {
               },
             });
           } else if (block.type === "tool_result") {
-            if (!openaiMessage.tool_calls) {
-              openaiMessage.tool_calls = [];
-            }
-            openaiMessage.tool_calls.push({
-              id: block.tool_use_id,
-              type: "function",
-              function: {
-                name: "tool_result",
-                arguments: JSON.stringify({ result: block.content }),
-              },
+            toolResults.push({
+              role: "tool",
+              tool_call_id: block.tool_use_id,
+              content: typeof block.content === "string" 
+                ? block.content 
+                : JSON.stringify(block.content),
             });
           }
         }
+        
         if (content.length > 0) {
           openaiMessage.content = content;
         }
+        
+        if (content.length > 0 || openaiMessage.tool_calls) {
+          openaiReq.messages.push(openaiMessage);
+        }
+        
+        for (const toolResult of toolResults) {
+          openaiReq.messages.push(toolResult);
+        }
       } else {
         openaiMessage.content = message.content;
+        openaiReq.messages.push(openaiMessage);
       }
-
-      openaiReq.messages.push(openaiMessage);
     }
 
     return openaiReq;
@@ -377,78 +383,88 @@ export class AnthropicAdapter extends BaseAdapter {
               choice.delta?.tool_calls &&
               choice.delta.tool_calls.length > 0
             ) {
-              if (!incompleteResult.functions) {
-                incompleteResult.functions = {};
-              }
-              if (!incompleteResult.currentToolFunc) {
-                incompleteResult.currentToolFunc = null;
+              if (!incompleteResult.pendingToolCalls) {
+                incompleteResult.pendingToolCalls = {};
+                incompleteResult.toolCallOrder = [];
               }
 
               choice.delta.tool_calls.forEach((toolCallDelta) => {
+                const index = toolCallDelta.index;
                 const toolFunc = toolCallDelta.function;
-                if (toolFunc.name) {
-                  const toolId =
-                    toolCallDelta.id ||
-                    `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-                  if (!incompleteResult.functions[toolFunc.name]) {
-                    incompleteResult.functions[toolFunc.name] = {
-                      id: toolId,
-                      name: toolFunc.name,
-                      input: "",
-                    };
-                    incompleteResult.currentToolFunc =
-                      incompleteResult.functions[toolFunc.name];
 
-                    if (
-                      incompleteResult.hasStartedCurrentBlock &&
-                      incompleteResult.currentType === "text"
-                    ) {
-                      parsedMessages.push({
-                        type: "content_block_stop",
-                        index: incompleteResult.currentIndex,
-                      });
-                    }
-
-                    incompleteResult.currentIndex++;
-                    incompleteResult.hasStartedCurrentBlock = true;
-                    incompleteResult.currentType = "tool_use";
-                    parsedMessages.push({
-                      type: "content_block_start",
-                      index: incompleteResult.currentIndex,
-                      content_block: {
-                        type: "tool_use",
-                        id: toolId,
-                        name: toolFunc.name,
-                        input: "",
-                      },
-                    });
-                  }
+                if (!incompleteResult.pendingToolCalls[index]) {
+                  incompleteResult.pendingToolCalls[index] = {
+                    id: "",
+                    name: "",
+                    input: "",
+                  };
+                  incompleteResult.toolCallOrder.push(index);
                 }
-                if (toolFunc.arguments && incompleteResult.currentToolFunc) {
-                  incompleteResult.currentToolFunc.input += toolFunc.arguments;
-                  parsedMessages.push({
-                    type: "content_block_delta",
-                    index: incompleteResult.currentIndex,
-                    delta: {
-                      type: "input_json_delta",
-                      partial_json: toolFunc.arguments,
-                    },
-                  });
+
+                const currentToolCall = incompleteResult.pendingToolCalls[index];
+
+                if (toolCallDelta.id) {
+                  currentToolCall.id = toolCallDelta.id;
+                }
+                if (toolFunc?.name) {
+                  if (
+                    incompleteResult.hasStartedCurrentBlock &&
+                    incompleteResult.currentType === "text"
+                  ) {
+                    parsedMessages.push({
+                      type: "content_block_stop",
+                      index: incompleteResult.currentIndex,
+                    });
+                    incompleteResult.hasStartedCurrentBlock = false;
+                  }
+                  currentToolCall.name = toolFunc.name;
+                  incompleteResult.currentType = "tool_use";
+                }
+                if (toolFunc?.arguments) {
+                  currentToolCall.input += toolFunc.arguments;
                 }
               });
             }
 
             if (choice.finish_reason) {
-              if (incompleteResult.functions) {
-                Object.values(incompleteResult.functions).forEach((func) => {
-                  if (func.input && typeof func.input === "string") {
-                    try {
-                      func.input = JSON.parse(func.input);
-                    } catch {
-                      // Keep input as string if not valid JSON
-                    }
-                  }
-                });
+              if (
+                choice.finish_reason === "tool_calls" &&
+                incompleteResult.pendingToolCalls &&
+                Object.keys(incompleteResult.pendingToolCalls).length > 0
+              ) {
+                for (const toolIndex of incompleteResult.toolCallOrder) {
+                  const tool = incompleteResult.pendingToolCalls[toolIndex];
+                  incompleteResult.currentIndex++;
+
+                  const contentBlockStart = {
+                    type: "content_block_start",
+                    index: incompleteResult.currentIndex,
+                    content_block: {
+                      type: "tool_use",
+                      id: tool.id,
+                      name: tool.name,
+                      input: {},
+                    },
+                  };
+                  parsedMessages.push(contentBlockStart);
+
+                  const contentBlockDelta = {
+                    type: "content_block_delta",
+                    index: incompleteResult.currentIndex,
+                    delta: {
+                      type: "input_json_delta",
+                      partial_json: tool.input,
+                    },
+                  };
+                  parsedMessages.push(contentBlockDelta);
+
+                  const contentBlockStop = {
+                    type: "content_block_stop",
+                    index: incompleteResult.currentIndex,
+                  };
+                  parsedMessages.push(contentBlockStop);
+                }
+                incompleteResult.hasStartedCurrentBlock = false;
               }
 
               const stopReasonMap = {

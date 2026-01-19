@@ -1,8 +1,5 @@
 import { Ollama } from "ollama";
 
-// Usage: node ollama_tools_test.js [--no-stream]
-// --no-stream: Use non-streaming mode (default: streaming enabled)
-
 const args = process.argv.slice(2);
 const stream = !args.includes("--no-stream");
 

@@ -1,135 +1,160 @@
 import { Ollama } from "ollama";
 
-// Usage: node ollama_multi_turn_tools_test.js [--no-stream]
-// --no-stream: Use non-streaming mode (default: streaming enabled)
-//
-// This test verifies that multi-turn conversations with tool calls are correctly
-// converted to OpenAI format. It tests:
-// 1. User message
-// 2. Assistant message with tool_calls
-// 3. Tool result message (role="tool")
-// 4. Follow-up user message
-
 const args = process.argv.slice(2);
 const stream = !args.includes("--no-stream");
 
-async function testMultiTurnWithTools(ollama, stream) {
-  try {
-    const payload = {
-      model: "gpt-5.2",
-      messages: [
-        {
-          role: "user",
-          content: "What's the weather in Beijing?",
-        },
-        {
-          role: "assistant",
-          content: "",
-          tool_calls: [
-            {
-              id: "call_123",
-              type: "function",
-              function: {
-                name: "get_weather",
-                arguments: { location: "Beijing", format: "celsius" },
-              },
-            },
-          ],
-        },
-        {
-          role: "tool",
-          tool_call_id: "call_123",
-          content: "Temperature: 15°C, Condition: Sunny",
-        },
-        {
-          role: "assistant",
-          content:
-            "The weather in Beijing is currently 15°C and sunny. Would you like to know anything else?",
-        },
-        {
-          role: "user",
-          content: "Thanks! And what's the time there?",
-        },
-      ],
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: "get_weather",
-            description: "Get weather information for a location",
-            parameters: {
-              type: "object",
-              properties: {
-                location: {
-                  type: "string",
-                  description: "The location to get weather for",
-                },
-                format: {
-                  type: "string",
-                  enum: ["celsius", "fahrenheit"],
-                  description: "Temperature format",
-                },
-              },
-              required: ["location", "format"],
-            },
+const tools = [
+  {
+    type: "function",
+    function: {
+      name: "get_current_time",
+      description: "Get the current time for a specific timezone",
+      parameters: {
+        type: "object",
+        properties: {
+          timezone: {
+            type: "string",
+            description: "The timezone to get the current time for (e.g., Asia/Shanghai)",
           },
         },
-        {
-          type: "function",
-          function: {
-            name: "get_time",
-            description: "Get current time for a timezone",
-            parameters: {
-              type: "object",
-              properties: {
-                timezone: {
-                  type: "string",
-                  description: "Timezone (e.g., Asia/Shanghai)",
-                },
-              },
-              required: ["timezone"],
-            },
+        required: ["timezone"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_current_weather",
+      description: "Get the current weather for a location",
+      parameters: {
+        type: "object",
+        properties: {
+          location: {
+            type: "string",
+            description: "The location to get the weather for, e.g. Beijing",
+          },
+          format: {
+            type: "string",
+            description: "The format to return the weather in",
+            enum: ["celsius", "fahrenheit"],
           },
         },
-      ],
-      stream: stream,
-    };
+        required: ["location", "format"],
+      },
+    },
+  },
+];
 
-    let fullResponse = "";
-    let toolCalls = [];
+function mockToolExecution(name, args) {
+  if (name === "get_current_time") {
+    return `Current time in ${args.timezone}: 2024-01-15 14:30:00 CST`;
+  }
+  if (name === "get_current_weather") {
+    return `Weather in ${args.location}: Temperature 15°C, Condition: Sunny, Humidity: 45%`;
+  }
+  return `Unknown tool: ${name}`;
+}
 
-    if (stream) {
-      const response = await ollama.chat(payload);
-      for await (const chunk of response) {
-        console.log("Chunk received:", JSON.stringify(chunk));
-        if (chunk.message?.content) {
-          fullResponse += chunk.message.content;
-        }
-        if (chunk.message?.tool_calls) {
-          toolCalls = chunk.message.tool_calls;
-        }
-        if (chunk.done) {
-          console.log("Stream finished.\n");
+async function sendRequest(ollama, payload, stream) {
+  let textResponse = "";
+  const toolCalls = [];
+
+  if (stream) {
+    const response = await ollama.chat(payload);
+    console.log("\n--- Streaming Events ---");
+    for await (const chunk of response) {
+      console.log(JSON.stringify(chunk));
+      if (chunk.message?.content) {
+        textResponse += chunk.message.content;
+      }
+      if (chunk.message?.tool_calls) {
+        for (const toolCall of chunk.message.tool_calls) {
+          const existingTool = toolCalls.find((t) => t.id === toolCall.id);
+          if (!existingTool) {
+            toolCalls.push(toolCall);
+          }
         }
       }
-    } else {
-      const response = await ollama.chat(payload);
-      console.log("Response received:", JSON.stringify(response, null, 2));
-      fullResponse = response.message.content;
-      toolCalls = response.message.tool_calls || [];
     }
+    console.log("--- End Streaming Events ---\n");
+  } else {
+    const response = await ollama.chat(payload);
+    textResponse = response.message?.content || "";
+    if (response.message?.tool_calls) {
+      toolCalls.push(...response.message.tool_calls);
+    }
+  }
 
-    console.log("====================\n");
-    console.log("Full Response:\n", fullResponse);
-    if (toolCalls.length > 0) {
-      console.log("\n====================\n");
-      console.log("Tool Calls:\n", JSON.stringify(toolCalls, null, 2));
-    }
-  } catch (error) {
-    console.error("Error:", error);
-    throw error;
+  return { textResponse, toolCalls };
+}
+
+async function testMultiTurnWithTools(ollama, stream) {
+  console.log("========== TURN 1: Triggering tool_calls ==========\n");
+
+  const turn1Payload = {
+    model: "gpt-5.2",
+    messages: [
+      { role: "user", content: "What's the time and weather in Beijing and Shanghai now?" },
+    ],
+    tools,
+    stream,
+  };
+
+  const turn1Result = await sendRequest(ollama, turn1Payload, stream);
+
+  console.log("Turn 1 Text Response:", turn1Result.textResponse);
+  console.log("Turn 1 Tool Calls:", JSON.stringify(turn1Result.toolCalls, null, 2));
+
+  if (turn1Result.toolCalls.length === 0) {
+    throw new Error("FAIL: No tool_calls triggered in turn 1. LLM should have called tools.");
+  }
+
+  console.log("\n========== TURN 2: Sending tool results ==========\n");
+
+  const toolResultMessages = turn1Result.toolCalls.map((toolCall) => ({
+    role: "tool",
+    tool_call_id: toolCall.id,
+    content: mockToolExecution(toolCall.function.name, toolCall.function.arguments),
+  }));
+
+  console.log("Tool Result Messages:", JSON.stringify(toolResultMessages, null, 2));
+
+  const turn2Payload = {
+    model: "gpt-5.2",
+    messages: [
+      { role: "user", content: "What's the time and weather in Beijing and Shanghai now?" },
+      {
+        role: "assistant",
+        content: turn1Result.textResponse || "",
+        tool_calls: turn1Result.toolCalls,
+      },
+      ...toolResultMessages,
+    ],
+    tools,
+    stream,
+  };
+
+  console.log("\n" + "-".repeat(80));
+  console.log("Turn 2 Payload (before conversion):");
+  console.log(JSON.stringify(turn2Payload, null, 2));
+  console.log("-".repeat(80) + "\n");
+
+  const turn2Result = await sendRequest(ollama, turn2Payload, stream);
+
+  console.log("\nTurn 2 Text Response:", turn2Result.textResponse);
+
+  console.log("\n========== TEST RESULT ==========\n");
+
+  if (turn2Result.textResponse && turn2Result.toolCalls.length === 0) {
+    console.log("SUCCESS: Multi-turn tool call conversation completed.");
+  } else {
+    console.log("WARNING: Unexpected result in turn 2.");
   }
 }
 
 const ollama = new Ollama({ host: "http://localhost:11434" });
-testMultiTurnWithTools(ollama, stream);
+
+testMultiTurnWithTools(ollama, stream).catch((error) => {
+  console.error("Test failed:", error.message);
+  process.exit(1);
+});

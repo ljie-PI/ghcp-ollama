@@ -207,7 +207,12 @@ export class OllamaAdapter extends BaseAdapter {
             ) {
               const toolCalls = Object.values(incompleteResult.functions).map(
                 (func) => ({
-                  function: { ...func },
+                  id: func.id,
+                  type: "function",
+                  function: {
+                    name: func.name,
+                    arguments: func.arguments,
+                  },
                 }),
               );
 
@@ -233,6 +238,8 @@ export class OllamaAdapter extends BaseAdapter {
                 role: "assistant",
                 content: "",
               },
+              prompt_eval_count: incompleteResult.prompt_eval_count || 0,
+              eval_count: incompleteResult.eval_count || 0,
             };
             parsedMessages.push(parsedMessage);
             incompleteResult = {};
@@ -242,6 +249,16 @@ export class OllamaAdapter extends BaseAdapter {
           const createTimeString = parsed.created
             ? new Date(parsed.created * 1000).toISOString()
             : new Date().toISOString();
+          
+          if (parsed.usage) {
+            if (parsed.usage.prompt_tokens) {
+              incompleteResult.prompt_eval_count = parsed.usage.prompt_tokens;
+            }
+            if (parsed.usage.completion_tokens) {
+              incompleteResult.eval_count = parsed.usage.completion_tokens;
+            }
+          }
+          
           if (parsed.choices && parsed.choices[0]) {
             const choice = parsed.choices[0];
             if (choice.finish_reason) {
@@ -255,16 +272,12 @@ export class OllamaAdapter extends BaseAdapter {
                   }
                 });
               }
-              const usage = parsed.usage;
-              if (usage) {
-                incompleteResult = {
-                  ...incompleteResult,
-                  done_reason: "stop",
-                  model: parsed.model,
-                  created_at: createTimeString,
-                  prompt_eval_count: usage.prompt_tokens || 0,
-                  eval_count: usage.completion_tokens || 0,
-                };
+              incompleteResult.done_reason = "stop";
+              if (!incompleteResult.model) {
+                incompleteResult.model = parsed.model;
+              }
+              if (!incompleteResult.created_at) {
+                incompleteResult.created_at = createTimeString;
               }
             }
             if (choice.delta) {
@@ -294,19 +307,29 @@ export class OllamaAdapter extends BaseAdapter {
                   incompleteResult.created_at = createTimeString;
 
                 choice.delta.tool_calls.forEach((toolCallDelta) => {
+                  const index = toolCallDelta.index;
                   const toolFunc = toolCallDelta.function;
-                  if (toolFunc.name) {
-                    incompleteResult.functions[toolFunc.name] = {
-                      name: toolFunc.name,
+                  
+                  if (!incompleteResult.functions[index]) {
+                    incompleteResult.functions[index] = {
+                      id: toolCallDelta.id || "",
+                      name: "",
                       arguments: "",
                     };
-                    incompleteResult.currentToolFunc =
-                      incompleteResult.functions[toolFunc.name];
                   }
-                  if (toolFunc.arguments) {
-                    incompleteResult.currentToolFunc.arguments +=
-                      toolFunc.arguments;
+                  
+                  const currentFunc = incompleteResult.functions[index];
+                  if (toolCallDelta.id) {
+                    currentFunc.id = toolCallDelta.id;
                   }
+                  if (toolFunc?.name) {
+                    currentFunc.name = toolFunc.name;
+                  }
+                  if (toolFunc?.arguments) {
+                    currentFunc.arguments += toolFunc.arguments;
+                  }
+                  
+                  incompleteResult.currentToolFunc = currentFunc;
                 });
               }
             }

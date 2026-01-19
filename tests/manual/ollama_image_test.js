@@ -3,9 +3,6 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// Usage: node ollama_image_test.js [--no-stream]
-// --no-stream: Use non-streaming mode (default: streaming enabled)
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 

@@ -16,6 +16,9 @@ import {
   textResponse,
   toolCallsResponse,
   textStreamChunks,
+  toolCallStreamChunks,
+  multipleToolCallStreamChunks,
+  sameNameToolCallStreamChunks,
   createStreamBuffer,
   cachedTokensResponse,
   cachedTokensStreamChunks,
@@ -600,6 +603,168 @@ describe("AnthropicAdapter", () => {
 
         expect(parsedMessages).toEqual([]);
         expect(remainBuffer).toBe("");
+      });
+    });
+
+    describe("streaming tool calls", () => {
+      it("should output complete tool call sequence at finish_reason", () => {
+        const buffer = createStreamBuffer(toolCallStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        // Find tool call related events
+        const contentBlockStart = parsedMessages.find(
+          (msg) =>
+            msg.type === "content_block_start" &&
+            msg.content_block?.type === "tool_use",
+        );
+        const contentBlockDelta = parsedMessages.find(
+          (msg) =>
+            msg.type === "content_block_delta" &&
+            msg.delta?.type === "input_json_delta",
+        );
+        const contentBlockStop = parsedMessages.find(
+          (msg) => msg.type === "content_block_stop",
+        );
+
+        expect(contentBlockStart).toBeDefined();
+        expect(contentBlockDelta).toBeDefined();
+        expect(contentBlockStop).toBeDefined();
+
+        // Verify sequence order
+        const startIndex = parsedMessages.indexOf(contentBlockStart);
+        const deltaIndex = parsedMessages.indexOf(contentBlockDelta);
+        const stopIndex = parsedMessages.indexOf(contentBlockStop);
+
+        expect(startIndex).toBeLessThan(deltaIndex);
+        expect(deltaIndex).toBeLessThan(stopIndex);
+      });
+
+      it("should have input:{} (empty object) in content_block_start", () => {
+        const buffer = createStreamBuffer(toolCallStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const contentBlockStart = parsedMessages.find(
+          (msg) =>
+            msg.type === "content_block_start" &&
+            msg.content_block?.type === "tool_use",
+        );
+
+        expect(contentBlockStart).toBeDefined();
+        expect(contentBlockStart.content_block.input).toEqual({});
+        expect(typeof contentBlockStart.content_block.input).toBe("object");
+      });
+
+      it("should have complete partial_json in single content_block_delta", () => {
+        const buffer = createStreamBuffer(toolCallStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const contentBlockDeltas = parsedMessages.filter(
+          (msg) =>
+            msg.type === "content_block_delta" &&
+            msg.delta?.type === "input_json_delta",
+        );
+
+        // Should have exactly one content_block_delta for tool calls
+        expect(contentBlockDeltas.length).toBe(1);
+
+        const delta = contentBlockDeltas[0];
+        expect(delta.delta.partial_json).toBe("{\"location\":\"Beijing\"}");
+      });
+
+      it("should handle multiple tool calls in correct order", () => {
+        const buffer = createStreamBuffer(multipleToolCallStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const toolStarts = parsedMessages.filter(
+          (msg) =>
+            msg.type === "content_block_start" &&
+            msg.content_block?.type === "tool_use",
+        );
+
+        expect(toolStarts.length).toBe(2);
+        expect(toolStarts[0].content_block.name).toBe("get_weather");
+        expect(toolStarts[1].content_block.name).toBe("get_time");
+
+        // Verify each tool has its complete sequence
+        const tool1Index = toolStarts[0].index;
+        const tool2Index = toolStarts[1].index;
+
+        const tool1Delta = parsedMessages.find(
+          (msg) =>
+            msg.type === "content_block_delta" &&
+            msg.index === tool1Index &&
+            msg.delta?.type === "input_json_delta",
+        );
+        const tool2Delta = parsedMessages.find(
+          (msg) =>
+            msg.type === "content_block_delta" &&
+            msg.index === tool2Index &&
+            msg.delta?.type === "input_json_delta",
+        );
+
+        expect(tool1Delta).toBeDefined();
+        expect(tool1Delta.delta.partial_json).toBe("{\"location\":\"Beijing\"}");
+        expect(tool2Delta).toBeDefined();
+        expect(tool2Delta.delta.partial_json).toBe("{\"timezone\":\"UTC\"}");
+      });
+
+      it("should emit tool_use stop_reason in message_delta", () => {
+        const buffer = createStreamBuffer(toolCallStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const messageDelta = parsedMessages.find(
+          (msg) => msg.type === "message_delta",
+        );
+
+        expect(messageDelta).toBeDefined();
+        expect(messageDelta.delta.stop_reason).toBe("tool_use");
+      });
+
+      it("should handle multiple calls to same function with different arguments", () => {
+        const buffer = createStreamBuffer(sameNameToolCallStreamChunks);
+        const state = {};
+
+        const { parsedMessages } = adapter.parseStreamChunk(buffer, state);
+
+        const toolStarts = parsedMessages.filter(
+          (msg) =>
+            msg.type === "content_block_start" &&
+            msg.content_block?.type === "tool_use",
+        );
+
+        expect(toolStarts.length).toBe(2);
+        expect(toolStarts[0].content_block.name).toBe("get_weather");
+        expect(toolStarts[1].content_block.name).toBe("get_weather");
+        expect(toolStarts[0].content_block.id).toBe("call_001");
+        expect(toolStarts[1].content_block.id).toBe("call_002");
+
+        const tool1Delta = parsedMessages.find(
+          (msg) =>
+            msg.type === "content_block_delta" &&
+            msg.index === toolStarts[0].index &&
+            msg.delta?.type === "input_json_delta",
+        );
+        const tool2Delta = parsedMessages.find(
+          (msg) =>
+            msg.type === "content_block_delta" &&
+            msg.index === toolStarts[1].index &&
+            msg.delta?.type === "input_json_delta",
+        );
+
+        expect(tool1Delta).toBeDefined();
+        expect(tool1Delta.delta.partial_json).toBe("{\"location\":\"Beijing\"}");
+        expect(tool2Delta).toBeDefined();
+        expect(tool2Delta.delta.partial_json).toBe("{\"location\":\"Shanghai\"}");
       });
     });
   });

@@ -179,6 +179,19 @@ export const multipleToolCallStreamChunks = [
 ];
 
 /**
+ * Streaming chunks for multiple calls to same function (e.g., get_weather for Beijing and Shanghai)
+ */
+export const sameNameToolCallStreamChunks = [
+  "data: {\"id\":\"chatcmpl-stream5\",\"object\":\"chat.completion.chunk\",\"created\":1700000004,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream5\",\"object\":\"chat.completion.chunk\",\"created\":1700000004,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_001\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream5\",\"object\":\"chat.completion.chunk\",\"created\":1700000004,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"location\\\":\\\"Beijing\\\"}\"}}]},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream5\",\"object\":\"chat.completion.chunk\",\"created\":1700000004,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_002\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream5\",\"object\":\"chat.completion.chunk\",\"created\":1700000004,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"location\\\":\\\"Shanghai\\\"}\"}}]},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-stream5\",\"object\":\"chat.completion.chunk\",\"created\":1700000004,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":60}}",
+  "data: [DONE]",
+];
+
+/**
  * Streaming chunks with cached tokens
  */
 export const cachedTokensStreamChunks = [
