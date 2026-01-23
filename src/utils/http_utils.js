@@ -60,6 +60,16 @@ export async function sendHttpRequest(
             reject(new Error(`${respProcErrorMsg}: ${error.message}`));
           }
         } else {
+          console.error("[HTTP_ERROR] Non-200 status code:");
+          console.error("  Status:", res.statusCode, res.statusMessage);
+          console.error("  Request URL:", `https://${hostname}${path}`);
+          console.error("  Request Method:", method);
+          console.error("  Request Headers:", JSON.stringify(headers, null, 2));
+          if (payload) {
+            console.error("  Request Payload:", JSON.stringify(payload, null, 2));
+          }
+          console.error("  Response Headers:", JSON.stringify(res.headers, null, 2));
+          console.error("  Response Body:", data);
           reject(
             new Error(
               `${statusCodeErrorMsg}: ${res.statusCode}: ${JSON.stringify(data)}`,
@@ -134,7 +144,16 @@ export async function sendHttpStreamingRequest(
         });
 
         res.on("end", () => {
-          console.error("[HTTP_ERROR] Non-200 status code:", res.statusCode, errorData);
+          console.error("[HTTP_ERROR] Non-200 status code:");
+          console.error("  Status:", res.statusCode, res.statusMessage);
+          console.error("  Request URL:", `https://${hostname}${path}`);
+          console.error("  Request Method:", method);
+          console.error("  Request Headers:", JSON.stringify(headers, null, 2));
+          if (payload) {
+            console.error("  Request Payload:", JSON.stringify(payload, null, 2));
+          }
+          console.error("  Response Headers:", JSON.stringify(res.headers, null, 2));
+          console.error("  Response Body:", errorData);
           reject(
             new Error(
               `${statusCodeErrorMsg}: ${res.statusCode}: ${JSON.stringify(errorData)}`,
