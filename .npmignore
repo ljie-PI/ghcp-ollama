@@ -1,0 +1,28 @@
+# Development files
+tests/
+coverage/
+.gitattributes
+.gitignore
+build.js
+eslint.config.js
+vitest.config.js
+nodemon.json
+AGENTS.md
+
+# IDE and editor folders
+.idea/
+.vscode/
+*.njsproj
+*.sln
+.DS_Store
+
+# CI/CD
+.github/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Test files
+*.test.js

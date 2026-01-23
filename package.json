@@ -1,8 +1,33 @@
 {
   "name": "@ljie-pi/ghcp-ollama",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Using LLMs provided by Github Copilot with Ollama APIs",
   "main": "src/server.js",
+  "keywords": [
+    "github-copilot",
+    "ollama",
+    "openai",
+    "anthropic",
+    "llm",
+    "ai",
+    "chatbot",
+    "api-proxy"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ljie-PI/ghcp-ollama.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ljie-PI/ghcp-ollama/issues"
+  },
+  "homepage": "https://github.com/ljie-PI/ghcp-ollama#readme",
+  "author": "ljie-PI",
+  "license": "MIT",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
