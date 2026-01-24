@@ -2,6 +2,7 @@
 
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import minimist from "minimist";
 import { CopilotAuth } from "./utils/auth_client.js";
@@ -134,9 +135,27 @@ async function startServer() {
   
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const logFile = path.join(LOG_DIR, `server-${timestamp}.log`);
-  
-  const server = spawn("node", ["src/server.js", "--log-file", logFile], {
-    cwd: process.cwd(),
+
+  const serverctlDir = path.dirname(fileURLToPath(import.meta.url));
+
+  // Handle both npm installation and dev environments
+  // npm: node_modules/@ljie-pi/ghcp-ollama/src/{serverctl,server}.js
+  // dev: dist/src/serverctl.js -> src/server.js
+  const serverJsInSameDir = path.join(serverctlDir, "server.js");
+  let projectRoot, serverJsPath;
+
+  if (fs.existsSync(serverJsInSameDir)) {
+    // npm installed: server.js is in the same directory as serverctl.js
+    projectRoot = path.resolve(serverctlDir, "..");
+    serverJsPath = serverJsInSameDir;
+  } else {
+    // dev environment: go up from dist/src to project root
+    projectRoot = path.resolve(serverctlDir, "../..");
+    serverJsPath = path.join(projectRoot, "src", "server.js");
+  }
+
+  const server = spawn("node", [serverJsPath, "--log-file", logFile], {
+    cwd: projectRoot,
     stdio: ["ignore", "ignore", "ignore"],
     detached: true,
   });
@@ -146,21 +165,32 @@ async function startServer() {
     process.exit(1);
   });
 
+  let hasExited = false;
+  server.on("exit", (code, signal) => {
+    hasExited = true;
+    console.error(`Server process exited unexpectedly with code ${code}, signal ${signal}`);
+    process.exit(1);
+  });
+
   setTimeout(() => {
+    if (hasExited) {
+      console.error("Server failed to start (process already exited)");
+      process.exit(1);
+    }
     if (server.pid) {
       try {
+        process.kill(server.pid, 0);
         writePid(server.pid);
         console.log(`Server started with PID ${server.pid}`);
         console.log(`Server logs are being written to: ${logFile}`);
         server.unref();
       } catch (err) {
-        console.error(`Error writing PID file: ${err.message}`);
-        const timestamp = new Date().toISOString();
-        const logMessage = `[${timestamp}] ERROR: Error writing PID file: ${err.message}
-`;
-        const errorLogFile = path.join(LOG_DIR, `server-${new Date().toISOString().split("T")[0]}.error.log`);
-        fs.appendFileSync(errorLogFile, logMessage);
+        console.error(`Server process failed to start: ${err.message}`);
+        process.exit(1);
       }
+    } else {
+      console.error("Server failed to start (no PID)");
+      process.exit(1);
     }
     // Exit the parent process after starting the server
     process.exit(0);
