@@ -288,6 +288,58 @@ async function handleAnthropicChatRequest(req, res) {
   }
 }
 
+
+async function handleOpenAIResponseRequest(req, res) {
+  const chatClient = new CopilotChatClient();
+  try {
+    const stream = req.body.stream !== undefined ? req.body.stream : false;
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+
+      const chatResult = await chatClient.sendStreamingResponseRequest(
+        req.body,
+        (respMessages, event) => {
+          for (const respMessage of respMessages) {
+            res.write(`data: ${JSON.stringify(respMessage)}\n\n`);
+          }
+          res.flush && res.flush();
+          if (event === "end") {
+            res.write("data: [DONE]\n\n");
+            res.end();
+          }
+        },
+      );
+
+      if (!chatResult.success) {
+        const resp = {
+          error: "Failed to generate text",
+          message: chatResult.error,
+        };
+        res.write(`data: ${JSON.stringify(resp)}\n\n`);
+        res.end();
+      }
+    } else {
+      const result = await chatClient.sendResponseRequest(req.body);
+      if (result.success) {
+        return res.json(result.data);
+      }
+
+      return res.status(500).json({
+        error: "Failed to generate text",
+        message: result.error,
+      });
+    }
+  } catch (error) {
+    console.error("Error in response request:", error);
+    return res.status(500).json({
+      error: "Internal server error",
+      message: error.message,
+    });
+  }
+}
+
 function shutdown() {
   console.log("Shutting down server...");
 
@@ -319,6 +371,12 @@ app.post("/api/chat", ensureCopilotSetup, (req, res) => {
 // OpenAI API endpoints
 app.post("/v1/chat/completions", ensureCopilotSetup, (req, res) => {
   return handleOpenAIChatRequest(req, res);
+});
+app.post("/v1/response", ensureCopilotSetup, (req, res) => {
+  return handleOpenAIResponseRequest(req, res);
+});
+app.post("/v1/response/compact", ensureCopilotSetup, (req, res) => {
+  return handleOpenAIResponseRequest(req, res);
 });
 
 // Anthropic API endpoints
