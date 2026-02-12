@@ -213,6 +213,134 @@ export function createStreamBuffer(chunks) {
 }
 
 /**
+ * Non-streaming response with reasoning content
+ */
+export const reasoningResponse = {
+  id: "chatcmpl-reasoning123",
+  object: "chat.completion",
+  created: 1700000005,
+  model: "gpt-4o",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        reasoning_content: "Let me think about this step by step.",
+        content: "The answer is 42.",
+      },
+      finish_reason: "stop",
+    },
+  ],
+  usage: {
+    prompt_tokens: 50,
+    completion_tokens: 30,
+    total_tokens: 80,
+    completion_tokens_details: {
+      reasoning_tokens: 15,
+      text_tokens: 15,
+    },
+  },
+};
+
+/**
+ * Non-streaming response with length finish reason
+ */
+export const lengthFinishResponse = {
+  id: "chatcmpl-length123",
+  object: "chat.completion",
+  created: 1700000006,
+  model: "gpt-4o",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: "This is a truncated response...",
+      },
+      finish_reason: "length",
+    },
+  ],
+  usage: {
+    prompt_tokens: 100,
+    completion_tokens: 100,
+    total_tokens: 200,
+  },
+};
+
+/**
+ * Non-streaming response with annotations
+ */
+export const annotationsResponse = {
+  id: "chatcmpl-annotations123",
+  object: "chat.completion",
+  created: 1700000007,
+  model: "gpt-4o",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: "Check this source for more info.",
+        annotations: [
+          {
+            type: "url_citation",
+            url_citation: {
+              start_index: 5,
+              end_index: 21,
+              url: "https://example.com",
+              title: "Example Source",
+            },
+          },
+        ],
+      },
+      finish_reason: "stop",
+    },
+  ],
+  usage: {
+    prompt_tokens: 50,
+    completion_tokens: 20,
+    total_tokens: 70,
+  },
+};
+
+/**
+ * Streaming chunks with new event types (output_item_added, content_part_added, etc.)
+ */
+export const newEventTypesStreamChunks = [
+  "data: {\"id\":\"chatcmpl-newevents\",\"object\":\"chat.completion.chunk\",\"created\":1700000008,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-newevents\",\"object\":\"chat.completion.chunk\",\"created\":1700000008,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello \"},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-newevents\",\"object\":\"chat.completion.chunk\",\"created\":1700000008,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"world!\"},\"finish_reason\":null}]}",
+  "data: {\"id\":\"chatcmpl-newevents\",\"object\":\"chat.completion.chunk\",\"created\":1700000008,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":5}}",
+  "data: [DONE]",
+];
+
+/**
+ * Non-streaming response with cost
+ */
+export const costResponse = {
+  id: "chatcmpl-cost123",
+  object: "chat.completion",
+  created: 1700000009,
+  model: "gpt-4o",
+  choices: [
+    {
+      index: 0,
+      message: {
+        role: "assistant",
+        content: "This response has cost info.",
+      },
+      finish_reason: "stop",
+    },
+  ],
+  usage: {
+    prompt_tokens: 50,
+    completion_tokens: 20,
+    total_tokens: 70,
+    cost: 0.001,
+  },
+};
+
+/**
  * Helper function to create partial buffer (for testing incomplete data)
  * @param {string[]} chunks - Array of SSE data lines
  * @param {number} endIndex - Number of chunks to include

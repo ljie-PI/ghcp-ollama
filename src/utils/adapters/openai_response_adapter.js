@@ -44,19 +44,52 @@ export class OpenAIResponseAdapter extends BaseAdapter {
       });
     }
 
-    return {
+    const toolsResult = parseTools(payload.tools);
+    const responseFormat = transformTextFormat(payload.text);
+
+    const request = {
       model: payload.model,
       messages,
-      tools: parseTools(payload.tools),
       temperature: payload.temperature,
       top_p: payload.top_p,
       max_tokens: payload.max_output_tokens,
       stream: payload.stream !== undefined ? payload.stream : false,
-      tool_choice: payload.tool_choice,
       parallel_tool_calls: payload.parallel_tool_calls,
       user: payload.user,
       metadata: payload.metadata,
     };
+
+    if (payload.reasoning?.effort !== undefined) {
+      request.reasoning_effort = payload.reasoning.effort;
+    }
+
+    if (responseFormat) {
+      request.response_format = responseFormat;
+    }
+
+    if (payload.truncation !== undefined) {
+      request.truncation = payload.truncation;
+    }
+
+    if (payload.stream_options?.include_usage !== undefined) {
+      request.stream_options = {
+        include_usage: payload.stream_options.include_usage,
+      };
+    }
+
+    if (payload.tool_choice !== undefined) {
+      request.tool_choice = transformToolChoice(payload.tool_choice);
+    }
+
+    if (toolsResult?.tools) {
+      request.tools = toolsResult.tools;
+    }
+
+    if (toolsResult?.webSearchOptions) {
+      request.web_search_options = toolsResult.webSearchOptions;
+    }
+
+    return request;
   }
 
   /**
@@ -102,11 +135,30 @@ export class OpenAIResponseAdapter extends BaseAdapter {
   parseResponse(response) {
     const responseId = createResponseId();
     const createdAt = response.created || Math.floor(Date.now() / 1000);
-    const output = [];
+    const reasoningItems = [];
+    const toolCallItems = [];
     const outputTextParts = [];
+
+    const firstChoice = response.choices?.[0];
+    const finishReason = firstChoice?.finish_reason;
 
     for (const choice of response.choices || []) {
       const message = choice.message || {};
+
+      if (message.reasoning_content) {
+        reasoningItems.push({
+          id: createReasoningId(),
+          type: "reasoning",
+          status: mapFinishReasonToStatus(finishReason),
+          content: [
+            {
+              type: "output_text",
+              text: message.reasoning_content,
+              annotations: [],
+            },
+          ],
+        });
+      }
 
       if (message.content) {
         outputTextParts.push(message.content);
@@ -114,7 +166,7 @@ export class OpenAIResponseAdapter extends BaseAdapter {
 
       if (message.tool_calls && message.tool_calls.length > 0) {
         for (const toolCall of message.tool_calls) {
-          output.push({
+          toolCallItems.push({
             id: toolCall.id || createFunctionCallId(),
             type: "function_call",
             status: "completed",
@@ -127,33 +179,70 @@ export class OpenAIResponseAdapter extends BaseAdapter {
     }
 
     const outputText = outputTextParts.join("");
+    const output = [];
+
+    output.push(...reasoningItems);
+
     if (outputText) {
-      output.unshift({
+      const annotations = transformAnnotations(firstChoice?.message?.annotations);
+
+      output.push({
         id: createMessageId(),
         type: "message",
-        status: "completed",
+        status: mapFinishReasonToStatus(finishReason),
         role: "assistant",
         content: [
           {
             type: "output_text",
             text: outputText,
-            annotations: [],
+            annotations: annotations,
           },
         ],
       });
     }
 
+    output.push(...toolCallItems);
+
+    const incompleteDetails = this._buildIncompleteDetails(finishReason, response.incomplete_details);
+
     return {
       id: responseId,
       object: "response",
       created_at: createdAt,
-      status: "completed",
+      status: mapFinishReasonToStatus(finishReason),
       model: response.model,
       output,
       output_text: outputText,
+      incomplete_details: incompleteDetails,
       usage: buildUsage(response.usage),
-      parallel_tool_calls: true,
+      parallel_tool_calls: response.parallel_tool_calls !== undefined
+        ? response.parallel_tool_calls
+        : true,
     };
+  }
+
+  /**
+   * Builds incomplete_details object based on finish_reason.
+   * @private
+   */
+  _buildIncompleteDetails(finishReason, existingDetails) {
+    if (existingDetails) {
+      return existingDetails;
+    }
+
+    if (finishReason === "length") {
+      return {
+        reason: "max_tokens",
+      };
+    }
+
+    if (finishReason === "content_filter") {
+      return {
+        reason: "content_filter",
+      };
+    }
+
+    return null;
   }
 
   /**
@@ -177,6 +266,13 @@ export class OpenAIResponseAdapter extends BaseAdapter {
       state.usage = {};
       state.toolCalls = {};
       state.started = false;
+      state.itemId = null;
+      state.outputItemAdded = false;
+      state.contentPartAdded = false;
+      state.annotationAdded = false;
+      state.contentPartDone = false;
+      state.outputItemDone = false;
+      state.currentAnnotations = [];
     }
 
     for (const respMessage of respMessages) {
@@ -192,6 +288,44 @@ export class OpenAIResponseAdapter extends BaseAdapter {
 
         const data = line.slice(6);
         if (data === "[DONE]") {
+          if (state.contentPartAdded && !state.contentPartDone) {
+            state.contentPartDone = true;
+            parsedMessages.push({
+              type: "response.content_part.done",
+              response_id: state.responseId,
+              item_id: state.itemId || createMessageId(),
+              output_index: 0,
+              content_index: 0,
+              part: {
+                type: "output_text",
+                text: state.outputText,
+                annotations: state.currentAnnotations,
+              },
+            });
+          }
+
+          if (state.outputItemAdded && !state.outputItemDone) {
+            state.outputItemDone = true;
+            parsedMessages.push({
+              type: "response.output_item.done",
+              response_id: state.responseId,
+              output_index: 0,
+              item: {
+                id: state.itemId || createMessageId(),
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: state.outputText,
+                    annotations: state.currentAnnotations,
+                  },
+                ],
+              },
+            });
+          }
+
           if (state.outputText) {
             parsedMessages.push({
               type: "response.output_text.done",
@@ -267,6 +401,35 @@ export class OpenAIResponseAdapter extends BaseAdapter {
           continue;
         }
 
+        if (!state.outputItemAdded) {
+          state.outputItemAdded = true;
+          state.itemId = createMessageId();
+          parsedMessages.push({
+            type: "response.output_item.added",
+            response_id: state.responseId,
+            output_index: 0,
+            item: {
+              id: state.itemId,
+              type: "message",
+              status: "in_progress",
+              role: "assistant",
+              content: [],
+            },
+          });
+        }
+
+        if (!state.contentPartAdded && choice.delta.content) {
+          state.contentPartAdded = true;
+          parsedMessages.push({
+            type: "response.content_part.added",
+            response_id: state.responseId,
+            item_id: state.itemId,
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text: "", annotations: [] },
+          });
+        }
+
         if (choice.delta.content) {
           state.outputText += choice.delta.content;
           parsedMessages.push({
@@ -276,6 +439,22 @@ export class OpenAIResponseAdapter extends BaseAdapter {
             content_index: 0,
             delta: choice.delta.content,
           });
+        }
+
+        if (choice.delta.annotations && !state.annotationAdded) {
+          state.annotationAdded = true;
+          state.currentAnnotations = choice.delta.annotations;
+          for (let idx = 0; idx < choice.delta.annotations.length; idx++) {
+            parsedMessages.push({
+              type: "response.output_text.annotation_added",
+              response_id: state.responseId,
+              item_id: state.itemId,
+              output_index: 0,
+              content_index: 0,
+              annotation_index: idx,
+              annotation: choice.delta.annotations[idx],
+            });
+          }
         }
 
         if (choice.delta.tool_calls && choice.delta.tool_calls.length > 0) {
@@ -344,11 +523,23 @@ function normalizeRequestContent(content) {
       continue;
     }
 
+    if (item.type && item.type.startsWith("input_")) {
+      const baseType = item.type.slice(6);
+      if (baseType === "text") {
+        normalizedContent.push({ type: "text", text: item.text || "" });
+        continue;
+      }
+      if (baseType === "image") {
+        normalizedContent.push({
+          type: "image_url",
+          image_url: { url: item.image_url || item.url || "" },
+        });
+        continue;
+      }
+    }
+
     if (item.type === "input_text") {
-      normalizedContent.push({
-        type: "text",
-        text: item.text || "",
-      });
+      normalizedContent.push({ type: "text", text: item.text || "" });
       continue;
     }
 
@@ -356,11 +547,37 @@ function normalizeRequestContent(content) {
       if (item.image_url) {
         normalizedContent.push({
           type: "image_url",
-          image_url: {
-            url: item.image_url,
-          },
+          image_url: { url: item.image_url },
         });
       }
+      continue;
+    }
+
+    if (item.type === "input_file") {
+      const fileData = {};
+      if (item.file_id) fileData.file_id = item.file_id;
+      if (item.file_data) {
+        Object.assign(fileData, item.file_data);
+      }
+      normalizedContent.push({ type: "file", file: fileData });
+      continue;
+    }
+
+    if (item.type === "input_audio") {
+      normalizedContent.push({
+        type: "input_audio",
+        input_audio: item.audio || { url: item.url || "" },
+      });
+      continue;
+    }
+
+    if (item.type === "output_text") {
+      normalizedContent.push({ type: "text", text: item.text || "" });
+      continue;
+    }
+
+    if (item.type === "tool_result") {
+      normalizedContent.push({ type: "text", text: item.text || "" });
       continue;
     }
 
@@ -427,46 +644,188 @@ function parseTools(tools) {
   }
 
   const openaiTools = [];
+  let webSearchOptions = null;
 
   for (const tool of tools) {
     if (!tool || typeof tool !== "object") {
       continue;
     }
 
-    if (tool.type !== "function") {
-      continue;
-    }
-
-    if (tool.function) {
+    if (tool.type === "mcp") {
       openaiTools.push(tool);
       continue;
     }
 
-    openaiTools.push({
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-      },
-    });
+    if (tool.type === "web_search_preview" || tool.type === "web_search") {
+      webSearchOptions = {
+        search_context_size: tool.search_context_size || "medium",
+        user_location: tool.user_location || null,
+      };
+      continue;
+    }
+
+    if (tool.type === "function") {
+      if (tool.function) {
+        const parameters = tool.function.parameters || {};
+        if (!parameters.type || typeof parameters.type !== "object") {
+          parameters.type = "object";
+        }
+
+        const processedTool = {
+          type: "function",
+          function: {
+            name: tool.function.name,
+            description: tool.function.description,
+            parameters: parameters,
+            strict: tool.function.strict || false,
+          },
+        };
+
+        if (tool.cache_control) processedTool.cache_control = tool.cache_control;
+        if (tool.defer_loading) processedTool.defer_loading = tool.defer_loading;
+        if (tool.allowed_callers) processedTool.allowed_callers = tool.allowed_callers;
+        if (tool.input_examples) processedTool.input_examples = tool.input_examples;
+
+        openaiTools.push(processedTool);
+        continue;
+      }
+    }
+
+    if (tool.name || tool.parameters) {
+      const parameters = tool.parameters || {};
+      if (!parameters.type) parameters.type = "object";
+
+      openaiTools.push({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: parameters,
+        },
+      });
+    }
   }
 
-  return openaiTools.length > 0 ? openaiTools : undefined;
+  return {
+    tools: openaiTools.length > 0 ? openaiTools : undefined,
+    webSearchOptions,
+  };
 }
 
 function buildUsage(usage = {}) {
-  return {
+  const result = {
     input_tokens: usage.prompt_tokens || 0,
     output_tokens: usage.completion_tokens || 0,
     total_tokens:
       usage.total_tokens ||
       (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
-    input_tokens_details: {
-      cached_tokens: usage.prompt_tokens_details?.cached_tokens || 0,
-    },
-    output_tokens_details: {
-      reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens || 0,
-    },
   };
+
+  if (usage.prompt_tokens_details) {
+    result.input_tokens_details = {
+      cached_tokens: usage.prompt_tokens_details.cached_tokens || 0,
+      text_tokens: usage.prompt_tokens_details.text_tokens || 0,
+      audio_tokens: usage.prompt_tokens_details.audio_tokens || 0,
+    };
+  } else {
+    result.input_tokens_details = {
+      cached_tokens: 0,
+    };
+  }
+
+  if (usage.completion_tokens_details) {
+    result.output_tokens_details = {
+      reasoning_tokens: usage.completion_tokens_details.reasoning_tokens || 0,
+      text_tokens: usage.completion_tokens_details.text_tokens || 0,
+    };
+  } else {
+    result.output_tokens_details = {
+      reasoning_tokens: 0,
+    };
+  }
+
+  if (usage.cost !== undefined) {
+    result.cost = usage.cost;
+  }
+
+  return result;
+}
+
+function createReasoningId() {
+  return `reasoning_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+function mapFinishReasonToStatus(finishReason) {
+  if (!finishReason) {
+    return "completed";
+  }
+  if (["stop", "tool_calls", "function_call"].includes(finishReason)) {
+    return "completed";
+  } else if (["length", "content_filter"].includes(finishReason)) {
+    return "incomplete";
+  }
+  return "completed";
+}
+
+function transformAnnotations(annotations) {
+  if (!Array.isArray(annotations)) {
+    return [];
+  }
+
+  const transformed = [];
+  for (const annotation of annotations) {
+    if (annotation.type === "url_citation" && annotation.url_citation) {
+      const citation = annotation.url_citation;
+      transformed.push({
+        type: "url_citation",
+        start_index: citation.start_index,
+        end_index: citation.end_index,
+        url: citation.url,
+        title: citation.title,
+      });
+    }
+  }
+  return transformed;
+}
+
+function transformToolChoice(tool_choice) {
+  if (typeof tool_choice === "string") {
+    return tool_choice;
+  }
+  if (typeof tool_choice === "object" && tool_choice?.type) {
+    if (tool_choice.type === "auto") {
+      return "auto";
+    }
+    if (tool_choice.type === "none") {
+      return "none";
+    }
+    if (tool_choice.type === "required" || tool_choice.type === "tool") {
+      return "required";
+    }
+  }
+  return tool_choice;
+}
+
+function transformTextFormat(textParam) {
+  if (!textParam || typeof textParam !== "object") {
+    return null;
+  }
+  const format = textParam.format;
+  if (!format || typeof format !== "object") {
+    return null;
+  }
+
+  if (format.type === "json_schema") {
+    return {
+      type: "json_schema",
+      json_schema: {
+        name: format.name || "response_schema",
+        schema: format.schema || {},
+        strict: format.strict || false,
+      },
+    };
+  } else if (format.type === "json_object") {
+    return { type: "json_object" };
+  }
+  return null;
 }
