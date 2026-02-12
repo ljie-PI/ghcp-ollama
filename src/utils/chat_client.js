@@ -18,6 +18,7 @@ import { editorConfig } from "../config.js";
 import { OllamaAdapter } from "./adapters/ollama_adapter.js";
 import { OpenAIAdapter } from "./adapters/openai_adapter.js";
 import { AnthropicAdapter } from "./adapters/anthropic_adapter.js";
+import { OpenAIResponseAdapter } from "./adapters/openai_response_adapter.js";
 
 export class CopilotChatClient {
   constructor() {
@@ -29,6 +30,7 @@ export class CopilotChatClient {
       ollama: new OllamaAdapter(this),
       openai: new OpenAIAdapter(this),
       anthropic: new AnthropicAdapter(this),
+      response: new OpenAIResponseAdapter(this),
     };
   }
 
@@ -212,6 +214,58 @@ export class CopilotChatClient {
       }
 
       const adapter = this.#adapters.anthropic;
+      return await this.#doSendUnified(adapter, payload, null, false);
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+
+  /**
+   * Sends a streaming OpenAI Responses API request.
+   *
+   * @param {Object} payload - The OpenAI responses request payload
+   * @param {Function} onResponse - Callback function to handle streaming responses
+   * @param {boolean} [refreshToken=true] - Whether to attempt token refresh if invalid
+   *
+   * @returns {Promise<{success: boolean, error?: string}>} Result of the streaming request
+   */
+  async sendStreamingResponseRequest(payload, onResponse, refreshToken = true) {
+    try {
+      const tokenStatus = await this.#checkGithubToken(refreshToken);
+      if (!tokenStatus.success) {
+        return tokenStatus;
+      }
+
+      const adapter = this.#adapters.response;
+      return await this.#doSendUnified(adapter, payload, onResponse, true);
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Sends a non-streaming OpenAI Responses API request.
+   *
+   * @param {Object} payload - The OpenAI responses request payload
+   * @param {boolean} [refreshToken=true] - Whether to attempt token refresh if invalid
+   *
+   * @returns {object} Response of the non-streaming call
+   */
+  async sendResponseRequest(payload, refreshToken = true) {
+    try {
+      const tokenStatus = await this.#checkGithubToken(refreshToken);
+      if (!tokenStatus.success) {
+        return tokenStatus;
+      }
+
+      const adapter = this.#adapters.response;
       return await this.#doSendUnified(adapter, payload, null, false);
     } catch (error) {
       return {
