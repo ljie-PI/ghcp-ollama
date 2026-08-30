@@ -46,6 +46,9 @@ Copilot 是否接受全部字段是外部部署约束，不得通过模型名、
   `stream_options:{"include_usage":true}`。
 
 本文不规定 token/endpoint 获取、认证 header、重试或 timeout。
+共同 request parsing、resource limits、admission 和 timeout 由
+[Gateway HTTP contracts](./gateway_http_contracts.md) 定义；Ollama error body 与 stream
+post-commit 行为仍以第 9 节为准。
 
 ## 3. 固定 DTO
 

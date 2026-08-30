@@ -31,6 +31,14 @@
 本文转换核心不解析 HTTP body 或原始 SSE bytes。宿主负责 JSON/SSE framing、解压、body limit、
 认证、重试和路由；转换核心接收本节规定的已解析值。
 
+`POST /v1/messages` 的宿主必须按
+[Gateway HTTP contracts](./gateway_http_contracts.md) 要求恰好一个
+`anthropic-version: 2023-06-01`；该 header 不进入 Chat request。
+
+进入 converter 前，宿主按 captured Bound Account catalog 解析 model：property 缺失时只使用 valid
+preferred model；显式 model 必须是 non-empty string 且精确可见，未知显式 ID 返回 404，且不 fallback
+preference。Resolved model 写入 converter input，并在请求期间保持不变。
+
 ## 2. 逻辑接口
 
 ```text

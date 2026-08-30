@@ -1,15 +1,17 @@
-# ghcp-gateway 目标架构
+# ghc-gateway 目标架构
 
 ## 1. 文档定位
 
-本文定义 ghcp-gateway 重构后的模块、接口、状态归属、路由、依赖方向和运行时技术栈。
+本文定义 ghc-gateway 重构后的模块、接口、状态归属、路由、依赖方向和运行时技术栈。
 它不重复协议字段映射；以下生产规范仍是可观察行为的唯一来源：
 
 - [Ollama Chat → Chat Completions](./ollama_chat_to_chat_completions.md)
 - [Anthropic Messages → Chat Completions](./claude_messages_to_chat_completions.md)
+- [OpenAI Chat Completions native proxy](./openai_chat_completions.md)
 - [OpenAI Responses → Chat Completions](./codex_response_to_chat_completions.md)
 - [OpenAI Responses 上游路由](./openai_responses_routing.md)
 - [GitHub Copilot 模型列表](./github_copilot_model_listing_apis.md)
+- [Gateway HTTP contracts](./gateway_http_contracts.md)
 
 `docs/cc-switch/` 和 `docs/litellm/` 是来源说明，不是运行时 profile。架构与生产规范冲突时，
 生产规范优先。
@@ -26,7 +28,8 @@
 | 持久化 | SQLite WAL + `better-sqlite3`，显式 SQL migration |
 | 流模型 | `AsyncIterable` + Web `ReadableStream`，pull-based backpressure |
 | JSON | 保留 object member 顺序和 number lexeme 的 wire JSON module |
-| 日志 | 结构化日志；固定容量的运行时日志和指标快照 |
+| Runtime validation | Protocol 使用显式 WireJson decoder；Admin/config 使用 TypeBox，不 coercion |
+| 日志 | 结构化 JSONL；10 MiB × 5，且文件最长保留 7 天 |
 | 分发 | npm；运行时只有一个 Node.js 进程 |
 
 选择 Hono 的原因是它以 Web Standard `Request`/`Response` 为 interface，TypeScript 支持好，
@@ -38,36 +41,59 @@ middleware；协议精确字节输出不使用会改变序列化结果的便捷 
 
 ### 2.1 项目身份与命令
 
-- 项目名称：`ghcp-gateway`。
-- npm package：`@ljie-pi/ghcp-gateway`。
-- npm 只发布一个 executable：`ghcp-gateway`。
-- 新实现不保留 `ghcpo`、`ghcpo-server` 或同名 alias。
-- 配置、日志、PID/service metadata 和 user data directory 使用 `ghcp-gateway` namespace。
+- 项目名称：`ghc-gateway`。
+- npm package：`@ljie-pi/ghc-gateway`，初始版本 `0.1.0`。
+- npm 只发布一个 executable：`ghcg`。
+- 新实现不保留 `ghcp-ollama`、`ghcp-gateway`、`ghcpo`、`ghcpo-server` 或同名 alias。
+- 默认 data directory 为 `~/.ghc-gateway`，环境变量统一使用 `GHC_GATEWAY_` 前缀。
 
 CLI 使用一个 executable 和分组 subcommands：
 
 ```text
-ghcp-gateway serve
-ghcp-gateway status
-ghcp-gateway auth login
-ghcp-gateway auth logout
-ghcp-gateway auth status
-ghcp-gateway models list
-ghcp-gateway models current
-ghcp-gateway models set <model>
-ghcp-gateway admin open
+ghcg serve
+ghcg start
+ghcg stop
+ghcg restart
+ghcg status
+ghcg auth login [--host <domain>]
+ghcg auth login poll <flow-id>
+ghcg auth logout [--account <account-id>]
+ghcg auth status
+ghcg accounts list
+ghcg accounts use <account-id>
+ghcg accounts remove <account-id>
+ghcg models list [--account <account-id>]
+ghcg models current
+ghcg models set <model-id>
+ghcg config get [key]
+ghcg config set <key> <value>
+ghcg admin open
 ```
 
-`serve` 在前台运行并处理 graceful shutdown。后台常驻由 systemd、launchd、Windows Service 或调用方
-process manager 管理，不再维护一个跨平台 PID-file `serverctl` executable。Web 管理页面是配置与
-监控的主要交互界面；CLI 只保留启动、诊断、认证和自动化需要的操作。
+所有 commands 接受 global `--data-dir`，locator priority 为
+`--data-dir > GHC_GATEWAY_DATA_DIR > ~/.ghc-gateway`；不扫描其他目录或端口。只有 `serve/start` 接受
+`--port` 与 `--log-level`。
 
-旧 package、命令和 data path 的一次性迁移策略在实现阶段单独确定，不在运行时长期保留双名称。
-README 在代码、CLI 和迁移行为完成后统一更新，避免文档先于可运行行为。
+`serve` 在前台运行并处理 graceful shutdown。`start` 自行启动一个 detached daemon；
+`stop/restart/status` 使用 PID、process start time、instance nonce 和认证的 loopback control
+endpoint 验证进程身份，不能只凭 PID 终止进程。只有一个 daemon 进程，不保留 watchdog，也不自动
+重启。Web 管理页面是配置与监控的主要交互界面；CLI 负责进程、认证、账号、模型、配置和自动化。
+Foreground `serve` 写 stderr；daemon 写结构化 JSONL，单文件最大 10 MiB，最多 5 个文件且最长
+保留 7 天。Admin Events 读取 SQLite Operational Events，不直接 tail log files。
+
+Control routes 与 public routes 共用同一个 loopback listener，使用 protected
+`X-GHCG-Control-Token`/`X-GHCG-Instance-Nonce`。Linux、Windows、macOS 的 process-start identity、
+stale/conflict/unreachable 状态和 10 秒 graceful-then-verified-force-stop 算法由 master spec 固定。
+Foreground `serve` 与 managed daemon 都发布 protected runtime identity；auth/accounts/models/config/
+admin CLI commands 只调用运行中 gateway 的 control transport，不在第二个进程中打开 SQLite 或 secret
+file。`stop/restart` 只管理 detached daemon。
+
+这是 clean break：不读取或导入旧 data path，用户必须重新登录和配置。README 在代码、CLI 和
+cutover 行为完成后统一更新，避免文档先于可运行行为。
 
 ## 3. 设计目标
 
-1. 完整支持五份生产规范，不用公共抽象改写协议特有语义。
+1. 完整支持七份生产规范，不用公共抽象改写协议特有语义。
 2. raw HTTP/SSE、typed Chat chunks、协议状态机和 downstream wire serialization 各自有明确归属。
 3. 每个请求的状态独占；跨请求状态只能通过显式 interface 修改。
 4. 同一 GitHub Copilot backend 提供 Chat Completions 与 native Responses；Responses planner 决定
@@ -111,27 +137,38 @@ README 在代码、CLI 和迁移行为完成后统一更新，避免文档先于
 - 不注册 `/models`、`/responses`、`/openai/v1/responses`、`/claude/v1/messages`、
   `/v1/responses/compact` 或尾斜杠 alias。
 - Query string 不参与 route 匹配；是否允许具体 query 由对应生产规范决定。
-- `/v1/*`、`/api/chat` 和 `/api/tags` 使用同一个 inference authentication middleware；
-  `/api/version`、`/healthz` 和 `/readyz` 不接收 inference credential。
+- 首版 listener 固定为 loopback；全部 inference routes 不要求 gateway API key。
+- 所有首字节前的解析、限制、admission、timeout 和 error presenter 行为由
+  [Gateway HTTP contracts](./gateway_http_contracts.md) 统一定义。
 
 ### 5.2 管理与运行状态路由
 
 | Method | Route | 用途 |
 | --- | --- | --- |
 | `GET` | `/admin/*` | Svelte 静态管理页面 |
+| `POST` | `/admin/api/v1/auth/bootstrap` | 一次性 token 换取 Admin Session |
+| `GET` | `/admin/api/v1/auth/session` | 当前 Admin Session 与 CSRF metadata |
+| `POST` | `/admin/api/v1/auth/logout` | 注销当前 Admin Session |
 | `GET` | `/admin/api/v1/status` | 版本、uptime、认证状态、活动请求和资源概览 |
-| `GET/PUT` | `/admin/api/v1/config` | 读取和原子更新可公开配置 |
-| `GET/POST` | `/admin/api/v1/accounts` | 账号列表，以及启动 github.com/GHES device flow |
-| `DELETE` | `/admin/api/v1/accounts/:accountId` | 删除指定账号及其关联状态 |
+| `GET` | `/admin/api/v1/usage` | 按小时聚合的 request/token/error/latency 数据 |
+| `GET`/`PUT` | `/admin/api/v1/config` | 读取和 revision-CAS 更新 runtime config |
+| `GET` | `/admin/api/v1/accounts` | 账号与默认账号列表 |
+| `POST` | `/admin/api/v1/device-flows` | 启动 github.com/GHES device flow |
+| `GET` | `/admin/api/v1/device-flows/:flowId` | 轮询 device flow |
+| `DELETE` | `/admin/api/v1/accounts/:accountId` | 移除 credential/preference/cache，保留 identity/usage |
 | `PUT` | `/admin/api/v1/accounts/default` | 原子切换默认账号 |
+| `GET` | `/admin/api/v1/models` | 指定账号的 catalog 与 preferred model |
 | `POST` | `/admin/api/v1/models/refresh` | 显式失效指定账号的 model catalog |
-| `GET/DELETE` | `/admin/api/v1/history` | history 使用量和显式清理 |
-| `GET` | `/admin/api/v1/events` | 管理页面单向监控 SSE |
+| `PUT` | `/admin/api/v1/models/preferred` | revision-CAS 更新账号 preferred model |
+| `GET`/`DELETE` | `/admin/api/v1/history` | Responses History 使用量和显式清理 |
+| `GET` | `/admin/api/v1/events` | 分页读取 Operational Events |
+| `GET` | `/admin/api/v1/events/stream` | 管理页面单向监控 SSE |
 | `GET` | `/healthz` | 进程存活 |
 | `GET` | `/readyz` | SQLite、配置和必要依赖是否完成初始化 |
 
 管理接口使用独立的 `/admin/api/v1` namespace，不能与兼容协议 route 混用 middleware 或错误
-envelope。
+envelope。UI 固定提供 Overview、Accounts、Models、Configuration、Responses History 和 Events
+六个视图。
 
 ## 6. 系统上下文
 
@@ -176,7 +213,7 @@ wire pivot，不是把所有下游协议统一成同一种 domain model。
 ```mermaid
 flowchart TD
     Main[Composition root]
-    Gateway[Gateway module]
+    Gateway[Gateway Foundation]
     Http[Hono host]
     OpenAI[OpenAI Chat module]
     Responses[Responses module]
@@ -211,9 +248,9 @@ flowchart TD
 
 依赖只能沿箭头方向。Protocol modules 不 import Hono、SQLite、`process.env` 或具体 HTTP client。
 
-### 7.1 Gateway module
+### 7.1 Gateway Foundation
 
-Gateway 是进程对外的深 module：
+Gateway Foundation 是进程对外的 deep module：
 
 ```ts
 export interface Gateway {
@@ -223,6 +260,8 @@ export interface Gateway {
 
 export async function createGateway(
   config: Readonly<GatewayConfig>,
+  routes: readonly RouteRegistration[],
+  dependencies: Readonly<GatewayDependencies>,
 ): Promise<Gateway>;
 ```
 
@@ -242,20 +281,40 @@ SQLite 和日志资源。
 
 ### 7.2 Protocol endpoint modules
 
-每个公开推理协议只导出一个 endpoint factory：
+每个公开推理协议导出 endpoint 与 failure presenter，并由 Gateway Foundation 显式注册：
 
 ```ts
+export interface DecodedHttpRequest {
+  readonly url: URL;
+  readonly headers: Headers;
+  readonly body?: WireJsonObject;
+}
+
 export type ProtocolEndpoint = (
-  request: Request,
+  request: Readonly<DecodedHttpRequest>,
   scope: Readonly<RequestScope>,
 ) => Promise<Response>;
+
+export type FailurePresenter = (
+  failure: Readonly<GatewayFailure>,
+  requestId: string,
+) => Response;
+
+export interface RouteRegistration {
+  readonly method: "GET" | "POST" | "PUT" | "DELETE";
+  readonly path: string;
+  readonly admission: "none" | "inference";
+  readonly body: "none" | "wire-json-object";
+  readonly presentFailure: FailurePresenter;
+  readonly endpoint: ProtocolEndpoint;
+}
 ```
 
 ```ts
-createOpenAiChatEndpoint(dependencies): ProtocolEndpoint;
-createResponsesEndpoint(dependencies): ProtocolEndpoint;
-createAnthropicMessagesEndpoint(dependencies): ProtocolEndpoint;
-createOllamaChatEndpoint(dependencies): ProtocolEndpoint;
+createOpenAiChatRoute(dependencies): RouteRegistration;
+createResponsesRoute(dependencies): RouteRegistration;
+createAnthropicMessagesRoute(dependencies): RouteRegistration;
+createOllamaChatRoutes(dependencies): readonly RouteRegistration[];
 ```
 
 这四个 factories 具有相同调用形状，但不继承 `BaseAdapter`，也不要求内部实现同一组
@@ -272,11 +331,12 @@ createOllamaChatEndpoint(dependencies): ProtocolEndpoint;
 6. protocol公开错误映射；
 7. exact clock/UUID/token-counter 调用时机。
 
-Hono route 只做显式注册：
+Gateway Foundation 拥有 body read、WireJson parse、admission 和 commit boundary。各 Protocol Endpoint
+Module 拥有自己的 failure presenter；需要 single header 的协议以 exact value 校验，Fetch 合并后的
+duplicate value 无法通过。Hono route 只做显式注册：
 
 ```ts
-app.post("/v1/responses", (context) =>
-  responsesEndpoint(context.req.raw, createRequestScope(context)));
+registerRoute(app, createResponsesRoute(dependencies));
 ```
 
 固定 route 数量较少，显式注册比 protocol registry 更易读。增加第五种协议时新增一个纵向 module 和
@@ -287,54 +347,29 @@ app.post("/v1/responses", (context) =>
 ```ts
 export interface RequestScope {
   readonly requestId: string;
-  readonly principal: InferencePrincipal;
   readonly signal: AbortSignal;
+  readonly config: Readonly<RuntimeConfigSnapshot>;
 }
 ```
 
-Scope 只包含所有请求都真正需要的宿主信息。Protocol-specific context、ToolContext、reasoning
+Scope 只包含所有请求都真正需要的宿主信息，并在 admission 时捕获 immutable runtime config。
+Protocol-specific context、ToolContext、reasoning
 configuration、original request 和 stream cursors 留在对应 protocol module，不能加入
 `RequestScope`。
 
 ### 7.4 Responses request planning
 
 Responses module 内部必须有一个明确的 request-planning seam；不能让 converter 自行读取 model
-catalog、默认模型或全局配置：
+catalog、默认模型或全局配置。[Responses 上游路由规范](./openai_responses_routing.md) 独占
+`planResponsesExecution(request, resolvedModel, target)` 与
+`NativeResponsesPlan | ChatBridgePlan` 的 canonical definitions；本文件不重新定义 prepared plan。
 
-```ts
-interface ResponsesRequestPlanner {
-  prepare(
-    request: Readonly<ResponsesRequest>,
-    boundCopilot: Readonly<BoundCopilot>,
-    catalog: Readonly<CatalogSnapshot>,
-    signal: AbortSignal,
-  ): Promise<PreparedResponsesRequest>;
-}
+Execution order 是：decode request → bind one account → capture its catalog → resolve one model → bind the same
+account's Copilot target → plan once。Alias、默认模型或 deployment mapping 不得在 planning 后再次改变
+model；不得按 `gpt-*`、vendor 或 hostname 猜测。
 
-type PreparedResponsesRequest =
-  | PreparedNativeResponsesRequest
-  | PreparedChatBridgeRequest;
-
-interface PreparedNativeResponsesRequest {
-  readonly kind: "native_responses";
-  readonly responsesRequest: ResponsesRequest;
-}
-
-interface PreparedChatBridgeRequest {
-  readonly kind: "chat_bridge";
-  readonly chatRequest: ChatRequest;
-  readonly responseContext: ResponseContext;
-  readonly streamContext: StreamContext;
-}
-```
-
-Planner 先用实际 upstream model resolver 得到唯一 `ResolvedModel`，再读取该 model 的 immutable
-routing metadata，并按 [Responses 上游路由规范](./openai_responses_routing.md) 选择 plan。
-Alias、默认模型或 deployment mapping 不得在 planning 后再次改变 model；不得按 `gpt-*`、vendor
-或 hostname 猜测。
-
-Native plan 复用 planning 前的 model selection 结果，直接构造 `PreparedNativeResponsesRequest`，
-不访问本地 history 或 Chat converter。
+Native plan 复用 canonical plan 中的 original request、ResolvedModel、URL 和 stream flag，不访问本地
+history 或 Chat converter。
 
 ChatBridgePlan 继续严格执行原顺序：
 
@@ -346,6 +381,9 @@ ChatBridgePlan 继续严格执行原顺序：
 6. 调用纯 request converter；
 7. 根据已绑定 target 的 host/path 注入 prompt cache key。
 
+Chat request、ResponseContext 与 StreamContext 由 bridge request conversion slice 构造，不属于 planner
+output。Shared Responses DTO/decoder 在 planner、native、history 和 bridge 之前只有一个 owner。
+
 Request、response 和 stream contexts 保持协议规范规定的独立类型；不得合并成通用
 `ProviderContext` 或 `Capabilities`。
 
@@ -355,7 +393,10 @@ Copilot backend 是协议 modules 使用的唯一 remote seam：
 
 ```ts
 export interface CopilotBackend {
-  bindDefault(signal: AbortSignal): Promise<BoundCopilot>;
+  bind(
+    account: Readonly<BoundAccount>,
+    signal: AbortSignal,
+  ): Promise<BoundCopilot>;
 }
 
 export interface BoundCopilot {
@@ -365,15 +406,16 @@ export interface BoundCopilot {
   completeChat(request: Readonly<ChatRequest>): Promise<ChatResponse>;
   openChatStream(request: Readonly<ChatRequest>): Promise<UpstreamByteStream>;
   completeResponses(
-    request: Readonly<ResponsesRequest>,
-  ): Promise<NativeResponsesResponse>;
+    request: Readonly<NativeResponsesUpstreamRequest>,
+  ): Promise<UpstreamByteResponse>;
   openResponsesStream(
-    request: Readonly<ResponsesRequest>,
+    request: Readonly<NativeResponsesUpstreamRequest>,
   ): Promise<UpstreamByteStream>;
 }
 ```
 
-`bindDefault()` 在一次请求内只执行一次默认账号解析。返回的 `BoundCopilot` 固定 account、credential
+`AccountDirectory.bindDefault()` 在一次请求内先选择并固定 `BoundAccount`；model catalog 与
+`CopilotBackend.bind(account, signal)` 必须消费同一个 account。返回的 `BoundCopilot` 固定 credential
 和 target；请求执行期间默认账号变化不能影响它。
 
 Production adapter 隐藏：
@@ -469,7 +511,7 @@ Async iterator 正常结束与 `kind:"done"` 是不同信号。这样可以同�
 - Ollama 对 `[DONE]`、truncation 和唯一 terminal owner 的要求；
 - Anthropic 的 `start/consume/finish` lifecycle；
 - Responses ChatBridgePlan 的 typed chunk iterator 与 item lifecycle；
-- OpenAI Chat 对 raw SSE 的低开销透传。
+- OpenAI Chat 对 shared typed Chat frames 的低开销 OpenAI SSE re-encoding。
 
 Raw SSE module 只处理 bytes、UTF-8、BOM、换行、field、multi-data、error frame 和 `[DONE]`。
 它不生成 Ollama、Anthropic 或 Responses object。Bridge typed converters 永远不读取 `data:` 或
@@ -513,7 +555,8 @@ Stream writer 显式跟踪 `responseCommitted`：
 - Responses Chat bridge converter 独立维护 response、reasoning、message、tool item、output index
   和 `sequence_number`。
 - Responses native stream 不创建 bridge state machine，也不读写本地 Responses history。
-- OpenAI Chat stream 采用 raw fast path；不为透传请求创建其他协议的状态机。
+- OpenAI Chat stream 采用 native fast path，但仍经过 shared incremental Chat SSE parser 和 OpenAI
+  re-encoder；不做 byte-blind passthrough，也不创建其他协议的状态机。
 
 这些状态机不能合并成通用 `StreamTransformer`。
 
@@ -591,7 +634,7 @@ Wire JSON module 是 in-process deep module，负责：
 
 | Module | Request-local state | Shared state | Downstream wire |
 | --- | --- | --- | --- |
-| OpenAI Chat | stream passthrough 与 request metadata | 无 | JSON / OpenAI SSE |
+| OpenAI Chat | request planning、incremental Chat SSE parser 与 terminal | 无 | JSON / normalized OpenAI SSE |
 | Responses native | resolved model、native request、output-index item-ID map | 无 | Native Responses JSON/SSE |
 | Responses Chat bridge | original request、ToolContext、reasoning config、item states、IDs、sequence | Responses history | Converted Responses JSON/SSE |
 | Anthropic | original model、active block、tool partial JSON、pending finish/usage、UUID | 无 | JSON / Anthropic SSE |
@@ -629,14 +672,13 @@ Admin 使用单独的 `ResponsesHistoryAdmin` interface 查询统计和清理，
 
 - SQLite 是 source of truth，重启后 history 仍可恢复。
 - 整个 store 最多 512 个 responses，按全局插入顺序淘汰。
-- TTL 可配置，初始默认 7 天；过期记录在 lookup 时视为不存在。
+- TTL 可配置，默认 7 天；过期记录在 lookup 时视为不存在。
 - `previous_response_id` lookup 优先；call-ID fallback 只在全部未过期记录中唯一命中时使用。
 - Response、ordered call items 和 call-ID index 在一个 transaction 中写入。
 - 启动、lookup 和 record 时清理过期项；正确性不依赖后台 timer。
 - 不增加 read-through memory cache，除非 profiling 证明 SQLite lookup 是瓶颈。
 
-TTL 是此前确认的 gateway 产品要求，但当前 Responses 生产规范只定义 512 条插入淘汰。实施前必须把
-TTL、expiry lookup 和测试写入该生产规范；architecture 不能单方面成为协议行为来源。
+TTL、expiry lookup 和测试同时写入 Responses bridge 生产规范；architecture 不单方面覆盖协议行为。
 
 建议 schema：
 
@@ -664,9 +706,10 @@ INDEX responses(expires_at)
 ```
 
 Chat bridge non-stream 在完整 Responses response 转换成功后、发送成功 body 前提交。Chat bridge
-stream 在 request-local state 中收集规范要求的 completed items，并在发送 `response.completed` 前
-提交；提交失败时不发送成功 terminal。已经发送的中间 events 不回滚，也不合成
-`response.failed`。
+stream 在每个 Semantic Checkpoint 对应的 `response.output_item.done` 发送前同步提交 minimal
+history，并在 `response.completed` 前完成最终事务；提交失败时不发送该 checkpoint 或成功 terminal。
+已经发送的更早 events 不回滚，也不合成 `response.failed`。未完成的 token、reasoning 或 tool
+argument fragments 不持久化，进程重启后不恢复当前 Stream Execution。
 
 ## 13. Model catalog
 
@@ -700,9 +743,14 @@ export interface CopilotModelCatalog {
 不排序、不去重。Responses native capability 只读取固定 routing metadata，不按模型名称或 vendor
 推断。
 
-`CatalogSnapshot.fetchedAt` 在每次成功 fetch 时只读取一次 clock。`DEFAULT_MODEL_CREATED_AT_TIME` 在
-module 初始化时读取十进制环境值，缺失时使用 `1677610602`；该值只影响 `/v1/models` 的兼容字段，
-不参与 cache key。
+OpenAI Chat、Anthropic Messages 和 Responses 共用一次性 model resolution：missing model 只使用当前
+Bound Account 的 valid、仍可见 preferred model；显式 model 必须是 non-empty string 且精确存在于
+captured catalog，否则返回 protocol-native 404 model-not-found，不静默 fallback。Ollama 保持其生产
+规范要求的显式 non-empty model，不使用该 preference fallback。
+
+`CatalogSnapshot.fetchedAt` 在每次成功 fetch 时只读取一次 clock。Logical
+`DEFAULT_MODEL_CREATED_AT_TIME` 在 production 固定为 `1677610602`；tests 可注入替代值。该值只影响
+`/v1/models` 的兼容字段，不参与 cache key，也不是 runtime config。
 
 ## 14. GitHub.com 与 GHES 环境
 
@@ -776,13 +824,20 @@ vision header。它仍使用上表的新 client identity versions，不继承 Li
 
 ### 14.3 Token 与 endpoint 生命周期
 
+- Stable `AccountId` 由 normalized GitHub host 与 immutable numeric user ID 组成；login/display name
+  变化不改变 identity。
+- 默认最多保存 8 个 accounts，配置硬上限为 32。
+- 每个 account 独立保存 preferred model。Catalog refresh 后该 model 不再可见时标记 invalid，并要求
+  用户重新选择，不能静默选择第一项。
 - github.com 使用有效 Copilot session token；剩余时间 `< 60s` 时按账号刷新，恰好 60 秒仍有效。
 - GHES 使用保存的 GitHub OAuth token，不执行 Copilot token exchange。
 - 同账号 token refresh 和 endpoint discovery 分别使用 mutex，并在锁内二次检查。
 - 不使用全局 30 秒 refresh interval；按需刷新减少后台工作和常驻状态。
 - endpoint discovery 的 cache/fallback 规则严格遵守模型目录生产规范。
-- 删除账号或全量退出时清除 credential、endpoint 和 model catalog。Responses history 当前为全局
-  store，只能通过 retention policy 或显式 history clear 删除。
+- 删除账号时清除 credential、preferred model、endpoint 和 model catalog，但保留稳定 account
+  metadata 与 Usage Buckets；同一 identity 再次登录时继续关联原统计。Responses History 当前为全局
+  store，只能通过 retention policy 或显式 history clear 删除。Removed identity 在最后一个 retained
+  Usage Bucket 过期后可清理；deterministic AccountId 仍保证未来重新登录得到同一 key。
 
 ## 15. Persistence 与配置
 
@@ -794,17 +849,22 @@ vision header。它仍使用上表的新 client identity versions，不继承 Li
 - 非 secret account metadata；
 - 默认账号和模型 preference；
 - Web 可修改配置及 revision；
-- Responses history。
+- Responses History；
+- Usage Buckets；
+- Operational Events。
 
-使用 WAL、foreign keys、busy timeout 和短事务。不使用 ORM。`better-sqlite3` 直接位于 persistence
-implementation 内；不创建只有一个 adapter 的 `DatabasePort`。
+使用 WAL、`synchronous=FULL`、foreign keys、busy timeout、单一主线程 connection、prepared
+statements 和短事务。不使用 ORM。事务内禁止网络 I/O 与大型 JSON transformation。
+`better-sqlite3` 直接位于 persistence implementation 内；不创建只有一个 adapter 的
+`DatabasePort`。
 
-`node:sqlite` 达到 stable 前不作为 production dependency。若实测同步 SQLite 操作造成可见
-event-loop stall，可将同一个 history implementation 移入 worker thread；对 protocol module 的
-interface 不变。
+`node:sqlite` 达到 stable 前不作为 production dependency。若真实 workload 的 event-loop delay
+p95 超过 10 ms，才评估将同一个 persistence implementation 移入 worker thread；迁移后必须重新通过
+RSS gate，且 protocol interfaces 不变。
 
 OAuth token、Copilot token 和其他 secrets 不存入普通 settings table。Secret storage 使用独立
-`CredentialStore` seam，production adapter 采用 OS credential vault；tests 使用 memory adapter。
+`CredentialStore` seam；production adapter 在 `~/.ghc-gateway` 使用 atomic replace、Unix `0600`
+或 Windows current-user-only ACL，tests 使用 memory adapter。
 
 ### 15.2 Runtime config
 
@@ -822,6 +882,33 @@ parse
 失败时继续使用旧 snapshot，不能部分应用。Protocol stream 在开始时捕获 snapshot；请求进行中配置
 变化不改变其行为。
 
+配置来源分为：
+
+- Startup config：`CLI > environment > default`，包括 port、data directory 和 log level，只在重启后
+  生效。
+- Runtime config：SQLite 是唯一 source of truth；环境变量只在首次初始化时 seed，包括资源限制与
+  retention。Default account 与 per-account preferred model 使用独立 revisioned stores，不属于
+  `RuntimeConfigSnapshot`。
+
+### 15.3 Usage 与运行事件
+
+Usage Bucket key：
+
+```text
+UTC hour + accountId + protocol + resolvedModel + outcome
+```
+
+每个 bucket 只保存 request/error counts、input/output/cache tokens、latency sum/max 和可计算的聚合
+字段；不保存 request ID、prompt、response、tool arguments 或任意高基数 label。默认保留 90 天，
+最多 100,000 rows，任一限制先到即清理。删除 credential 不删除 bucket；同一 stable account identity
+重新登录后继续关联。
+
+Operational Event 是脱敏 diagnostic metadata，写入 SQLite，默认保留 7 天且最多 512 条。它与
+Responses History 不同，不能用于恢复协议上下文。
+
+Semantic Checkpoint 同步等待 transaction commit。Usage Buckets 和 Operational Events 可由单 writer
+合并为短批次；graceful shutdown 在有界时间内 flush，hard crash 可以丢失尚未提交的非关键批次。
+
 ## 16. 管理页面
 
 ### 16.1 技术栈
@@ -834,7 +921,7 @@ parse
 - 页面较少时不增加 client router，以 tabs/state 切换视图。
 
 构建产物随 npm package 发布，由 Hono 提供 `/admin/*`。浏览器内存不计入 gateway daemon RSS；
-关闭页面后后台不保留前端 session。
+关闭页面后后台不新增持久状态；Admin Session 仍按 idle/absolute timeout 管理。
 
 ### 16.2 功能
 
@@ -844,18 +931,21 @@ parse
 - model catalog 查看和显式 refresh；
 - Responses history 数量、最旧/最新时间、TTL 和清理；
 - 活动请求、活动 streams、请求/错误计数和延迟；
-- 最近固定数量的脱敏日志。
+- 最近 7 天且最多 512 条 Operational Events。
 
-实时状态使用 `/admin/api/v1/events` SSE，不使用 WebSocket。事件只携带聚合状态，不携带 prompt、
+实时状态使用 `/admin/api/v1/events/stream` SSE，不使用 WebSocket。事件只携带聚合状态，不携带 prompt、
 response body、Authorization、OAuth token、Copilot token 或完整 upstream endpoint。
 
 ### 16.3 安全默认值
 
-- 默认只监听 `127.0.0.1`。
-- Public inference routes 使用同一个 inference authentication middleware。
-- Admin routes 使用独立 admin session 和 CSRF token。
-- 一旦允许非 loopback bind，必须配置 admin authentication；TLS 由内置配置或可信 reverse proxy
-  提供。
+- Bind host 固定且仅允许 literal `127.0.0.1`；port 默认 `31400`，可由 startup config 设置。首版显式
+  拒绝 non-loopback bind。
+- Public inference routes 在 loopback 上不要求 gateway API key。
+- 首次启动生成长期 random admin secret。`ghcg admin open` 取得 60 秒、一次性 bootstrap token，
+  换取 `HttpOnly`、`SameSite=Strict` 的内存 Admin Session。
+- Admin Session idle timeout 为 30 分钟，absolute timeout 为 12 小时，daemon 重启后全部失效。
+- Bootstrap exchange 不要求已有 Admin Session/CSRF，但要求精确 Origin 与 valid one-use token；其他所有
+  Admin 写请求同时验证 Admin Session、CSRF token 和精确 Origin。
 - Static catch-all 只能位于 `/admin/*`，不能吞掉 `/v1/*`、`/api/*`、`/healthz` 或 `/readyz`。
 
 ## 17. Error ownership
@@ -867,6 +957,7 @@ type GatewayFailure =
   | { kind: "invalid_request"; cause: unknown }
   | { kind: "unsupported_semantics"; cause: unknown }
   | { kind: "authentication"; cause: unknown }
+  | { kind: "model_not_found"; cause: unknown }
   | { kind: "upstream_http"; status: number; retryAfter?: string }
   | { kind: "upstream_timeout"; cause: unknown }
   | { kind: "upstream_network"; cause: unknown }
@@ -880,31 +971,46 @@ type GatewayFailure =
 规范要求的 HTTP status、body 或 post-commit 行为。转换异常必须保留 `cause`，不能被 broad catch
 改写成成功 response。
 
-Anthropic 和 Responses 转换规范把 pre-commit HTTP status、headers 与 error body 明确交给宿主，
-OpenAI Chat 的宿主错误 contract 也不在现有四份规范中。对应 endpoint 必须各自拥有
-`AnthropicHttpErrorPresenter`、`ResponsesHttpErrorPresenter` 和 `OpenAiHttpErrorPresenter`，但在
-实现前应先补充各 route 的 HTTP error contract。不能用 architecture 文档或一个通用 error envelope
-替代缺失的可观察行为规范。
+首字节前的 HTTP status、headers、request IDs、limits、admission 与各协议 error presenter 由
+[Gateway HTTP contracts](./gateway_http_contracts.md) 定义。各 endpoint 仍分别拥有
+`AnthropicHttpErrorPresenter`、`ResponsesHttpErrorPresenter`、`OpenAiHttpErrorPresenter` 和
+Ollama presenter；共同 failure taxonomy 不能演化成一个公开通用 error envelope。
 
 日志只记录分类、request ID、protocol、status 和脱敏 upstream host。不得记录 token、完整 headers、
 完整 request/response body 或非 2xx upstream body。
 
-## 18. 资源约束
+## 18. 资源与性能约束
 
-- JSON body、单个 SSE event、non-stream response 和 protocol accumulator 都有配置上限。
-- 超限显式失败，不截断、不返回部分成功。
-- 并发 streams 使用有界 semaphore；等待者响应客户端取消。
+以下为可配置默认值：
+
+| Resource | Default |
+| --- | ---: |
+| JSON request body | 32 MiB |
+| Single upstream SSE event | 4 MiB |
+| Non-stream body | 32 MiB |
+| Per-request protocol accumulator | 32 MiB |
+| Active inference requests | 4 |
+| Admission queue | 16 |
+| Admission wait | 30 seconds |
+| Connect timeout | 30 seconds |
+| First-byte timeout | 120 seconds |
+| Stream idle timeout | 120 seconds |
+| Total request timeout | 30 minutes |
+
+Queue full 或等待超时使用协议原生 overload error；等待者响应 client abort。超限显式失败，不截断、
+不返回部分成功。具体 status 与 wire body 由 Gateway HTTP contracts 定义。
+
 - Stream pipeline 不预取，不保存 raw chunk 历史。
 - Responses Chat bridge 只保留生成 terminal response 与 history record 所需的聚合状态；native
   stream 不缓存完整 response。
-- Model catalog cache 按账号有界；账号数量由本地配置约束。
-- Responses history 固定全库最多 512 条并有 TTL。
+- Model catalog cache 由 32 accounts 的硬上限约束。
+- Responses History 固定全库最多 512 条，默认 TTL 7 天。
 - Metrics label 集合固定，不把 request ID、prompt、任意 model string 作为无界 label。
-- 管理日志 ring buffer 和监控订阅者数量有界。
+- Operational Events 与管理监控订阅者数量有界。
 - Token 和 endpoint 采用按需刷新，不使用常驻 polling interval。
 - SQLite cleanup 在启动/read/write 时执行，初版不增加只为 cleanup 存在的 timer。
 
-实现进入迁移前需要使用真实 fixtures 建立 RSS benchmark，至少测量：
+实现进入迁移前需要使用真实 fixtures 建立 benchmark，至少测量：
 
 1. idle；
 2. 单 stream；
@@ -913,8 +1019,24 @@ OpenAI Chat 的宿主错误 contract 也不在现有四份规范中。对应 end
 5. history 从空到 512 条及 cleanup 后；
 6. 管理页面关闭与打开时。
 
-以进程 RSS/Private Bytes/PSS 为主要指标，不能把 V8 `heapUsed`、npm 磁盘大小或浏览器进程内存混为
-gateway 常驻内存。
+验收 gates：
+
+- Idle RSS 不超过 64 MiB。
+- 完成或取消 1,000 个 Stream Executions 并进入稳定状态后，RSS 不超过预热 baseline + 16 MiB。
+- Scripted local upstream 下，buffered request gateway overhead p95 不超过 5 ms。
+- Stream event conversion/forwarding overhead p95 不超过 2 ms。
+- Semantic Checkpoint SQLite commit p95 不超过 5 ms。
+- Event-loop delay p95 不超过 10 ms。
+- 每项 benchmark 连续运行三次均通过。
+
+以进程 RSS/Private Bytes/PSS 为主要内存指标，不能把 V8 `heapUsed`、npm 磁盘大小或浏览器进程内存
+混为 daemon 常驻内存。
+
+Runtime 使用 5 分钟 rolling window。任一 latency gate 连续三个窗口超限时标记 `degraded`，在 Admin
+Overview 显示实际值、阈值和开始时间，并写入一个 Operational Event；连续三个窗口恢复后清除。
+Performance degradation 不使 `/healthz` 或 `/readyz` 失败，也不自动调参或降级协议。Runbook 按原因
+选择批量 noncritical writes、优化 serializer、由用户降低并发，或评估 persistence worker；任何 worker
+变化必须重新通过 RSS gate。
 
 ## 19. Testing architecture
 
@@ -935,7 +1057,7 @@ wire behavior 不需要通过 private methods 测试。
 
 必须包含：
 
-- 五份生产规范要求的 differential/golden fixtures；
+- 七份生产规范要求的 differential/golden fixtures；
 - Ollama Go-compatible byte golden；
 - Anthropic Python JSON/SSE text golden；
 - Responses item lifecycle、ToolContext、sequence 和 history round-trip；
@@ -946,13 +1068,15 @@ wire behavior 不需要通过 private methods 测试。
 - abort、timeout、post-commit failure 和零 upstream call；
 - missing/null/false/0/empty 与 object member order；
 - deterministic clock 和 UUID。
+- 全部 CI fixtures 离线运行，不读取本机 LiteLLM/cc-switch checkout，也不调用真实 remote API。
+- Differential/golden generators 只作为显式维护命令运行；生成的完整 expected outputs 提交到仓库。
 
 ### 19.2 Ports 与 adapters
 
 | Seam | Production adapter | Test adapter |
 | --- | --- | --- |
 | Copilot backend | Fetch/Undici | Scripted in-process backend |
-| Credential store | OS credential vault | Memory store |
+| Credential store | Protected secret file | Memory store |
 | Responses history | SQLite WAL | SQLite temporary database |
 | Clock | System clock | Fixed/sequence clock |
 | UUID | `crypto.randomUUID()` | Sequence UUID |
@@ -964,7 +1088,14 @@ History tests 对 temporary SQLite 运行与 production 相同的 implementation
 
 - Hono `app.request()` 覆盖 route、middleware、headers 和 buffered responses。
 - Loopback test server 覆盖 streaming、disconnect、redirect、timeout 和 exact bytes。
-- Windows、Linux、macOS CI 覆盖 npm package 与 native SQLite dependency。
+- Vitest 覆盖 modules、protocol contracts 和 Admin API；Playwright 用 5–8 个关键流程覆盖 Admin
+  bootstrap、六个视图、config update、SSE reconnect 和 destructive confirmation。
+- Official-client integration tests are manual-only：lockfile-pinned `openai`、`@anthropic-ai/sdk` 和
+  `ollama` clients 向真实 loopback listener 发请求，上游可为 scripted Copilot 或显式 live GitHub
+  Copilot。两种 suites 都不进入 CI、default tests、implementation acceptance 或 implement/code-review
+  loop，并分别要求显式 opt-in environment flag。
+- 正式支持 Node.js 24 的 Windows x64、Linux x64/arm64、macOS x64/arm64。CI 至少覆盖 Windows x64、
+  Linux x64、macOS arm64；Linux arm64 与 macOS x64 通过 install/start smoke artifacts。
 - Memory tests验证 repeated request/abort 后 active scope 归零且 RSS 达到稳定平台。
 
 ## 20. 建议目录
@@ -972,6 +1103,11 @@ History tests 对 temporary SQLite 运行与 production 相同的 implementation
 ```text
 src/
   main.ts
+  version.ts
+  cli/
+    main.ts
+    daemon.ts
+    commands/
   gateway/
     create_gateway.ts
     request_scope.ts
@@ -1015,6 +1151,9 @@ src/
     database.ts
     account_store.ts
     responses_history.ts
+    usage_buckets.ts
+    operational_events.ts
+    credential_store.ts
     migrations/
 
   serialization/
@@ -1025,6 +1164,7 @@ src/
     api.ts
     auth.ts
     metrics.ts
+    contracts.ts
 
 web/
   src/
@@ -1095,21 +1235,25 @@ Web Stream 集成，同时让 protocol modules 保持 Fetch-standard interface�
 - 不在 `main` 上直接 commit 或 push 重构改动。
 - 重构完成、协议 contracts 和 migration 验收通过后，再单独创建 `refactor -> main` 的最终 PR。
 - README 更新属于最后阶段的独立改动，与最终代码和命令行为一起进入 `refactor`。
+- 最终 release 完成后再把 GitHub repository 重命名为 `ljie-PI/ghc-gateway`；implementation agents
+  不提前修改 remote repository identity。
 
 ### 23.2 实施顺序
 
-建议按以下顺序实施，但每一步都以对应生产规范 tests 为完成条件：
+实施 slice、dependency DAG、每项 tests 和 cutover gates 由
+[Refactor master spec](./specs/refactor_master_spec.md) 定义。总体 tracer-bullet 顺序为：
 
-1. strict TypeScript、Wire JSON 和 composition root；
-2. Copilot environment、credential 和 backend；
-3. model catalog、Responses routing metadata、`/v1/models` 三种 serializers 和 `/api/tags`；
-4. raw SSE framing、cancellation 和 backpressure；
-5. OpenAI Chat raw path；
-6. Ollama endpoint；
-7. Anthropic endpoint；
-8. Responses native/bridge planner、native transport、Chat bridge 与 SQLite history；
-9. Admin API 和 Svelte UI；
-10. 删除旧 JavaScript adapters、callbacks 和重复配置。
+1. Specification Closure；
+2. RSS/toolchain gate；
+3. Gateway Foundation；
+4. Credentials 与 Model Catalog；
+5. OpenAI Chat；
+6. Ollama；
+7. Anthropic；
+8. Responses native、Chat bridge 与 Responses History；
+9. CLI/daemon 与 Admin；
+10. final cutover、legacy removal、README 和 release。
 
-迁移期间不长期维护两套生产行为。一个 route 的新 contract tests 完成后整体切换该 route，并删除旧
-implementation。
+迁移期间新 TypeScript app 使用非默认入口，且不能 fallback 到 legacy handlers。Legacy default runtime
+在 final cutover 前保持完整可运行；cutover 一次切换 package/bin/scripts 并删除全部旧
+implementation，不逐 route 修改默认生产入口。
