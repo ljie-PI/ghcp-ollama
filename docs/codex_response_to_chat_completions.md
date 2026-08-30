@@ -36,6 +36,10 @@
 
 转换核心不接收原始 HTTP body 或 SSE bytes。宿主负责 JSON/SSE framing、压缩、body limit、
 认证、重试和路由。本文 stream converter 接收上游已经解析的 typed Chat chunks。
+首字节前的 HTTP limits、admission、timeout 和公开 errors 由
+[Gateway HTTP contracts](./gateway_http_contracts.md) 定义。
+Typed Responses events 的 downstream media type、`event:`/`data:` bytes、terminal 与 EOF behavior 由
+[Responses 上游路由规范](./openai_responses_routing.md#75-downstream-responses-sse-wire) 定义。
 
 ## 2. 逻辑接口与上下文
 
@@ -562,6 +566,10 @@ model catalog 或目标仓库全局配置。
 HistoryStore：
 
 - 最多 512 个 response，按插入顺序淘汰；
+- 默认 TTL 为 7 天，可由 runtime config 修改；
+- TTL 从 response 首次记录时间计算，不因 lookup 滑动；
+- 启动、lookup 和 record 前清理过期 response；过期项不参与 scoped lookup 或全局唯一 fallback；
+- TTL 缩短时立即按首次记录时间清理现有数据；延长不能恢复已删除数据；
 - 每个 response 保存有序 call items 和 `call_id -> item`；
 - 全局保存 `call_id -> response IDs`；
 - 只缓存 `function_call`、`custom_tool_call`、`tool_search_call`；
@@ -584,9 +592,10 @@ Enrichment：
 
 原 input 是单 object 且未变化时保持 object；发生恢复后可变为 array。
 
-非流成功后从完整 Responses response 记录。流式路径从已转换的
-`response.output_item.done`/`response.completed` 记录。由于响应采用 LiteLLM，能记录的类型受
-第 12 节组合损失限制。
+非流成功后从完整 Responses response 记录。流式路径把每个已转换
+`response.output_item.done` 视为 Semantic Checkpoint，在向客户端发送该 event 前同步提交 minimal
+history；`response.completed` 前提交最终 response state。未完成的 delta/fragments 不记录。由于
+响应采用 LiteLLM，能记录的类型受第 12 节组合损失限制。
 
 ## 9. 非流式 Chat response
 
@@ -991,7 +1000,7 @@ HTTP status、error body、raw SSE error event 和 credential redaction 由宿�
 | Tool output media | depth 32、8 KiB threshold、parallel flush |
 | Tools | trimmed names、function schema、namespace hash、custom/tool-search精确description、collision |
 | Reasoning config | null/defaults、explicit disable、supportsEffort override、unknown effort、五种 mode |
-| History | 512 eviction、scoped lookup、unique global fallback、ambiguous call ID |
+| History | 512 eviction、7-day/default configurable TTL、启动/read/write cleanup、scoped lookup、unique global fallback、ambiguous call ID、Semantic Checkpoint durability |
 
 ### 14.2 Response differential
 

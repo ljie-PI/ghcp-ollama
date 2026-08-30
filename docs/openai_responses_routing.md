@@ -24,6 +24,8 @@ ChatBridgePlan
 4. 明确 native 与 Chat bridge 的 history 归属。
 
 本文不重新定义 Responses → Chat 的字段转换，也不定义 `/responses/compact`。
+首字节前的 HTTP limits、admission、timeout、request ID 和公开 error envelope 由
+[Gateway HTTP contracts](./gateway_http_contracts.md) 定义。
 
 只注册：
 
@@ -38,15 +40,16 @@ POST /v1/responses
 ```text
 planResponsesExecution(
   request: ResponsesRequest,
-  model: ResolvedModel,
+  resolvedModel: ResolvedModel,
   target: BoundCopilotTarget
 ) -> NativeResponsesPlan | ChatBridgePlan
 ```
 
 ```text
 ResolvedModel {
-  requestedModel: string
+  requestedModel?: string
   upstreamModel: string
+  source: "explicit" | "preferred"
   routing: ResponsesRoutingMetadata
 }
 
@@ -57,16 +60,16 @@ ResponsesRoutingMetadata {
 
 NativeResponsesPlan {
   kind: "native_responses"
-  request: ResponsesRequest
-  upstreamModel: string
+  originalRequest: ResponsesRequest
+  resolvedModel: ResolvedModel
   upstreamUrl: string
   stream: boolean
 }
 
 ChatBridgePlan {
   kind: "chat_bridge"
-  request: ResponsesRequest
-  upstreamModel: string
+  originalRequest: ResponsesRequest
+  resolvedModel: ResolvedModel
 }
 ```
 
@@ -76,6 +79,32 @@ Planning 发生在 request converter 之前。Planner 可以读取已绑定账�
 调用 planner 前必须用与实际 upstream request 相同的 model resolver 得到一个
 `ResolvedModel`。Capability gate 只读取该 resolved model 的 metadata；alias、默认模型或
 deployment mapping 不得在 planning 后再次改变 model。
+
+以上 signature 与 two plan shapes 是唯一 canonical definition。Architecture、master spec 和
+implementation 只引用它们，不重新定义另一种 prepared plan。
+
+Model property 缺失时只使用 Bound Account 的 valid、仍存在于 captured catalog 的 preferred model。
+显式 model 必须是 non-empty string 且精确存在于 catalog；未知显式 ID 返回 HTTP 404，不 fallback
+preference。缺失且无 valid preference 或显式类型/空值错误返回 HTTP 400。具体 presenter 由 Gateway
+HTTP contract 定义。
+
+### 2.1 `WireJson` request decoder
+
+Gateway 先按 HTTP contract 取得一个 bounded `WireJsonObject`。Responses decoder 规则：
+
+1. 所有 decoded top-level member names 必须唯一；duplicate known/unknown/escaped-equivalent key 都是
+   HTTP 400 `invalid_request`。Nested duplicate policy 留给对应 field conversion/native preservation。
+2. `model` missing 允许进入 preferred-model resolution；present 时必须是 non-empty string。Null、其他
+   type 或 empty string 是 HTTP 400；whitespace 不 trim，通常在 catalog exact lookup 得到 404。
+3. `stream` missing 等价 execution `false`，但不向原 request 注入字段；present 时只接受 JSON boolean。
+   Null/string/number/array/object 是 HTTP 400。
+4. Decoder 不对白名单外 field 做 schema coercion、default 或丢弃；它保留 source member order、number
+   lexeme、nested values 和明确的 missing/null/false/0/empty。
+5. Native plan reserializes this ordered request under section 5；ChatBridgePlan 把同一个 decoded request
+   交给 bridge conversion spec。两条路径不能各自定义第二套 top-level decoder。
+
+Decoder output contains the ordered original request、typed `model` presence/value and boolean execution `stream`。
+任何 decoder failure 都发生在 account/CAPI/upstream call 前。
 
 ## 3. Native capability
 
@@ -87,7 +116,9 @@ deployment mapping 不得在 planning 后再次改变 model。
    string `"/v1/responses"`：native；
 4. 其他情况：Chat bridge。
 
-Model metadata lookup error、unknown model 或 malformed routing metadata 都安全回退到 Chat bridge。
+只有已经按第 2 节成功 catalog-resolve 的 model 才进入 capability lookup。该 resolved model 的 private
+routing metadata lookup error、missing 或 malformed 时安全回退到 Chat bridge；显式 model 不在 catalog
+是前置 404，不属于本 fallback。
 
 不得使用以下条件推断 native：
 
@@ -232,6 +263,61 @@ event。
 - 未来的跨账号或跨 deployment retry 必须重新 planning，不能在同一 attempt 中改变 wire mode。
 - 已开始 native stream 后不合成 Chat bridge event 或 `response.failed`。
 
+### 7.4 Native usage observation
+
+Native wire 不因 telemetry 改变。Side observation 只接受 nonnegative integer：
+
+```text
+response.usage.input_tokens                    -> inputTokens
+response.usage.output_tokens                   -> outputTokens
+response.usage.input_tokens_details.cached_tokens -> cachedTokens
+```
+
+Non-stream 从完整 response 读取一次。Stream 只从具有 `response` object 的 typed terminal event 读取，
+每个 counter last-valid-wins；missing/invalid 不清除早先 valid value。不得 coerce、从 total 推导或
+修改 event。`response.failed`/`status:"failed"`/native `type:"error"` 仍按第 7 节作为合法 2xx protocol
+content 转发，但 Usage Bucket outcome 记为 `upstream_error`；其他合法 terminal 为 `success`。
+
+### 7.5 Downstream Responses SSE wire
+
+Both execution plans use one route-owned encoder：
+
+```http
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache
+x-request-id: <gateway-request-id>
+```
+
+Each typed Responses event must have a non-empty string `type` and is encoded exactly as：
+
+```text
+event: <type>\n
+data: <ordered-compact-json>\n\n
+```
+
+There is no `[DONE]` marker、SSE `id:`/`retry:` field、extra blank event or synthetic heartbeat in protocol output。
+Bridge events retain their constructed member order；native events retain upstream member order except the section 7.2
+item-ID normalization。
+
+Native upstream `2xx` stream must have `text/event-stream` media type and is parsed with the shared incremental UTF-8/SSE
+framer：one initial BOM allowed，LF/CRLF/CR、comments and multi-`data` lines behave as in the OpenAI Chat SSE spec，
+and each complete event is bounded by the captured SSE-event limit。Data must be one JSON object with a non-empty string
+`type`。An optional upstream `event:` field must exactly equal object `type`；missing is allowed and downstream derives
+it from the object。`[DONE]`、malformed/non-object data、type mismatch、invalid UTF-8 or incomplete EOF is invalid
+upstream response。
+
+Terminal ownership：
+
+- `ChatBridgePlan` succeeds only after encoding its single `response.completed` event。
+- `NativeResponsesPlan` succeeds after forwarding one of `response.completed`、`response.failed`、
+  `response.incomplete` or `error`；the first terminal is absorbing。
+- Clean EOF before a terminal is truncated failure。No plan synthesizes a terminal on EOF。
+- Pre-commit failure returns the ordinary Responses HTTP error。Post-commit failure closes the connection without an
+  additional event。
+
+The stream is pull-based and reads at most one unconsumed emit-ready event。Client abort cancels the same upstream
+operation、calls iterator `return()` and writes zero additional bytes。
+
 ## 8. History ownership
 
 Native plan 使用 GitHub Copilot Responses 自身的 `previous_response_id`、reasoning
@@ -264,10 +350,14 @@ response ID。
 
 必须覆盖：
 
+- top-level duplicate known/unknown/escaped key；
+- model missing/explicit type/empty/unknown 与 preferred resolution；
+- stream missing/false/true/wrong type；
 - `mode:"responses"` native；
 - `mode:"chat"` 即使 endpoints 包含 Responses 仍 bridge；
 - mode missing + `/v1/responses` native；
-- unknown/malformed/lookup error bridge；
+- catalog-resolved model 的 routing metadata missing/malformed/lookup error bridge；catalog-unknown explicit
+  model 404；
 - `gpt-*`、vendor、hostname 不参与推断；
 - planning 后 metadata 变化不改变当前 request；
 - native URL 精确为 normalized base + `/responses`；
@@ -275,6 +365,7 @@ response ID。
 - native non-stream 不重写 IDs/usage；
 - native stream 不经过 Chat decoder/converter，但按 `output_index` 统一 added/sub-event/done item IDs；
 - 每个 native stream 的 item-ID map 相互隔离；
+- native/bridge exact `event:` + `data:` LF wire、terminal set、no `[DONE]`、EOF truncation；
 - native failure 不进行 same-provider protocol fallback；
 - native 不读写 local history；
 - bridge path 与原转换规范 fixtures 完全一致；

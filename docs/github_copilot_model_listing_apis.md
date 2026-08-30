@@ -47,6 +47,10 @@ GET /api/tags
 - 不执行模型 ID alias、dash/dot 改写或 family fallback。
 - 不按名称合并不同 model item。
 
+共同 loopback access、request ID、timeout 和首字节前 failure taxonomy 由
+[Gateway HTTP contracts](./gateway_http_contracts.md) 定义；本文件第 11 节的模型列表 presenter
+shape 与 status mapping 优先。
+
 ## 3. 非目标
 
 本实现不负责：
@@ -370,7 +374,8 @@ clear() -> void
 GET /v1/models
 ```
 
-该 route 使用与 Chat/Responses inference routes 相同的 inbound authentication middleware。
+该 route 使用与 Chat/Responses inference routes 相同的 loopback access policy；首版不要求 gateway
+API key。
 
 不要求注册 `/models` alias。
 
@@ -420,8 +425,8 @@ Cache-Control: no-store
 | `data[].max_output_tokens` | 第 4.3 节 coercion 结果，存在时 |
 | `object` | 固定 `"list"` |
 
-`DEFAULT_MODEL_CREATED_AT_TIME` 在模块初始化时读取同名环境变量并转十进制 integer；缺失时为
-`1677610602`。
+Production `DEFAULT_MODEL_CREATED_AT_TIME` 固定为 `1677610602`。Tests 可以通过 serializer dependency
+注入其他值验证格式，但不存在可由用户设置的 environment/config override。
 
 不得输出：
 
@@ -502,7 +507,8 @@ Anthropic content negotiation 在 `/v1/models` 完整提供。
 
 ### 10.1 成功响应
 
-该 route 使用与 Chat/Responses inference routes 相同的 inbound authentication middleware。
+该 route 使用与 Chat/Responses inference routes 相同的 loopback access policy；首版不要求 gateway
+API key。
 
 成功响应设置：
 
@@ -671,7 +677,7 @@ Service 在调用 serializer 前完成第 4.3 节 lookup，并传入只读
 负责：
 
 - 注册两个 GET route；
-- 对两个 route应用 inference authentication middleware；
+- 对两个 route 应用统一 loopback access policy；
 - 取得 caller cancellation signal；
 - 调用同一个 Copilot model catalog service；
 - `/v1/models` 根据 `anthropic-version` header presence 选择 OpenAI 或 Anthropic serializer；
@@ -732,11 +738,11 @@ Service 在调用 serializer 前完成第 4.3 节 lookup，并传入只读
 
 ### 14.5 `/v1/models`
 
-- 使用与 inference routes 相同的 inbound authentication middleware。
+- 使用与 inference routes 相同的 loopback access policy。
 - 成功响应固定 `Content-Type: application/json; charset=utf-8` 和 `Cache-Control: no-store`。
 - 无 `anthropic-version` 时，非空和空目录与第 9.2–9.3 节深度等值。
 - 每项至少有 `id`、`object`、`created`、`owned_by`；第 4.3 节有值时追加对应 metadata fields。
-- `created` 使用可由环境覆盖的 `DEFAULT_MODEL_CREATED_AT_TIME`。
+- `created` 使用固定 logical `DEFAULT_MODEL_CREATED_AT_TIME`。
 - `owned_by` 固定为 `"openai"`。
 - 错误 envelope、type、param 和 code 与第 11 节一致。
 - 任意值的 `anthropic-version` header（包括 empty string）触发第 9.4 节 Anthropic shape。
@@ -749,7 +755,7 @@ Service 在调用 serializer 前完成第 4.3 节 lookup，并传入只读
 ### 14.6 `/api/tags`
 
 - 成功响应 `Content-Type` 为 `application/json; charset=utf-8`。
-- 使用与 inference routes 相同的 inbound authentication middleware。
+- 使用与 inference routes 相同的 loopback access policy。
 - 成功响应 `Cache-Control` 为 `no-store`。
 - 非空和空目录与第 10 节深度等值。
 - `name` 和 `model` 相同。
@@ -766,7 +772,8 @@ Service 在调用 serializer 前完成第 4.3 节 lookup，并传入只读
 - 连接关闭后不写响应。
 - 所有 timer、listener、body 和 socket 被释放。
 
-Golden fixtures 必须固定 clock、`DEFAULT_MODEL_CREATED_AT_TIME` 环境值和 model metadata，并覆盖：
+Golden fixtures 必须固定 clock、test-injected `DEFAULT_MODEL_CREATED_AT_TIME` 和 model metadata，并
+覆盖：
 
 - 完整 endpoint DTO 与每个 malformed branch；
 - redirect host/effective-port 变化和五个敏感 header；

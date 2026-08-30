@@ -6,7 +6,7 @@
 
 1. OpenAI Responses 请求何时可以直接调用上游 `/responses`，而不是转换为
    `/chat/completions`；
-2. LiteLLM Proxy 如何在模型列表接口返回 Anthropic-compatible shape，以及当前 ghcp-gateway
+2. LiteLLM Proxy 如何在模型列表接口返回 Anthropic-compatible shape，以及当前 ghc-gateway
    文档是否覆盖。
 
 固定源码：
@@ -182,7 +182,7 @@ LiteLLM 注册 `/v1/responses/compact`、`/responses/compact` 和
 没有源码证据证明 GitHub Copilot CAPI 支持 compact。cc-switch 在 Chat/Anthropic 模式下把 compact
 请求改发普通生成 endpoint，这不等同于真实 compaction primitive。
 
-### 2.7 对 ghcp-gateway 的结论
+### 2.7 对 ghc-gateway 的结论
 
 - 应支持 `NativeResponsesPlan | ChatBridgePlan`。
 - Native gate 应使用明确 model metadata，不按 `gpt-*` 或 vendor 猜测。
@@ -227,7 +227,7 @@ Anthropic formatter 接收与默认 OpenAI model list 相同的、已经按当�
 - `BerriAI/litellm@ae7e50f:litellm/proxy/auth/model_checks.py:97-244`
 - `BerriAI/litellm@ae7e50f:tests/test_litellm/llms/anthropic/test_anthropic_common_utils.py:2076-2105`
 
-在 ghcp-gateway 中，这对应同一份已经按默认 GitHub Copilot 账号取得并过滤的 CAPI catalog。
+在 ghc-gateway 中，这对应同一份已经按默认 GitHub Copilot 账号取得并过滤的 CAPI catalog。
 
 ### 3.3 Response shape
 
@@ -268,7 +268,7 @@ Header 只改变成功 serializer。认证、invalid scope 或内部错误不自
 
 ### 3.4 `/models` alias
 
-LiteLLM 同时注册 `/v1/models` 与 `/models`。ghcp-gateway 当前文档明确只注册 `/v1/models`。
+LiteLLM 同时注册 `/v1/models` 与 `/models`。ghc-gateway 当前文档明确只注册 `/v1/models`。
 
 Anthropic-compatible response 不依赖 `/models` alias；在 `/v1/models` 上进行 header content
 negotiation 即可满足 Claude 客户端 discovery。是否增加 alias 是独立兼容性决策。
