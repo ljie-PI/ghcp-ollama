@@ -1090,6 +1090,10 @@ History tests 对 temporary SQLite 运行与 production 相同的 implementation
 - Loopback test server 覆盖 streaming、disconnect、redirect、timeout 和 exact bytes。
 - Vitest 覆盖 modules、protocol contracts 和 Admin API；Playwright 用 5–8 个关键流程覆盖 Admin
   bootstrap、六个视图、config update、SSE reconnect 和 destructive confirmation。
+- CI 使用 lockfile-pinned `openai`、`@anthropic-ai/sdk` 和 `ollama` clients 向真实 loopback listener
+  发请求，上游仍为 scripted Copilot；SDK 不 mock，外部网络在 test phase 禁止。
+- Pre-release maintainer 另行运行 guarded `npm run test:live:sdk`，让三个 SDK 通过本地 gateway 请求真实
+  GitHub Copilot；它不进入普通 CI/golden，也不保存模型内容。
 - 正式支持 Node.js 24 的 Windows x64、Linux x64/arm64、macOS x64/arm64。CI 至少覆盖 Windows x64、
   Linux x64、macOS arm64；Linux arm64 与 macOS x64 通过 install/start smoke artifacts。
 - Memory tests验证 repeated request/abort 后 active scope 归零且 RSS 达到稳定平台。
