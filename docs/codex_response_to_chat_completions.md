@@ -9,6 +9,10 @@
 
 ## 1. 范围与固定优先级
 
+本文只定义
+[OpenAI Responses 上游路由规范](./openai_responses_routing.md) 选择 `ChatBridgePlan` 后的行为。
+`NativeResponsesPlan` 不调用本文 converters，也不读写本文 HistoryStore。
+
 本文定义：
 
 1. 已解析 Responses request object → Chat Completions request object；
@@ -102,7 +106,8 @@ effortValueMode = "passthrough"
 
 1. 保存客户端显式 `prompt_cache_key`；
 2. 用 `previous_response_id` 和 input call IDs 做历史 enrichment；
-3. 由 provider 选择上游 model，并同时写入 request 与 `RequestContext.resolvedModel`；
+3. 应用 [上游路由规范](./openai_responses_routing.md) planning 前唯一解析的 upstream model，并同时
+   写入 request 与 `RequestContext.resolvedModel`；
 4. 从顶层 `tools[]` 和 `tool_search_output.tools[]` 构造 request-side `ToolContext`；
 5. 接收调用方已经解析完成的 `ReasoningConfig | null`；
 6. 转换 request body；
@@ -134,10 +139,11 @@ response 分别从同一个 immutable original request 构造等价 context；�
 
 ### 3.2 Model 与 prompt cache key
 
-上游 model 选择：
+`ChatBridgePlan` 只消费
+[上游路由规范](./openai_responses_routing.md) planning 前得到的唯一 `ResolvedModel`：
 
-1. request model 已在 provider model catalog 时保留；
-2. 否则使用 provider 默认上游 model；
+1. 不再次查询 catalog 或默认 model；
+2. 将 `ResolvedModel.upstreamModel` 写入 request 与 `RequestContext.resolvedModel`；
 3. 再执行 request 转换。
 
 默认允许 `prompt_cache_key` 的上游：

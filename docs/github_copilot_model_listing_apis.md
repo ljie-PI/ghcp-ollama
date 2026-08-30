@@ -12,13 +12,14 @@
 
 1. GitHub Copilot CAPI 账号、token、动态 endpoint、模型获取和模型缓存采用
    cc-switch 的 GitHub Copilot provider 行为。
-2. `GET /v1/models` 的成功 envelope 和 model object 采用 LiteLLM 的
-   OpenAI-compatible Models 行为。
+2. `GET /v1/models` 的默认成功 envelope 和 model object 采用 LiteLLM 的
+   OpenAI-compatible Models 行为；请求存在 `anthropic-version` header 时采用 LiteLLM 的
+   Anthropic-compatible Models 行为。
 3. `GET /api/tags` 的字段结构采用 Ollama 官方协议；CAPI 没有对应值的字段使用
    第 10.2 节明文规定的固定占位值。
 
 发生冲突时，账号、credential、CAPI request、endpoint、transport、解析、过滤和缓存以
-cc-switch 为准；OpenAI `/v1/models` response 以 LiteLLM 为准；Ollama `/api/tags`
+cc-switch 为准；OpenAI/Anthropic `/v1/models` response 以 LiteLLM 为准；Ollama `/api/tags`
 response 以 Ollama 官方结构和第 10 节映射为准。不存在运行时 profile 选项。
 
 当前仓库已有的模型、认证、HTTP helper、CLI 或错误处理代码不是行为来源。若已有
@@ -37,7 +38,8 @@ GET /api/tags
 
 两个接口都列出默认 GitHub Copilot 账号在 CAPI `/models` 中可见且允许显示的模型：
 
-- `/v1/models` 输出 OpenAI Models 格式。
+- `/v1/models` 默认输出 OpenAI Models 格式；存在 `anthropic-version` header 时输出 Anthropic
+  Models 格式。
 - `/api/tags` 输出 Ollama List Models 格式。
 - 两个接口使用同一份 Copilot 模型目录。
 - 不维护第二份静态模型表。
@@ -70,7 +72,7 @@ CopilotCatalogModel {
 }
 ```
 
-该类型只包含 CAPI 模型目录中参与两个公开接口转换的字段。
+该类型只包含 CAPI 模型目录中参与公开模型表示转换的字段。
 
 不把 `version`、`preview`、`capabilities` 或 `supported_endpoints` 加入公开目录
 类型；这些字段不参与本规范的模型枚举。
@@ -97,6 +99,7 @@ getModelInfo(modelId)
        mode?: JsonValue
        max_input_tokens?: JsonValue
        max_output_tokens?: JsonValue
+       supported_endpoints?: JsonValue
      }
      | null
      | throws
@@ -104,7 +107,10 @@ getModelInfo(modelId)
 
 Lookup null 或异常时不添加 metadata fields。`llm_router` 固定为 null。
 
-`mode` 仅在值为 string 时输出。Token-limit coercion：
+`mode` 仅在值为 string 时进入 OpenAI model object 和内部 routing metadata。
+`supported_endpoints` 只进入内部 routing metadata，不在任何公开 model object 中输出；只有值为
+array 时参与 capability 判断，其中非 string 成员不匹配任何 endpoint。其他值按缺失处理。
+Token-limit coercion：
 
 - bool、null、object、array → 省略；
 - integer → 原值；
@@ -371,7 +377,7 @@ GET /v1/models
 查询参数不改变结果。模型目录 endpoint 不接受客户端传入的 GitHub 或 Copilot
 credential。
 
-### 9.2 成功响应
+### 9.2 默认 OpenAI 成功响应
 
 ```http
 Content-Type: application/json; charset=utf-8
@@ -424,6 +430,73 @@ Cache-Control: no-store
 - capabilities；
 - price；
 - 本地配置或账号字段。
+
+### 9.4 Anthropic 成功响应
+
+请求 headers 中只要存在大小写不敏感的 `anthropic-version`，就使用 Anthropic serializer。
+不校验 header value；empty string 或任意版本值同样触发。
+
+该 header 只选择成功 serializer：
+
+- authentication、权限、CAPI fetch、parse 和内部错误仍使用第 11.2 节 `/v1/models` 错误；
+- 不生成 Anthropic error envelope；
+- 不因未知或空版本值返回版本错误。
+
+非空目录：
+
+```json
+{
+  "data": [
+    {
+      "type": "model",
+      "id": "claude-sonnet-4.5",
+      "display_name": "claude-sonnet-4.5",
+      "created_at": "2023-02-28T18:56:42Z",
+      "max_input_tokens": 200000,
+      "max_tokens": 64000
+    }
+  ],
+  "has_more": false,
+  "first_id": "claude-sonnet-4.5",
+  "last_id": "claude-sonnet-4.5"
+}
+```
+
+空目录：
+
+```json
+{
+  "data": [],
+  "has_more": false,
+  "first_id": null,
+  "last_id": null
+}
+```
+
+字段：
+
+| Anthropic 字段 | 来源 |
+| --- | --- |
+| `data[].type` | 固定 `"model"` |
+| `data[].id` | `CopilotCatalogModel.id` |
+| `data[].display_name` | 与 `id` 相同 |
+| `data[].created_at` | `DEFAULT_MODEL_CREATED_AT_TIME` 转 UTC ISO-8601，并以 `Z` 结尾 |
+| `data[].max_input_tokens` | 第 4.3 节 coercion 结果；缺失时 `null` |
+| `data[].max_tokens` | 第 4.3 节 `max_output_tokens` coercion 结果；缺失时 `null` |
+| `has_more` | 固定 `false` |
+| `first_id` | 第一项 ID；空目录为 `null` |
+| `last_id` | 最后一项 ID；空目录为 `null` |
+
+所有字段按当前 catalog 顺序生成。不得：
+
+- 只保留 Anthropic/Claude model；
+- 根据 `vendor` 或 model ID 过滤；
+- 读取 provider display name；
+- 省略 nullable token-limit fields；
+- 实现 cursor、分页或 `has_more:true`。
+
+`GET /models` alias 仍不注册。这是为了保持本项目 versioned route 一致性而做的有意差异；
+Anthropic content negotiation 在 `/v1/models` 完整提供。
 
 ## 10. `GET /api/tags`
 
@@ -526,6 +599,8 @@ Cache-Control: no-store
 - `param` 固定为 `null`。
 - `code` 是最终 HTTP status 的十进制 string。
 
+存在 `anthropic-version` header 不改变该 error status、headers 或 body。
+
 ### 11.3 `/api/tags` 错误
 
 ```json
@@ -575,6 +650,7 @@ HTTP status 与第 11.1 节相同。
 
 ```text
 serializeOpenAIModels(catalog, metadataByModelId, defaultModelCreatedAt)
+serializeAnthropicModels(catalog, metadataByModelId, defaultModelCreatedAt)
 serializeOllamaTags(catalog)
 serializeOpenAIModelsError(status)
 serializeOllamaTagsError()
@@ -598,7 +674,8 @@ Service 在调用 serializer 前完成第 4.3 节 lookup，并传入只读
 - 对两个 route应用 inference authentication middleware；
 - 取得 caller cancellation signal；
 - 调用同一个 Copilot model catalog service；
-- 选择 OpenAI 或 Ollama serializer；
+- `/v1/models` 根据 `anthropic-version` header presence 选择 OpenAI 或 Anthropic serializer；
+- `/api/tags` 选择 Ollama serializer；
 - 设置成功响应 `Content-Type` 与 `Cache-Control`；
 - 设置 HTTP status 和 `Retry-After`；
 - 客户端断开后抑制响应。
@@ -657,11 +734,17 @@ Service 在调用 serializer 前完成第 4.3 节 lookup，并传入只读
 
 - 使用与 inference routes 相同的 inbound authentication middleware。
 - 成功响应固定 `Content-Type: application/json; charset=utf-8` 和 `Cache-Control: no-store`。
-- 非空和空目录与第 9 节深度等值。
+- 无 `anthropic-version` 时，非空和空目录与第 9.2–9.3 节深度等值。
 - 每项至少有 `id`、`object`、`created`、`owned_by`；第 4.3 节有值时追加对应 metadata fields。
 - `created` 使用可由环境覆盖的 `DEFAULT_MODEL_CREATED_AT_TIME`。
 - `owned_by` 固定为 `"openai"`。
 - 错误 envelope、type、param 和 code 与第 11 节一致。
+- 任意值的 `anthropic-version` header（包括 empty string）触发第 9.4 节 Anthropic shape。
+- Anthropic shape 包含同一权限 catalog 的全部 models，包括非 Anthropic model。
+- Anthropic token limits 始终存在，未知时为 `null`。
+- Anthropic `has_more` 固定 false；first/last ID 和空目录行为与第 9.4 节一致。
+- Header 不改变任何错误 response。
+- `/models` 返回 404。
 
 ### 14.6 `/api/tags`
 
@@ -689,6 +772,7 @@ Golden fixtures 必须固定 clock、`DEFAULT_MODEL_CREATED_AT_TIME` 环境值�
 - redirect host/effective-port 变化和五个敏感 header；
 - invalidate/remove/clear 与在途成功写回竞态；
 - LiteLLM unknown-model四字段 object与 known-model metadata fields；
+- Anthropic header presence、empty header、非 Anthropic model、nullable limits 和 empty list；
 - RFC3339Nano `modified_at` 与 empty `parent_model`；
 - 每个错误 status、合法/非法/重复 `Retry-After` 和取消后零 response bytes。
 
@@ -697,9 +781,10 @@ Golden fixtures 必须固定 clock、`DEFAULT_MODEL_CREATED_AT_TIME` 环境值�
 实现完成必须同时满足：
 
 1. CAPI 账号、token、endpoint、模型过滤、顺序和缓存符合 cc-switch 固定提交。
-2. `/v1/models` envelope 和 model object 符合 LiteLLM 固定提交。
+2. `/v1/models` 的 OpenAI 与 Anthropic envelopes/model objects 符合 LiteLLM 固定提交。
 3. `/api/tags` 符合第 10 节 Ollama 映射。
 4. 非 Ollama 行为不依赖目标仓库旧模型、认证、HTTP 或 CLI 实现。
 5. 目标仓库只提供代码落点和依赖注入，不改变协议行为。
-6. 两个公开 endpoint 使用同一个按账号缓存的 Copilot model catalog。
+6. 两个公开 endpoint、以及 `/v1/models` 的两种 serializers，使用同一个按账号缓存的 Copilot
+   model catalog。
 7. 第 14 节全部测试通过。

@@ -8,6 +8,7 @@
 - [Ollama Chat → Chat Completions](./ollama_chat_to_chat_completions.md)
 - [Anthropic Messages → Chat Completions](./claude_messages_to_chat_completions.md)
 - [OpenAI Responses → Chat Completions](./codex_response_to_chat_completions.md)
+- [OpenAI Responses 上游路由](./openai_responses_routing.md)
 - [GitHub Copilot 模型列表](./github_copilot_model_listing_apis.md)
 
 `docs/cc-switch/` 和 `docs/litellm/` 是来源说明，不是运行时 profile。架构与生产规范冲突时，
@@ -45,17 +46,17 @@ middleware；协议精确字节输出不使用会改变序列化结果的便捷 
 
 CLI 使用一个 executable 和分组 subcommands：
 
-```tex
+```text
 ghcp-gateway serve
 ghcp-gateway status
 ghcp-gateway auth login
-ghcp-gateway auth logou
+ghcp-gateway auth logout
 ghcp-gateway auth status
-ghcp-gateway models lis
-ghcp-gateway models curren
+ghcp-gateway models list
+ghcp-gateway models current
 ghcp-gateway models set <model>
 ghcp-gateway admin open
-
+```
 
 `serve` 在前台运行并处理 graceful shutdown。后台常驻由 systemd、launchd、Windows Service 或调用方
 process manager 管理，不再维护一个跨平台 PID-file `serverctl` executable。Web 管理页面是配置与
@@ -66,10 +67,11 @@ README 在代码、CLI 和迁移行为完成后统一更新，避免文档先于
 
 ## 3. 设计目标
 
-1. 完整支持四份生产规范，不用公共抽象改写协议特有语义。
+1. 完整支持五份生产规范，不用公共抽象改写协议特有语义。
 2. raw HTTP/SSE、typed Chat chunks、协议状态机和 downstream wire serialization 各自有明确归属。
 3. 每个请求的状态独占；跨请求状态只能通过显式 interface 修改。
-4. 同一 GitHub Copilot Chat upstream 支撑 OpenAI Chat、Responses、Anthropic 和 Ollama。
+4. 同一 GitHub Copilot backend 提供 Chat Completions 与 native Responses；Responses planner 决定
+   直接调用 native endpoint，还是使用 Chat bridge。
 5. 协议代码按行为纵向聚合，避免 `controllers/services/repositories` 式横向跳转。
 6. 公共 interface 小而深，调用者不需要了解 tool、reasoning、terminal 或 serializer 内部状态。
 7. 缓存、history、日志、指标和流队列全部有界。
@@ -78,7 +80,8 @@ README 在代码、CLI 和迁移行为完成后统一更新，避免文档先于
 
 ## 4. 非目标
 
-- 不实现运行时 protocol profile、capability switch 或 legacy compatibility branch。
+- 不实现用户可任意切换的 protocol profile、按名称猜测 capability 或 legacy compatibility branch；
+  允许由固定 model routing metadata 决定 native Responses/Chat bridge。
 - 不创建会丢失信息的通用 message/canonical model。
 - 不提供动态 protocol plugin loader。
 - 不支持未被生产规范定义的 `/responses`、`/models` 或 compact aliases。
@@ -94,9 +97,9 @@ README 在代码、CLI 和迁移行为完成后统一更新，避免文档先于
 | Method | Route | 协议 | 行为 |
 | --- | --- | --- | --- |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions | 原生 Chat 路径；stream 为 OpenAI SSE |
-| `POST` | `/v1/responses` | OpenAI Responses | 转换为 Chat；返回 Responses JSON/SSE |
+| `POST` | `/v1/responses` | OpenAI Responses | 按 model metadata 选择 native Responses 或 Chat bridge |
 | `POST` | `/v1/messages` | Anthropic Messages | 转换为 Chat；返回 Anthropic JSON/SSE |
-| `GET` | `/v1/models` | OpenAI Models | 同一 Copilot model catalog 的 OpenAI 表示 |
+| `GET` | `/v1/models` | OpenAI/Anthropic Models | 默认 OpenAI shape；存在 `anthropic-version` 时为 Anthropic shape |
 | `POST` | `/api/chat` | Ollama Chat | 转换为 Chat；返回 Ollama JSON/NDJSON |
 | `GET` | `/api/tags` | Ollama List Models | 同一 Copilot model catalog 的 Ollama 表示 |
 | `GET` | `/api/version` | Ollama probe | 只提供兼容版本信息，不参与模型转换 |
@@ -146,7 +149,7 @@ flowchart LR
     State[(SQLite state.db)]
     Admin[Admin module]
 
-    Clients --> Hos
+    Clients --> Host
     Host --> Protocols
     Host --> Catalog
     Protocols --> Backend
@@ -155,15 +158,16 @@ flowchart LR
     Backend --> GitHub
     Backend --> CAPI
     History --> State
-    AdminBrowser --> Hos
+    AdminBrowser --> Host
     Host --> Admin
     Admin --> Catalog
     Admin --> History
     Admin --> State
+```
 
-
-所有推理最终只调用 Chat Completions upstream。这里的 Chat DTO 是上游 wire pivot，不是把所有下游
-协议统一成同一种 domain model。
+OpenAI Chat、Anthropic、Ollama 以及 Responses 的 bridge plan 调用 Chat Completions upstream；
+Responses native plan 直接调用 GitHub Copilot Responses upstream。Chat DTO 只是在 bridge 路径中的
+wire pivot，不是把所有下游协议统一成同一种 domain model。
 
 ## 7. 总体 module 设计
 
@@ -193,17 +197,17 @@ flowchart TD
     Http --> Ollama
     Http --> Models
     Http --> Admin
-    OpenAI --> Copilo
-    Responses --> Copilo
-    Anthropic --> Copilo
-    Ollama --> Copilo
+    OpenAI --> Copilot
+    Responses --> Copilot
+    Anthropic --> Copilot
+    Ollama --> Copilot
     Responses --> History
     Responses --> Models
-    Models --> Copilo
+    Models --> Copilot
     Copilot --> Stream
     History --> Persistence
     Admin --> Persistence
-
+```
 
 依赖只能沿箭头方向。Protocol modules 不 import Hono、SQLite、`process.env` 或具体 HTTP client。
 
@@ -220,7 +224,7 @@ export interface Gateway {
 export async function createGateway(
   config: Readonly<GatewayConfig>,
 ): Promise<Gateway>;
-
+```
 
 `fetch` 后隐藏：
 
@@ -245,14 +249,14 @@ export type ProtocolEndpoint = (
   request: Request,
   scope: Readonly<RequestScope>,
 ) => Promise<Response>;
-
+```
 
 ```ts
 createOpenAiChatEndpoint(dependencies): ProtocolEndpoint;
 createResponsesEndpoint(dependencies): ProtocolEndpoint;
 createAnthropicMessagesEndpoint(dependencies): ProtocolEndpoint;
 createOllamaChatEndpoint(dependencies): ProtocolEndpoint;
-
+```
 
 这四个 factories 具有相同调用形状，但不继承 `BaseAdapter`，也不要求内部实现同一组
 `convertRequest/parseResponse/parseStreamChunk` methods。统一调用形状来自 Fetch interface，
@@ -261,10 +265,10 @@ createOllamaChatEndpoint(dependencies): ProtocolEndpoint;
 每个 endpoint module 内部隐藏：
 
 1. request decoding 和协议特有 validation；
-2. request → Chat conversion；
-3. non-stream Chat → protocol response；
-4. stream request-local state machine；
-5. protocol wire encoder；
+2. upstream execution planning；
+3. 需要 bridge 时的 request/response conversion；
+4. native 或 bridge stream request-local state；
+5. protocol/native wire encoder；
 6. protocol公开错误映射；
 7. exact clock/UUID/token-counter 调用时机。
 
@@ -273,7 +277,7 @@ Hono route 只做显式注册：
 ```ts
 app.post("/v1/responses", (context) =>
   responsesEndpoint(context.req.raw, createRequestScope(context)));
-
+```
 
 固定 route 数量较少，显式注册比 protocol registry 更易读。增加第五种协议时新增一个纵向 module 和
 一条 route，不修改现有协议 implementation。
@@ -286,7 +290,7 @@ export interface RequestScope {
   readonly principal: InferencePrincipal;
   readonly signal: AbortSignal;
 }
-
+```
 
 Scope 只包含所有请求都真正需要的宿主信息。Protocol-specific context、ToolContext、reasoning
 configuration、original request 和 stream cursors 留在对应 protocol module，不能加入
@@ -307,18 +311,36 @@ interface ResponsesRequestPlanner {
   ): Promise<PreparedResponsesRequest>;
 }
 
-interface PreparedResponsesRequest {
+type PreparedResponsesRequest =
+  | PreparedNativeResponsesRequest
+  | PreparedChatBridgeRequest;
+
+interface PreparedNativeResponsesRequest {
+  readonly kind: "native_responses";
+  readonly responsesRequest: ResponsesRequest;
+}
+
+interface PreparedChatBridgeRequest {
+  readonly kind: "chat_bridge";
   readonly chatRequest: ChatRequest;
   readonly responseContext: ResponseContext;
   readonly streamContext: StreamContext;
 }
+```
 
+Planner 先用实际 upstream model resolver 得到唯一 `ResolvedModel`，再读取该 model 的 immutable
+routing metadata，并按 [Responses 上游路由规范](./openai_responses_routing.md) 选择 plan。
+Alias、默认模型或 deployment mapping 不得在 planning 后再次改变 model；不得按 `gpt-*`、vendor
+或 hostname 猜测。
 
-Planner 在 Responses module 内严格执行：
+Native plan 复用 planning 前的 model selection 结果，直接构造 `PreparedNativeResponsesRequest`，
+不访问本地 history 或 Chat converter。
+
+ChatBridgePlan 继续严格执行原顺序：
 
 1. 保存客户端显式 `prompt_cache_key`；
 2. 调用 Responses history enrichment；
-3. 根据已绑定账号的 catalog 选择 model，并同步写入 request 与 request context；
+3. 把 planning 前唯一解析的 `ResolvedModel.upstreamModel` 同步写入 request 与 request context；
 4. 构造 immutable ToolContext；
 5. 从 provider/model 配置解析 ReasoningConfig；
 6. 调用纯 request converter；
@@ -340,10 +362,16 @@ export interface BoundCopilot {
   readonly accountId: AccountId;
   readonly target: Readonly<CopilotTarget>;
 
-  complete(request: Readonly<ChatRequest>): Promise<ChatResponse>;
-  openStream(request: Readonly<ChatRequest>): Promise<UpstreamByteStream>;
+  completeChat(request: Readonly<ChatRequest>): Promise<ChatResponse>;
+  openChatStream(request: Readonly<ChatRequest>): Promise<UpstreamByteStream>;
+  completeResponses(
+    request: Readonly<ResponsesRequest>,
+  ): Promise<NativeResponsesResponse>;
+  openResponsesStream(
+    request: Readonly<ResponsesRequest>,
+  ): Promise<UpstreamByteStream>;
 }
-
+```
 
 `bindDefault()` 在一次请求内只执行一次默认账号解析。返回的 `BoundCopilot` 固定 account、credential
 和 target；请求执行期间默认账号变化不能影响它。
@@ -356,9 +384,10 @@ Production adapter 隐藏：
 - 固定出站 headers；
 - timeout、redirect、取消和连接复用；
 - secret redaction；
-- `/chat/completions` URL 构造。
+- `/chat/completions` 与 `/responses` URL 构造。
 
-Tests 使用 scripted adapter，直接返回 Chat JSON 或可按 byte boundary 控制的 upstream stream。
+Tests 使用 scripted adapter，分别返回 Chat JSON、native Responses JSON，或可按 byte boundary
+控制的 upstream stream。
 
 Model catalog 通过独立、较窄的 source seam 获取 CAPI 数据，不扩大推理 interface：
 
@@ -369,7 +398,7 @@ interface CopilotModelsSource {
     signal: AbortSignal,
   ): Promise<CapiModelsResponse>;
 }
-
+```
 
 Production adapter 复用同一 credential provider 和 HTTP pool；tests 使用 scripted source。
 
@@ -389,7 +418,7 @@ interface CopilotCredentialProvider {
     signal: AbortSignal,
   ): Promise<string>;
 }
-
+```
 
 账号不存在、credential 无效、token endpoint 401、网络错误和 timeout 必须保持不同错误类别。
 Protocol modules 不知道 token 的存储方式。
@@ -398,35 +427,53 @@ Protocol modules 不知道 token 的存储方式。
 
 ### 9.1 Pipeline
 
-```tex
+Chat bridge pipeline：
+
+```text
 upstream Uint8Array
   -> incremental UTF-8 decoder
   -> SSE framer
-  -> SSE even
+  -> SSE event
   -> Chat SSE decoder
   -> ChatStreamFrame
   -> protocol-local stream state
   -> protocol-local wire encoder
   -> downstream Uint8Array
+```
 
+Native Responses pipeline：
+
+```text
+upstream Responses SSE Uint8Array
+  -> Responses SSE framing
+  -> native event validation
+  -> output-index item-ID normalization
+  -> Responses SSE encoder
+  -> downstream Uint8Array
+```
+
+Native Responses 不进入 Chat SSE decoder，也不重新构造 Chat-bridge Responses item lifecycle。
+它只按 `output_index` 把 sub-event 和 `output_item.done` 的 ID 统一到
+`output_item.added.item.id`，其余 event fields、usage 和 ordering 保持不变。Client abort 和
+backpressure 仍由同一个 stream pump 管理。
 
 ```ts
 export type ChatStreamFrame =
   | { readonly kind: "chunk"; readonly chunk: ChatChunk }
   | { readonly kind: "error"; readonly value: WireJson | string }
   | { readonly kind: "done" };
-
+```
 
 Async iterator 正常结束与 `kind:"done"` 是不同信号。这样可以同时表达：
 
 - Ollama 对 `[DONE]`、truncation 和唯一 terminal owner 的要求；
 - Anthropic 的 `start/consume/finish` lifecycle；
-- Responses 的 typed chunk iterator 与 item lifecycle；
+- Responses ChatBridgePlan 的 typed chunk iterator 与 item lifecycle；
 - OpenAI Chat 对 raw SSE 的低开销透传。
 
 Raw SSE module 只处理 bytes、UTF-8、BOM、换行、field、multi-data、error frame 和 `[DONE]`。
-它不生成 Ollama、Anthropic 或 Responses object。Typed converters 永远不读取 `data:` 或残余
-UTF-8 bytes。
+它不生成 Ollama、Anthropic 或 Responses object。Bridge typed converters 永远不读取 `data:` 或
+残余 UTF-8 bytes。Native Responses 使用独立的 Responses SSE parser 和 stream-scoped item-ID map。
 
 ### 9.2 Backpressure 与取消
 
@@ -443,7 +490,7 @@ UTF-8 bytes。
 
 任何 module 都不能通过 callback 在 writer 未消费前继续积压 chunks。
 
-### 9.3 Response commi
+### 9.3 Response commit
 
 Stream writer 显式跟踪 `responseCommitted`：
 
@@ -455,15 +502,17 @@ Stream writer 显式跟踪 `responseCommitted`：
 | --- | --- |
 | Ollama | 非 abort 时恰好追加一个安全 NDJSON error；不再输出 `done:true` |
 | Anthropic | 关闭连接；不合成 `event:error` 或 `message_stop` |
-| Responses | 关闭连接；不合成 `response.failed` |
+| Responses Chat bridge | 关闭连接；不合成 `response.failed` |
+| Responses native | 关闭连接；不把 native failure 改写成 Chat bridge events |
 | OpenAI Chat | 关闭连接；不合成 `[DONE]` |
 
 ### 9.4 Protocol-local terminal ownership
 
 - Ollama reducer 是 `Done` 的唯一消费者和 terminal owner。
 - Anthropic converter 维护 start、active block、pending finish/usage 和 exactly-once stop。
-- Responses converter 独立维护 response、reasoning、message、tool item、output index 和
-  `sequence_number`。
+- Responses Chat bridge converter 独立维护 response、reasoning、message、tool item、output index
+  和 `sequence_number`。
+- Responses native stream 不创建 bridge state machine，也不读写本地 Responses history。
 - OpenAI Chat stream 采用 raw fast path；不为透传请求创建其他协议的状态机。
 
 这些状态机不能合并成通用 `StreamTransformer`。
@@ -472,7 +521,7 @@ Stream writer 显式跟踪 `responseCommitted`：
 
 ### 10.1 Wire JSON
 
-普通 `JSON.parse()` 会重排 integer-like object keys，并把所有 JSON number 转为 JavaScrip
+普通 `JSON.parse()` 会重排 integer-like object keys，并把所有 JSON number 转为 JavaScript
 `number`。这不足以满足 ordered arguments、canonical JSON 和 byte golden 要求。
 
 HTTP body reader 因此输出保留 member 顺序和 number lexeme 的语法 AST：
@@ -491,7 +540,7 @@ export type WireJson =
         value: WireJson;
       }>[];
     };
-
+```
 
 Wire JSON module 是 in-process deep module，负责：
 
@@ -518,7 +567,7 @@ Wire JSON module 是 in-process deep module，负责：
   "noImplicitOverride": true,
   "verbatimModuleSyntax": true
 }
-
+```
 
 - Event、frame、error category 和 state phase 使用 discriminated unions。
 - `unknown` 只允许出现在 HTTP、SQLite JSON 和 remote response seams。
@@ -532,7 +581,8 @@ Wire JSON module 是 in-process deep module，负责：
 
 - Ollama：Go-compatible field order、`omitempty`、HTML escaping、RFC3339Nano 和每 object 一个 LF。
 - Anthropic：Python default `json.dumps` spacing、`ensure_ascii=true` 和精确 SSE event 文本。
-- Responses：Responses event envelope、managed IDs、item ordering 和严格递增 sequence。
+- Responses Chat bridge：Responses event envelope、managed IDs、item ordering 和严格递增 sequence。
+- Responses native：保留上游 usage/events，只归一化同一 output index 的 item IDs。
 - OpenAI Chat：原生 JSON/SSE 和一个成功 `[DONE]`。
 
 不能用一个全局 `serializeResponse(protocol, value)` 条件矩阵实现这些差异。
@@ -542,10 +592,11 @@ Wire JSON module 是 in-process deep module，负责：
 | Module | Request-local state | Shared state | Downstream wire |
 | --- | --- | --- | --- |
 | OpenAI Chat | stream passthrough 与 request metadata | 无 | JSON / OpenAI SSE |
-| Responses | original request、ToolContext、reasoning config、item states、IDs、sequence | Responses history | JSON / Responses SSE |
+| Responses native | resolved model、native request、output-index item-ID map | 无 | Native Responses JSON/SSE |
+| Responses Chat bridge | original request、ToolContext、reasoning config、item states、IDs、sequence | Responses history | Converted Responses JSON/SSE |
 | Anthropic | original model、active block、tool partial JSON、pending finish/usage、UUID | 无 | JSON / Anthropic SSE |
 | Ollama | original model、finish、usage、content/reasoning fragments、sparse tools、clock | 无 | JSON / NDJSON |
-| Model catalog | request-bound account、fetch generation | per-account catalog cache | OpenAI Models / Ollama Tags JSON |
+| Model catalog | request-bound account、fetch generation | per-account catalog cache | OpenAI/Anthropic Models / Ollama Tags JSON |
 
 协议规范明确引用同一算法时才共享 helper，例如指定的 tool-result media extraction。名称相似但
 defaults、ordering、errors 或 bytes 不同的逻辑先保留在协议目录内。
@@ -566,10 +617,13 @@ export interface ResponsesHistory {
     signal: AbortSignal,
   ): Promise<void>;
 }
-
+```
 
 Admin 使用单独的 `ResponsesHistoryAdmin` interface 查询统计和清理，避免推理路径获得不需要的
 管理能力。
+
+该 module 只注入 Responses ChatBridgePlan。NativeResponsesPlan 使用上游
+`previous_response_id`/`encrypted_content`，不访问本地 history。
 
 ### 12.2 持久化语义
 
@@ -586,7 +640,7 @@ TTL、expiry lookup 和测试写入该生产规范；architecture 不能单方�
 
 建议 schema：
 
-```tex
+```text
 responses(
   response_id,
   insertion_seq,
@@ -607,11 +661,12 @@ response_calls(
 INDEX response_calls(call_id)
 UNIQUE INDEX responses(insertion_seq)
 INDEX responses(expires_at)
+```
 
-
-Non-stream 在完整 Responses response 转换成功后、发送成功 body 前提交。Stream 在 request-local
-state 中收集规范要求的 completed items，并在发送 `response.completed` 前提交；提交失败时不发送
-成功 terminal。已经发送的中间 events 不回滚，也不合成 `response.failed`。
+Chat bridge non-stream 在完整 Responses response 转换成功后、发送成功 body 前提交。Chat bridge
+stream 在 request-local state 中收集规范要求的 completed items，并在发送 `response.completed` 前
+提交；提交失败时不发送成功 terminal。已经发送的中间 events 不回滚，也不合成
+`response.failed`。
 
 ## 13. Model catalog
 
@@ -623,7 +678,7 @@ export interface CopilotModelCatalog {
   invalidate(accountId: AccountId): void;
   clear(): void;
 }
-
+```
 
 它隐藏：
 
@@ -638,10 +693,12 @@ export interface CopilotModelCatalog {
 - 使用 Undici 低层 `request`，不声明压缩编码且不自动解压响应；
 - 最多 10 次 redirect 及跨 host/effective-port secret header stripping；
 - 单个合法 `Retry-After`；
-- `/v1/models` 与 `/api/tags` 两个 serializer。
+- 不公开的 Responses routing metadata：`mode` 与 `supported_endpoints`；
+- `/v1/models` 的 OpenAI/Anthropic serializers 与 `/api/tags` serializer。
 
-两个公开 routes 始终读取同一 `CatalogSnapshot`，不维护静态模型表，不排序、不去重、不按名称推断
-能力。
+两个公开 routes 和三种 model serializers 始终读取同一 `CatalogSnapshot`，不维护静态模型表，
+不排序、不去重。Responses native capability 只读取固定 routing metadata，不按模型名称或 vendor
+推断。
 
 `CatalogSnapshot.fetchedAt` 在每次成功 fetch 时只读取一次 clock。`DEFAULT_MODEL_CREATED_AT_TIME` 在
 module 初始化时读取十进制环境值，缺失时使用 `1677610602`；该值只影响 `/v1/models` 的兼容字段，
@@ -670,7 +727,7 @@ export type GitHubEnvironment =
       readonly apiBaseUrl: `https://${string}/api/v3`;
       readonly clientId: "Ov23li8tweQw6odWQebz";
     };
-
+```
 
 | 概念 | github.com | GHES |
 | --- | --- | --- |
@@ -702,16 +759,20 @@ OAuth 和 GitHub REST URLs 使用 `URL` 构造，不做字符串拼接。CAPI mo
 对应 headers：
 
 ```http
-copilot-integration-id: vscode-cha
+copilot-integration-id: vscode-chat
 editor-version: vscode/1.110.1
 editor-plugin-version: copilot-chat/0.38.2
 user-agent: GitHubCopilotChat/0.38.2
 x-github-api-version: 2025-10-01
-
+```
 
 这些值集中定义在 Copilot backend module，不从客户端入站 headers 读取，也不允许管理页面单独修改。
 需要 vision header 时，由协议 request analysis 产生 typed flag，再由 backend 添加固定
 `Copilot-Vision-Request` header。
+
+Native Responses 另外添加 `openai-intent: conversation-panel`、每请求唯一 `x-request-id`、
+`x-vscode-user-agent-library-version: electron-fetch`、由 input 推导的 `x-initiator`，以及需要时的
+vision header。它仍使用上表的新 client identity versions，不继承 LiteLLM 固定提交中的旧版本值。
 
 ### 14.3 Token 与 endpoint 生命周期
 
@@ -749,14 +810,14 @@ OAuth token、Copilot token 和其他 secrets 不存入普通 settings table。S
 
 配置更新流程：
 
-```tex
+```text
 parse
   -> validate complete candidate
   -> SQLite transaction with revision check
-  -> build immutable runtime snapsho
+  -> build immutable runtime snapshot
   -> atomic snapshot swap
   -> invalidate only affected caches
-
+```
 
 失败时继续使用旧 snapshot，不能部分应用。Protocol stream 在开始时捕获 snapshot；请求进行中配置
 变化不改变其行为。
@@ -813,7 +874,7 @@ type GatewayFailure =
   | { kind: "upstream_stream_truncated"; cause: unknown }
   | { kind: "aborted" }
   | { kind: "internal"; cause: unknown };
-
+```
 
 它不是公开、稳定的 `BridgeError` DTO。每个 protocol endpoint 在自己的 module 内把失败映射为生产
 规范要求的 HTTP status、body 或 post-commit 行为。转换异常必须保留 `cause`，不能被 broad catch
@@ -834,7 +895,8 @@ OpenAI Chat 的宿主错误 contract 也不在现有四份规范中。对应 end
 - 超限显式失败，不截断、不返回部分成功。
 - 并发 streams 使用有界 semaphore；等待者响应客户端取消。
 - Stream pipeline 不预取，不保存 raw chunk 历史。
-- Responses 只保留生成 terminal response 与 history record 所需的聚合状态。
+- Responses Chat bridge 只保留生成 terminal response 与 history record 所需的聚合状态；native
+  stream 不缓存完整 response。
 - Model catalog cache 按账号有界；账号数量由本地配置约束。
 - Responses history 固定全库最多 512 条并有 TTL。
 - Metrics label 集合固定，不把 request ID、prompt、任意 model string 作为无界 label。
@@ -860,22 +922,26 @@ gateway 常驻内存。
 
 每个 protocol endpoint 使用同一生产 interface 测试：
 
-```tex
-Fetch Reques
-  -> endpoin
+```text
+Fetch Request
+  -> endpoint
   -> scripted Copilot backend
   -> Fetch Response bytes
+```
 
-
-Scripted backend 同时记录转换后的 Chat request，并返回固定 non-stream response 或可控制 byte spli
-的 stream，因此 request、response、stream 和 wire behavior 不需要通过 private methods 测试。
+Scripted backend 记录选择的 execution plan 及最终 upstream request，并返回固定 Chat/native
+Responses non-stream response 或可控制 byte split 的 stream，因此 request、response、stream 和
+wire behavior 不需要通过 private methods 测试。
 
 必须包含：
 
-- 四份生产规范要求的 differential/golden fixtures；
+- 五份生产规范要求的 differential/golden fixtures；
 - Ollama Go-compatible byte golden；
 - Anthropic Python JSON/SSE text golden；
 - Responses item lifecycle、ToolContext、sequence 和 history round-trip；
+- Responses native/bridge routing matrix、native item-ID normalization、usage 保留和 same-provider
+  no-fallback；
+- `anthropic-version` model-list shape、nullable limits 和不含 Anthropic-only filter；
 - 所有 UTF-8/SSE byte split points；
 - abort、timeout、post-commit failure 和零 upstream call；
 - missing/null/false/0/empty 与 object member order；
@@ -903,7 +969,7 @@ History tests 对 temporary SQLite 运行与 production 相同的 implementation
 
 ## 20. 建议目录
 
-```tex
+```text
 src/
   main.ts
   gateway/
@@ -921,6 +987,8 @@ src/
       wire.ts
     responses/
       endpoint.ts
+      routing.ts
+      native.ts
       bridge.ts
       stream.ts
       tool_context.ts
@@ -966,12 +1034,12 @@ tests/
   fixtures/
   contract/
   integration/
-
+```
 
 目录表示 module locality，不要求每个 type 或函数独立成文件。一个协议的小型 decoder、mapper 和
 validator 可以保留在同一文件；只有状态机或 serializer 足够复杂时才拆分。
 
-## 21. Composition roo
+## 21. Composition root
 
 `main.ts` 和 `create_gateway.ts` 是唯一 composition root，负责：
 
@@ -993,15 +1061,15 @@ Protocol modules 接收 dependencies，不自行读取 `process.env`、打开 da
 固定协议数量少，显式 routes 和 factories 比动态 registry 更易导航。少量 route wiring 重复换来更高
 locality；协议新增仍只需新增目录和一条注册语句。
 
-### 22.2 不保留 `BaseAdapter
+### 22.2 不保留 `BaseAdapter`
 
 现有 base class 要求所有协议共享 request、non-stream、raw stream parsing 和 state interface，
 但生产规范证明这些 lifecycle 不等价。删除继承层后，raw SSE 与 typed conversion 的 seam 更清楚。
 
 ### 22.3 不创建 canonical message model
 
-所有协议都转换到 Chat upstream 不代表它们共享一个可逆 domain model。Responses ToolContext、
-Anthropic block、Ollama ordered JSON 和协议特有损失必须留在各自 module。
+多个协议使用 Chat bridge 不代表它们共享一个可逆 domain model。Responses native path、
+Responses ToolContext、Anthropic block、Ollama ordered JSON 和协议特有损失必须留在各自 module。
 
 ### 22.4 不统一 stream terminal 与 serializer
 
@@ -1034,12 +1102,12 @@ Web Stream 集成，同时让 protocol modules 保持 Fetch-standard interface�
 
 1. strict TypeScript、Wire JSON 和 composition root；
 2. Copilot environment、credential 和 backend；
-3. model catalog 与 `/v1/models`、`/api/tags`；
+3. model catalog、Responses routing metadata、`/v1/models` 三种 serializers 和 `/api/tags`；
 4. raw SSE framing、cancellation 和 backpressure；
 5. OpenAI Chat raw path；
 6. Ollama endpoint；
 7. Anthropic endpoint；
-8. Responses endpoint 与 SQLite history；
+8. Responses native/bridge planner、native transport、Chat bridge 与 SQLite history；
 9. Admin API 和 Svelte UI；
 10. 删除旧 JavaScript adapters、callbacks 和重复配置。
 
