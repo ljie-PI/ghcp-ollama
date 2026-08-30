@@ -1345,11 +1345,15 @@ continuously。A degraded metric clears only after three subsequently evaluated 
 
 ### 10.3 Official SDK integration
 
-SDK integration has two separate tiers。
+SDK integration has two separate **manual-only** tiers。Neither tier is part of CI、`npm test`、
+`npm run test:refactor`、implementation acceptance、PR review gates or the implement/code-review loop。Coding agents
+write and typecheck the owned SDK test files but do not execute official-client integration tests unless a human explicitly
+requests that run。Dedicated Vitest include patterns keep `tests/refactor/sdk/**` and `tests/live/sdk/**` out of every
+default test command。
 
 #### Offline SDK compatibility
 
-CI installs exact lockfile-pinned official npm clients as dev dependencies：
+The lockfile pins official npm clients as dev dependencies：
 
 - `openai`
 - `@anthropic-ai/sdk`
@@ -1372,8 +1376,10 @@ complement rather than replace protocol byte goldens：SDK acceptance alone cann
 Canonical command：
 
 ```text
-npm run test:sdk:refactor
+GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor
 ```
+
+The command refuses to start without `GHC_GATEWAY_SDK_TESTS=1`。No repository workflow sets that variable。
 
 #### Manual live GitHub Copilot smoke
 
@@ -1388,9 +1394,9 @@ never a golden。It queries the current catalog and accepts optional explicit mo
 response、tool content、credentials or complete endpoints。Native-Responses-specific live coverage may be recorded as
 `not_available` only when the account catalog has no native-capable model；offline routing fixtures remain mandatory。
 
-Before RM-22 promotion, a maintainer runs the live suite manually and records only timestamp、sanitized GitHub host、
-SDK versions、selected model IDs and pass/`not_available` status。A failure of a route that has an available model blocks
-release；transient remote failure is rerun and never converted into a changed golden。
+Before final promotion, a maintainer manually runs both official-client tiers and records only timestamp、sanitized
+GitHub host for the live tier、SDK versions、selected model IDs and pass/`not_available` status。A failure of a route
+that has an available model blocks release；transient remote failure is rerun and never converted into a changed golden。
 
 ## 11. Dependency DAG
 
@@ -1555,16 +1561,18 @@ Every PR description records all commands and artifact paths. It is mergeable on
 2. changes stay inside owned scope or document an approved cross-owner edit；
 3. `npm run typecheck:refactor` and `npm run lint:refactor` pass；
 4. the slice's targeted `npm run test:refactor -- <paths>` passes；
-5. all SDK compatibility tests currently present pass through `npm run test:sdk:refactor` against loopback/scripted remotes；
-6. `npm run build:refactor` and `npm run fixtures:verify` pass offline；
-7. legacy `npm run test:unit` and `npm run smoke:legacy` remain green through `RM-21`；default
+5. `npm run build:refactor` and `npm run fixtures:verify` pass offline；
+6. legacy `npm run test:unit` and `npm run smoke:legacy` remain green through `RM-21`；default
    `npm start`/bins remain legacy until `RM-22`；
-8. deterministic fixtures assert exact objects/bytes where required；golden changes name explicit `caseId`s and reason；
-9. abort、timeout、cleanup and post-commit branches added by the slice have tests；
-10. logs/errors/fixtures contain no credential or real request/response content；
-11. production/default paths contain no stub、TODO、legacy fallback or disabled failing test；
-12. hot-path/resource changes include the applicable benchmark delta, not an unmeasured performance claim；
-13. `git diff --check` passes and generated outputs/data directories are absent from the worktree。
+7. deterministic fixtures assert exact objects/bytes where required；golden changes name explicit `caseId`s and reason；
+8. abort、timeout、cleanup and post-commit branches added by the slice have tests；
+9. logs/errors/fixtures contain no credential or real request/response content；
+10. production/default paths contain no stub、TODO、legacy fallback or disabled failing test；
+11. hot-path/resource changes include the applicable benchmark delta, not an unmeasured performance claim；
+12. `git diff --check` passes and generated outputs/data directories are absent from the worktree。
+
+Official-client SDK tests are explicitly excluded from this gate and from code-review reruns；section 10.3 is the only
+authority for invoking them。
 
 `RM-01` establishes these scripts；for that slice only, equivalent direct tool commands named in its PR are accepted。
 
@@ -1602,6 +1610,7 @@ Every PR description records all commands and artifact paths. It is mergeable on
 - **Must read**：本文第 4、5、10、12 节，[Architecture](../architecture.md) runtime/testing/resource sections。
 - **Owned scope/files**：`package.json`、`package-lock.json`、`tsconfig.refactor.json`、
   TypeScript-aware ESLint config、`vitest.refactor.config.ts`、`playwright.config.ts`、
+  `vitest.sdk.config.ts`、
   `src/version.ts`、`scripts/refactor/fixtures.ts`、`bench.ts`、`pack.ts`、`ci_network_guard.ts`、
   `tests/refactor/performance/baseline.test.ts`、`tests/refactor/sdk/harness.ts`、`tests/live/sdk/harness.ts`、
   `.github/workflows/refactor-ci.yml`。
@@ -1619,8 +1628,9 @@ Every PR description records all commands and artifact paths. It is mergeable on
   `npm run bench:refactor -- baseline --repeat 3`；`npm run test:unit`；`npm run smoke:legacy`；platform smoke loads
   `better-sqlite3` and commits a WAL transaction。
 - **Acceptance/done**：full CI matrix and extra smoke artifacts exist；empty selected runtime stack idle RSS
-  `<=64 MiB` three runs；network denial is enforced；SDK harness can start a loopback listener with scripted remotes；
-  live command refuses without its opt-in flag；default `start/main/bin` values still invoke legacy JavaScript。
+  `<=64 MiB` three runs；network denial is enforced；dedicated SDK configs are excluded from default include patterns；
+  guard behavior is unit-tested without launching official clients；default `start/main/bin` values still invoke legacy
+  JavaScript。
 - **Non-goals/guardrails**：不实现 Gateway/routes，不 change published package identity，不 weaken strict flags；
   test execution has no network fallback，and provisioning cannot contact arbitrary hosts。
 - **PR handoff**：附各 platform Node/npm/native-addon versions、three-run raw baseline files、script names 和
@@ -1814,8 +1824,9 @@ Every PR description records all commands and artifact paths. It is mergeable on
   generation races；literal `endpoint + "/models"`；redirect/Retry-After/errors；OpenAI fields；any
   `anthropic-version` presence including empty/wrong value selects Anthropic success shape；nullable limits/all models；
   Ollama RFC3339Nano；missing/preferred/explicit/unknown model matrix；`/models` 404。
-  `npm run test:sdk:refactor -- tests/refactor/sdk/model_listing.sdk.test.ts` uses OpenAI `models.list`、
-  Anthropic `models.list` and Ollama list against the loopback gateway。
+- **Manual SDK checkpoint**（excluded from implementation/review gates）：
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/model_listing.sdk.test.ts` uses OpenAI
+  `models.list`、Anthropic `models.list` and Ollama list against the loopback gateway。
 - **Acceptance/done**：three serializers read the same snapshot；no static list/name inference；cache isolated by
   account；catalog invalidation marks missing preferred model invalid without silent fallback；errors expose no upstream
   body。
@@ -1843,8 +1854,9 @@ Every PR description records all commands and artifact paths. It is mergeable on
   and exact reserialization per HTTP contract；
   upstream statuses/safe errors；usage-only/event/error/one successful `[DONE]`；all byte splits；first-byte/idle/total
   timeout；queue `503`；abort before/after commit；no aliases。
-  `npm run test:sdk:refactor -- tests/refactor/sdk/openai_chat.sdk.test.ts` covers official SDK non-stream/stream、
-  error class/request ID and cancellation。
+- **Manual SDK checkpoint**（excluded from implementation/review gates）：
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/openai_chat.sdk.test.ts` covers official
+  SDK non-stream/stream、error class/request ID and cancellation。
 - **Acceptance/done**：one upstream call with bound account/model；raw fast path does not instantiate Ollama/Anthropic/
   Responses state；success terminal exactly once；zero additional bytes on abort；Fetch-surface tests need no private
   method access。
@@ -1872,8 +1884,9 @@ Every PR description records all commands and artifact paths. It is mergeable on
   image magic、ordered tool args、choice 0、
   usage/logprobs、reasoning tags、sparse tools、absorbing `[DONE]`、truncation/abort/error；Go reference byte cases
   for order/omitempty/HTML/Unicode/control/final LF；queue `503`。
-  `npm run test:sdk:refactor -- tests/refactor/sdk/ollama.sdk.test.ts` covers official SDK list/chat
-  non-stream/stream and cancellation。
+- **Manual SDK checkpoint**（excluded from implementation/review gates）：
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/ollama.sdk.test.ts` covers official SDK
+  list/chat non-stream/stream and cancellation。
 - **Acceptance/done**：`stream` missing means true；source-valid unrepresentable semantics fail with zero upstream；
   exactly one terminal or post-commit error；all fields/bytes match goldens；`/api/version` matches closed HTTP fixture。
 - **Non-goals/guardrails**：不 expose model pull/delete/copy/show、不 add model capability guesses、不 reuse
@@ -1900,8 +1913,9 @@ Every PR description records all commands and artifact paths. It is mergeable on
   message/media/tool history、schema cleanup、reasoning
   families、multi-choice/thinking/tool argument repair、usage aliases、block switches/signed thinking、finish-first/
   no-finish/exception；Python default `json.dumps` spaces/ASCII；queue `529`；abort。
-  `npm run test:sdk:refactor -- tests/refactor/sdk/anthropic.sdk.test.ts` covers official SDK models/messages
-  non-stream/stream、native error/request ID and cancellation。
+- **Manual SDK checkpoint**（excluded from implementation/review gates）：
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/anthropic.sdk.test.ts` covers official
+  SDK models/messages non-stream/stream、native error/request ID and cancellation。
 - **Acceptance/done**：request matches pinned cc-switch behavior；nonstream/events match pinned LiteLLM plus specified
   terminal closure；`message_stop` exactly once only on success path；Messages version rule is not reused by models
   route header-presence selection。
@@ -2056,8 +2070,9 @@ Every PR description records all commands and artifact paths. It is mergeable on
   failure before bytes；failure after earlier events；native no-history/no-fallback；queue `503`；all timeouts/limits；
   exact shared Responses SSE encoder/no `[DONE]`；abort zero additional bytes；`/responses`、
   `/openai/v1/responses`、compact aliases 404。
-  `npm run test:sdk:refactor -- tests/refactor/sdk/openai_responses.sdk.test.ts` covers official OpenAI SDK
-  Responses non-stream/stream、native/bridge scripted plans、errors and cancellation。
+- **Manual SDK checkpoint**（excluded from implementation/review gates）：
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/openai_responses.sdk.test.ts` covers
+  official OpenAI SDK Responses non-stream/stream、native/bridge scripted plans、errors and cancellation。
 - **Acceptance/done**：all Responses fixture families pass through Fetch surface；plan cannot change mid-request；
   native and bridge ID namespaces/history remain separate；checkpoint p95 `<=5 ms` three runs。
 - **Non-goals/guardrails**：不 add compact/cross-account retry/live-stream recovery、legacy fallback or implementation
@@ -2185,14 +2200,14 @@ Every PR description records all commands and artifact paths. It is mergeable on
   default `start/build/test/lint` target TypeScript；`prepack` builds server + Admin assets；repository metadata targets
   `ljie-PI/ghc-gateway`；data/env are only `~/.ghc-gateway`/`GHC_GATEWAY_`。
 - **Tests**：full offline `npm run typecheck`；`npm run lint`；`npm run build`；`npm test`；
-  `npm run test:sdk:refactor`；`npm run fixtures:verify`；`npm pack`；all protocol/model/HTTP contracts；then
+  `npm run fixtures:verify`；`npm pack`；all protocol/model/HTTP contracts；then
   clean install on required/additional platforms；foreground and daemon lifecycle；all 7 Admin E2E flows；route/alias
   closure；three-run RSS/latency/checkpoint/event-loop suite；fresh and migrated-within-new-v1 DB；clean tree after
   pack/install。
 - **Acceptance/done**：every target route complete；no legacy files/imports/names/aliases/default scripts；pack contains
   only intended dist/assets/docs/license；idle RSS `<=64 MiB` and 1,000-stream stable delta `<=16 MiB`；all latency
-  gates pass three times；guarded live SDK suite exists but cannot run in CI without explicit opt-in；README is the final
-  user-facing update and matches actual CLI/security/config behavior。
+  gates pass three times；both guarded SDK suites exist、are excluded from automated gates and cannot run without explicit
+  opt-in；README is the final user-facing update and matches actual CLI/security/config behavior。
 - **Non-goals/guardrails**：coding agent不运行 npm publish、不 target `main`、不运行 `gh repo rename`、不 retain
   compatibility launcher/data migration or fallback。
 - **PR handoff**：附 package tarball manifest/SHA、five-platform smoke evidence、full route matrix、daemon/Admin traces、
@@ -2213,7 +2228,7 @@ After `RM-22` merges and before `refactor -> main` promotion，a maintainer veri
 - JSONL 10 MiB×5/7d、secrets Unix `0600`/Windows current-user ACL、redaction scans。
 - idle/stable-stream RSS and four latency/event-loop gates，each three consecutive runs。
 - default entrypoints contain no TODO/stub/legacy fallback；old executable/env/data names absent。
-- all three official SDK offline suites pass；the guarded manual live SDK suite has a sanitized passing/
+- the maintainer-triggered offline official SDK suite passes；the guarded manual live SDK suite has a sanitized passing/
   `not_available` result under section 10.3 rules。
 - README updated last；tarball manifest exact；`git diff --check` and clean working tree after every generated/smoke step。
 
@@ -2224,12 +2239,14 @@ Any failed item keeps `refactor` unreleased；the gate is never waived by docume
 After `RM-22` merges to `refactor`, a maintainer—not a coding agent—performs：
 
 1. rerun the signed/recorded release gate from a clean checkout；
-2. run `GHC_GATEWAY_LIVE_TESTS=1 npm run test:live:sdk` against the real local gateway and attach the sanitized result；
-3. review and merge the single promotion from `refactor` to `main` under repository policy；
-4. manually or with authenticated GitHub CLI rename `ljie-PI/ghcp-ollama` to `ljie-PI/ghc-gateway`；
-5. verify redirects、default branch、remote URL、package metadata and README links；
-6. publish `@ljie-pi/ghc-gateway@0.1.0` from the verified main commit and verify clean install/release assets；
-7. announce the clean break：users reauthenticate/reconfigure；there are no old aliases or state import。
+2. manually run `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor` against scripted remotes and attach its result；
+3. manually run `GHC_GATEWAY_LIVE_TESTS=1 npm run test:live:sdk` against the real local gateway and attach the sanitized
+   result；
+4. review and merge the single promotion from `refactor` to `main` under repository policy；
+5. manually or with authenticated GitHub CLI rename `ljie-PI/ghcp-ollama` to `ljie-PI/ghc-gateway`；
+6. verify redirects、default branch、remote URL、package metadata and README links；
+7. publish `@ljie-pi/ghc-gateway@0.1.0` from the verified main commit and verify clean install/release assets；
+8. announce the clean break：users reauthenticate/reconfigure；there are no old aliases or state import。
 
 Repository rename occurs only after the final main merge and pre-publish verification。No implementation PR may rename
 the remote early or make tests depend on the rename having occurred。
