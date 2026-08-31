@@ -1,0 +1,122 @@
+[
+  {
+    "caseId": "wire-json.scalar.null-false-zero-empty",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "scalar/null-false-zero-empty.input.json",
+    "expected": "scalar/null-false-zero-empty.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.number.negative-zero",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "number/negative-zero.input.json",
+    "expected": "number/negative-zero.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.number.exponent",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "number/exponent.input.json",
+    "expected": "number/exponent.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.number.large-lexeme",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "number/large-lexeme.input.json",
+    "expected": "number/large-lexeme.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.object.member-order",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "object/member-order.input.json",
+    "expected": "object/member-order.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.object.integer-like-keys",
+    "owner": "RM-02",
+    "source": "docs/ollama_chat_to_chat_completions.md",
+    "input": "object/integer-like-keys.input.json",
+    "expected": "object/integer-like-keys.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.object.duplicate-keys",
+    "owner": "RM-02",
+    "source": "docs/openai_chat_completions.md#31-top-level-duplicate-policy",
+    "input": "object/duplicate-keys.input.json",
+    "expected": "object/duplicate-keys.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.unicode.escaped-equivalent-keys",
+    "owner": "RM-02",
+    "source": "docs/openai_chat_completions.md#31-top-level-duplicate-policy",
+    "input": "unicode/escaped-equivalent-keys.input.json",
+    "expected": "unicode/escaped-equivalent-keys.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.unicode.surrogates",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "unicode/surrogates.input.json",
+    "expected": "unicode/surrogates.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.canonicalize.code-point-sort",
+    "owner": "RM-02",
+    "source": "docs/claude_messages_to_chat_completions.md",
+    "input": "unicode/code-point-sort.input.json",
+    "expected": "unicode/code-point-sort.expected.json",
+    "encoder": "canonical"
+  },
+  {
+    "caseId": "wire-json.compact.pretty-input",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "compact/pretty-input.input.json",
+    "expected": "compact/pretty-input.expected.json",
+    "encoder": "ordered-compact"
+  },
+  {
+    "caseId": "wire-json.invalid.malformed",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "invalid/malformed.input.json",
+    "expected": "invalid/malformed.expected.json",
+    "encoder": "error"
+  },
+  {
+    "caseId": "wire-json.invalid.utf8",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "invalid/utf8.input.bin",
+    "expected": "invalid/utf8.expected.json",
+    "encoder": "error"
+  },
+  {
+    "caseId": "wire-json.limits.depth",
+    "owner": "RM-02",
+    "source": "docs/architecture.md#101-wire-json",
+    "input": "limits/depth.input.json",
+    "expected": "limits/depth.expected.json",
+    "encoder": "error"
+  },
+  {
+    "caseId": "wire-json.limits.bytes",
+    "owner": "RM-02",
+    "source": "docs/gateway_http_contracts.md",
+    "input": "limits/bytes.input.json",
+    "expected": "limits/bytes.expected.json",
+    "encoder": "error"
+  }
+]
