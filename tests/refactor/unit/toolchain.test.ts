@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -59,15 +59,17 @@ describe("RM-01 refactor toolchain", () => {
   });
 
   it("keeps official SDK commands behind manual opt-in guards", async () => {
-    await expect(execFileAsync(process.execPath, ["scripts/refactor/require_opt_in.mjs", "GHC_GATEWAY_SDK_TESTS"], {
+    const command = ["scripts/refactor/bootstrap.mjs", "scripts/refactor/require_opt_in.ts"];
+
+    await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
       env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "" },
     })).rejects.toMatchObject({ code: 2 });
 
-    await expect(execFileAsync(process.execPath, ["scripts/refactor/require_opt_in.mjs", "GHC_GATEWAY_LIVE_TESTS"], {
+    await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_LIVE_TESTS"], {
       env: { ...process.env, GHC_GATEWAY_LIVE_TESTS: "" },
     })).rejects.toMatchObject({ code: 2 });
 
-    await expect(execFileAsync(process.execPath, ["scripts/refactor/require_opt_in.mjs", "GHC_GATEWAY_SDK_TESTS"], {
+    await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
       env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "1" },
     })).resolves.toMatchObject({ stdout: "" });
   });
@@ -80,14 +82,21 @@ describe("RM-01 refactor toolchain", () => {
     expect(isAllowedNetworkTarget("https://github.com/login/device/code")).toBe(false);
   });
 
+  it("keeps bootstrap.mjs as the only refactor JavaScript shim", async () => {
+    const files = await readdir("scripts/refactor");
+    expect(files.filter((file) => file.endsWith(".mjs")).sort()).toEqual(["bootstrap.mjs"]);
+  });
+
   it("preloads the CI network guard without contacting external hosts", async () => {
-    const guardUrl = pathToFileURL(path.resolve("scripts/refactor/ci_network_guard.mjs")).href;
+    const bootstrapUrl = pathToFileURL(path.resolve("scripts/refactor/bootstrap.mjs")).href;
 
     await expect(execFileAsync(process.execPath, [
       "--import",
-      guardUrl,
+      bootstrapUrl,
       "--eval",
       "fetch('https://github.com').catch((error) => { console.error(error.message); process.exit(2); })",
-    ])).rejects.toMatchObject({ code: 2 });
+    ], {
+      env: { ...process.env, GHC_GATEWAY_CI_NETWORK_GUARD: "1" },
+    })).rejects.toMatchObject({ code: 2 });
   });
 });
