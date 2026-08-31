@@ -125,7 +125,12 @@ async function runJsonProbe<T>(probe: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--input-type=module", "--eval", probe], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, NODE_ENV: "production" },
+      env: {
+        ...process.env,
+        GHC_GATEWAY_CI_NETWORK_GUARD: "",
+        NODE_ENV: "production",
+        NODE_OPTIONS: "",
+      },
     });
     let stdout = "";
     let stderr = "";
@@ -164,7 +169,12 @@ async function runSample(): Promise<BaselineSample> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--jitless", "--max-old-space-size=16", "--input-type=module", "--eval", probe], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, NODE_ENV: "production" },
+      env: {
+        ...process.env,
+        GHC_GATEWAY_CI_NETWORK_GUARD: "",
+        NODE_ENV: "production",
+        NODE_OPTIONS: "",
+      },
     });
     let stdout = "";
     let stderr = "";
