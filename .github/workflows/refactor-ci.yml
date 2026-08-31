@@ -1,0 +1,144 @@
+name: Refactor CI
+
+on:
+  pull_request:
+    branches: ["refactor"]
+  push:
+    branches: ["refactor"]
+
+jobs:
+  required-platforms:
+    name: refactor-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Record dependency provenance
+        shell: bash
+        run: |
+          mkdir -p artifacts/refactor-ci
+          {
+            echo "node=$(node --version)"
+            echo "npm=$(npm --version)"
+            echo "os=${{ runner.os }}"
+            echo "arch=${{ runner.arch }}"
+            echo "registry=$(npm config get registry)"
+            echo "lockfile_sha256=$(node -e \"const fs=require('fs');const crypto=require('crypto');console.log(crypto.createHash('sha256').update(fs.readFileSync('package-lock.json')).digest('hex'))\")"
+          } | tee artifacts/refactor-ci/provenance.txt
+      - name: Provision dependencies
+        run: npm ci
+      - name: Verify offline dependency cache
+        run: npm ci --offline
+      - name: Typecheck refactor app
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run typecheck:refactor
+      - name: Lint refactor app
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run lint:refactor
+      - name: Test refactor app
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run test:refactor
+      - name: Test refactor E2E harness
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run test:e2e:refactor
+      - name: Verify fixtures
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run fixtures:verify
+      - name: Build refactor app
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run build:refactor
+      - name: SQLite platform smoke
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run smoke:refactor:sqlite
+      - name: Legacy unit tests
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run test:unit
+      - name: Legacy smoke
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run smoke:legacy
+      - name: Baseline benchmark
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run bench:refactor -- baseline --repeat 3
+      - name: Package smoke
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run pack:refactor
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: refactor-ci-${{ matrix.os }}
+          path: |
+            artifacts/refactor-ci/**
+            dist-refactor/bench/**
+            dist-refactor/pack-smoke.json
+
+  smoke-artifacts:
+    name: smoke-${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            arch: linux-arm64
+          - os: macos-13
+            arch: macos-x64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Record smoke provenance
+        shell: bash
+        run: |
+          mkdir -p artifacts/refactor-ci
+          {
+            echo "node=$(node --version)"
+            echo "npm=$(npm --version)"
+            echo "os=${{ runner.os }}"
+            echo "arch=${{ matrix.arch }}"
+            echo "registry=$(npm config get registry)"
+          } | tee artifacts/refactor-ci/provenance.txt
+      - run: npm ci
+      - run: npm run build:refactor
+      - run: npm run smoke:refactor:sqlite
+      - run: npm run test:e2e:refactor
+      - run: npm run pack:refactor
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: refactor-smoke-${{ matrix.arch }}
+          path: |
+            artifacts/refactor-ci/**
+            dist-refactor/pack-smoke.json
