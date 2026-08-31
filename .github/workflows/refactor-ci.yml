@@ -110,7 +110,7 @@ jobs:
         include:
           - os: ubuntu-24.04-arm
             arch: linux-arm64
-          - os: macos-13
+          - os: macos-15-intel
             arch: macos-x64
     steps:
       - uses: actions/checkout@v4
