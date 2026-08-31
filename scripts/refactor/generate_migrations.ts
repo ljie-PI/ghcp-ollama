@@ -1,0 +1,98 @@
+import { readFileSync } from "node:fs";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { embedMigration, type EmbeddedMigration, type MigrationModule } from "../../src/persistence/migrations.js";
+import { assertNode24 } from "./node_version.js";
+
+export const RESERVED_MIGRATION_FILES: ReadonlyMap<number, string> = new Map([
+  [1, "001_runtime_config.ts"],
+  [10, "010_accounts.ts"],
+  [20, "020_telemetry.ts"],
+  [30, "030_responses_history.ts"],
+]);
+
+export const DEFAULT_MIGRATIONS_DIR = path.resolve("src/persistence/migrations");
+export const DEFAULT_MANIFEST_PATH = path.resolve("dist-refactor/migrations-manifest.json");
+
+export class MigrationGenerateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MigrationGenerateError";
+  }
+}
+
+export async function generateMigrationManifest(
+  migrationsDir = DEFAULT_MIGRATIONS_DIR,
+): Promise<readonly EmbeddedMigration[]> {
+  const entries = await readdir(migrationsDir);
+  const files = entries.filter((name) => /^\d{3}_.+\.ts$/u.test(name)).sort();
+  const seen = new Set<number>();
+  const migrations: EmbeddedMigration[] = [];
+
+  for (const file of files) {
+    const versionText = file.slice(0, 3);
+    const version = Number.parseInt(versionText, 10);
+    const reserved = RESERVED_MIGRATION_FILES.get(version);
+    if (reserved === undefined) {
+      throw new MigrationGenerateError(`migration version ${version} is not reserved`);
+    }
+    if (file !== reserved) {
+      throw new MigrationGenerateError(`reserved-owner violation: expected ${reserved}, found ${file}`);
+    }
+    if (seen.has(version)) {
+      throw new MigrationGenerateError(`duplicate migration version ${version}`);
+    }
+    seen.add(version);
+
+    const moduleUrl = pathToFileURL(path.join(migrationsDir, file)).href;
+    const loaded = await import(moduleUrl) as { migration?: MigrationModule };
+    if (loaded.migration === undefined) {
+      throw new MigrationGenerateError(`${file} must export migration`);
+    }
+    if (loaded.migration.version !== version) {
+      throw new MigrationGenerateError(`filename/export mismatch in ${file}`);
+    }
+    if (typeof loaded.migration.name !== "string" || loaded.migration.name.length === 0) {
+      throw new MigrationGenerateError(`${file} migration name must be a non-empty string`);
+    }
+    if (typeof loaded.migration.sql !== "string" || loaded.migration.sql.length === 0) {
+      throw new MigrationGenerateError(`${file} migration sql must be a non-empty string`);
+    }
+    migrations.push(embedMigration(loaded.migration));
+  }
+
+  return migrations.sort((left, right) => left.version - right.version);
+}
+
+export function readMigrationManifest(manifestPath = DEFAULT_MANIFEST_PATH): EmbeddedMigration[] {
+  const raw = JSON.parse(readFileSync(manifestPath, "utf8")) as { migrations?: unknown };
+  if (!Array.isArray(raw.migrations)) {
+    throw new MigrationGenerateError("migration manifest must contain a migrations array");
+  }
+  return raw.migrations as EmbeddedMigration[];
+}
+
+export async function writeMigrationManifest(
+  migrations: readonly EmbeddedMigration[],
+  manifestPath = DEFAULT_MANIFEST_PATH,
+): Promise<string> {
+  await mkdir(path.dirname(manifestPath), { recursive: true });
+  const payload = `${JSON.stringify({ migrations }, null, 2)}\n`;
+  await writeFile(manifestPath, payload, "utf8");
+  return manifestPath;
+}
+
+async function main(): Promise<void> {
+  assertNode24();
+  const migrations = await generateMigrationManifest();
+  const manifestPath = await writeMigrationManifest(migrations);
+  console.log(`Wrote ${migrations.length} migrations to ${manifestPath}`);
+}
+
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch((error: unknown) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

@@ -45,7 +45,7 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:golden": "node tests/integration/utils/golden_generator.js",
-    "build:refactor": "node scripts/refactor/bootstrap.mjs --check && tsc -p tsconfig.refactor.json",
+    "build:refactor": "node scripts/refactor/bootstrap.mjs --check && tsc -p tsconfig.refactor.json && node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts",
     "typecheck:refactor": "node scripts/refactor/bootstrap.mjs --check && tsc -p tsconfig.refactor.json --noEmit",
     "lint:refactor": "node scripts/refactor/bootstrap.mjs --check && eslint --no-error-on-unmatched-pattern --config eslint.config.js \"src/**/*.ts\" \"scripts/refactor/**/*.{ts,mjs}\" \"tests/refactor/unit/**/*.ts\" \"tests/refactor/contract/**/*.ts\" \"tests/refactor/integration/**/*.ts\" \"tests/refactor/performance/**/*.ts\" \"vitest.refactor.config.ts\" \"playwright.config.ts\"",
     "test:refactor": "node scripts/refactor/bootstrap.mjs --check && vitest run --config vitest.refactor.config.ts",
