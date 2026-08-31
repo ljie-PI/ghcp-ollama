@@ -31,7 +31,7 @@ jobs:
             echo "os=${{ runner.os }}"
             echo "arch=${{ runner.arch }}"
             echo "registry=$(npm config get registry)"
-            echo "lockfile_sha256=$(node -e \"const fs=require('fs');const crypto=require('crypto');console.log(crypto.createHash('sha256').update(fs.readFileSync('package-lock.json')).digest('hex'))\")"
+            echo "lockfile_sha256=$(node -e 'const fs=require("fs");const crypto=require("crypto");console.log(crypto.createHash("sha256").update(fs.readFileSync("package-lock.json")).digest("hex"))')"
           } | tee artifacts/refactor-ci/provenance.txt
       - name: Provision dependencies
         run: npm ci
