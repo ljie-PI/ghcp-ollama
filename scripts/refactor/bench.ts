@@ -162,7 +162,7 @@ async function runSample(): Promise<BaselineSample> {
   ].join("\n");
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--input-type=module", "--eval", probe], {
+    const child = spawn(process.execPath, ["--max-old-space-size=16", "--input-type=module", "--eval", probe], {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, NODE_ENV: "production" },
     });
