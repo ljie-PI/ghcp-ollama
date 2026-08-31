@@ -12,6 +12,7 @@ import {
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
 import { migration as runtimeConfigMigration } from "../../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
+import { migration as telemetryMigration } from "../../../src/persistence/migrations/020_telemetry.js";
 import {
   applyMigrations,
   embedMigration,
@@ -143,6 +144,7 @@ describe("RM-04 generate_migrations", () => {
     expect(migrations).toEqual([
       embedMigration(runtimeConfigMigration),
       embedMigration(accountsMigration),
+      embedMigration(telemetryMigration),
     ]);
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-manifest-"));
     const manifestPath = path.join(dir, "migrations-manifest.json");
