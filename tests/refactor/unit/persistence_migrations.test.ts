@@ -11,6 +11,7 @@ import {
 } from "../../../scripts/refactor/generate_migrations.js";
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
 import { migration as runtimeConfigMigration } from "../../../src/persistence/migrations/001_runtime_config.js";
+import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
 import {
   applyMigrations,
   embedMigration,
@@ -139,7 +140,10 @@ describe("RM-04 migrations", () => {
 describe("RM-04 generate_migrations", () => {
   it("embeds the reserved 001 module and writes a static manifest", async () => {
     const migrations = await generateMigrationManifest();
-    expect(migrations).toEqual([embedMigration(runtimeConfigMigration)]);
+    expect(migrations).toEqual([
+      embedMigration(runtimeConfigMigration),
+      embedMigration(accountsMigration),
+    ]);
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-manifest-"));
     const manifestPath = path.join(dir, "migrations-manifest.json");
     await writeMigrationManifest(migrations, manifestPath);
