@@ -39,57 +39,57 @@ jobs:
         run: npm ci --offline
       - name: Typecheck refactor app
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run typecheck:refactor
       - name: Lint refactor app
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run lint:refactor
       - name: Test refactor app
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run test:refactor
       - name: Test refactor E2E harness
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run test:e2e:refactor
       - name: Verify fixtures
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run fixtures:verify
       - name: Build refactor app
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run build:refactor
       - name: SQLite platform smoke
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run smoke:refactor:sqlite
       - name: Legacy unit tests
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run test:unit
       - name: Legacy smoke
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run smoke:legacy
       - name: Baseline benchmark
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run bench:refactor -- baseline --repeat 3
       - name: Package smoke
         env:
-          NODE_OPTIONS: "--import ./scripts/refactor/ci_network_guard.mjs"
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
         run: npm run pack:refactor
       - uses: actions/upload-artifact@v4
@@ -131,10 +131,26 @@ jobs:
             echo "registry=$(npm config get registry)"
           } | tee artifacts/refactor-ci/provenance.txt
       - run: npm ci
-      - run: npm run build:refactor
-      - run: npm run smoke:refactor:sqlite
-      - run: npm run test:e2e:refactor
-      - run: npm run pack:refactor
+      - name: Smoke build refactor app
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run build:refactor
+      - name: Smoke SQLite platform
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run smoke:refactor:sqlite
+      - name: Smoke E2E harness
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run test:e2e:refactor
+      - name: Smoke package
+        env:
+          NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run pack:refactor
       - uses: actions/upload-artifact@v4
         if: always()
         with:
