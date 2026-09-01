@@ -557,6 +557,76 @@ describe("RM-09 OpenAI Chat endpoint", () => {
       await close();
     }
   });
+
+  it("writes zero bytes when the client aborts before the first stream payload", async () => {
+    let canceled = false;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: cancelableBytes(() => {
+          canceled = true;
+        }),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    const controller = new AbortController();
+    try {
+      const pending = gw.fetch(new Request("http://127.0.0.1:31400/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"model\":\"gpt\",\"stream\":true}",
+        signal: controller.signal,
+      }));
+      for (let index = 0; index < 20 && backend.chatStreamRequests.length === 0; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      controller.abort();
+      const response = await pending;
+      expect(await response.text()).toBe("");
+      for (let index = 0; index < 20 && !canceled; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(canceled).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it("writes no Done or error frame after a committed stream is aborted", async () => {
+    let canceled = false;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: cancelableBytes(() => {
+          canceled = true;
+        }, encoder.encode("data: {\"choices\":[]}\n\n")),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    const controller = new AbortController();
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"model\":\"gpt\",\"stream\":true}",
+        signal: controller.signal,
+      }));
+      const reader = response.body?.getReader();
+      const first = await reader?.read();
+      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[]}\n\n");
+      controller.abort();
+      const next = await reader?.read().catch(() => ({ done: true, value: undefined }));
+      expect(next?.value === undefined ? "" : decoder.decode(next.value)).not.toContain("[DONE]");
+      for (let index = 0; index < 20 && !canceled; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(canceled).toBe(true);
+    } finally {
+      await close();
+    }
+  });
 });
 
 async function* streamFromText(text: string, split: number): AsyncIterable<Uint8Array> {
@@ -569,6 +639,28 @@ async function* streamFromText(text: string, split: number): AsyncIterable<Uint8
 async function* hangingStreamAfter(text: string): AsyncIterable<Uint8Array> {
   yield encoder.encode(text);
   await new Promise<void>(() => undefined);
+}
+
+function cancelableBytes(onCancel: () => void, first?: Uint8Array): AsyncIterable<Uint8Array> {
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+      let sentFirst = first === undefined;
+      return {
+        next: async (): Promise<IteratorResult<Uint8Array>> => {
+          if (!sentFirst && first !== undefined) {
+            sentFirst = true;
+            return { done: false, value: first };
+          }
+          await new Promise<void>(() => undefined);
+          return { done: true, value: undefined };
+        },
+        return: async (): Promise<IteratorResult<Uint8Array>> => {
+          onCancel();
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
 }
 
 async function withScriptedFirstByteTimeout(
