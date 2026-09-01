@@ -1,0 +1,26 @@
+[
+  {
+    "caseId": "openai-chat.request.model-rewrite",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#7-request-reserialization--vision-analysis",
+    "input": "request/model-rewrite.input.json",
+    "expected": "request/model-rewrite.expected.json",
+    "encoder": "openai-chat-request"
+  },
+  {
+    "caseId": "openai-chat.stream.done",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#11-openai-downstream-sse-wire--terminal",
+    "input": "stream/done.input.txt",
+    "expected": "stream/done.expected.txt",
+    "encoder": "openai-chat-sse"
+  },
+  {
+    "caseId": "openai-chat.presenter.model-not-found",
+    "owner": "RM-09",
+    "source": "docs/gateway_http_contracts.md#71-openai-chat--responses",
+    "input": "presenter/model-not-found.input.txt",
+    "expected": "presenter/model-not-found.expected.json",
+    "encoder": "openai-error-presenter"
+  }
+]

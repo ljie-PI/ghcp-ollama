@@ -493,10 +493,16 @@ async function* withBodyTimeouts(
   let seenBytes = false;
   try {
     for (;;) {
-      const next = await Promise.race([
-        iterator.next(),
-        timeoutPromise(seenBytes ? idleMs : firstByteMs, scope.signal),
-      ]);
+      const timeout = bodyTimeout(seenBytes ? idleMs : firstByteMs, scope.signal);
+      let next: IteratorResult<Uint8Array>;
+      try {
+        next = await Promise.race([
+          iterator.next(),
+          timeout.promise,
+        ]);
+      } finally {
+        timeout.clear();
+      }
       if (next.done === true) {
         return;
       }
@@ -514,18 +520,28 @@ async function* withBodyTimeouts(
   }
 }
 
-function timeoutPromise(ms: number, signal: AbortSignal): Promise<IteratorResult<Uint8Array>> {
-  return new Promise((resolve, reject) => {
+function bodyTimeout(ms: number, signal: AbortSignal): {
+  readonly promise: Promise<IteratorResult<Uint8Array>>;
+  readonly clear: () => void;
+} {
+  let clear = (): void => undefined;
+  const promise = new Promise<IteratorResult<Uint8Array>>((_resolve, reject) => {
     if (signal.aborted) {
       reject(new GatewayFailureError({ kind: "aborted" }));
       return;
     }
     const timer = setTimeout(() => reject(new GatewayFailureError({ kind: "upstream_timeout" })), ms);
-    signal.addEventListener("abort", () => {
+    const onAbort = (): void => {
       clearTimeout(timer);
       reject(new GatewayFailureError({ kind: "aborted" }));
-    }, { once: true });
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    clear = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    };
   });
+  return { promise, clear };
 }
 
 function openAiChatStreamResponse(input: {
