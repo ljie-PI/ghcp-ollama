@@ -40,6 +40,22 @@
     "encoder": "openai-chat-buffered"
   },
   {
+    "caseId": "openai-chat.buffered.limit-boundary",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#144-non-stream",
+    "input": "buffered/limit-boundary.input.txt",
+    "expected": "buffered/limit-boundary.expected.json",
+    "encoder": "openai-chat-limit"
+  },
+  {
+    "caseId": "openai-chat.stream.limit-boundary",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#145-stream-parser--exact-wire",
+    "input": "stream/limit-boundary.input.txt",
+    "expected": "stream/limit-boundary.expected.json",
+    "encoder": "openai-chat-limit"
+  },
+  {
     "caseId": "openai-chat.usage.observation",
     "owner": "RM-09",
     "source": "docs/openai_chat_completions.md#13-usage--telemetry-ownership",

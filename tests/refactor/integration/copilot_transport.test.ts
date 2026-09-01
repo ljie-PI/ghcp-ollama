@@ -146,7 +146,7 @@ describe("RM-07 Copilot transport", () => {
     expect(headers.has("authorization")).toBe(true);
   });
 
-  it("does not shorten first-byte timeout to the connect timeout", async () => {
+  it("enforces captured connect timeout on injected fetch transport", async () => {
     const store = new MemoryCredentialStore();
     const bound = account();
     await store.putGeneration(bound.accountId, 1, {
@@ -165,7 +165,7 @@ describe("RM-07 Copilot transport", () => {
       },
     });
     const copilot = await backend.bind(bound, new AbortController().signal);
-    const response = await copilot.completeChat({
+    await expect(copilot.completeChat({
       model: "gpt",
       body: new TextEncoder().encode("{}"),
       stream: false,
@@ -174,8 +174,7 @@ describe("RM-07 Copilot transport", () => {
       connectTimeoutMs: 1,
       firstByteTimeoutMs: 100,
       signal: new AbortController().signal,
-    });
-    expect(response.status).toBe(200);
+    })).rejects.toThrow(/upstream timeout/u);
   });
 
   it("cancels non-2xx upstream bodies before returning safe errors", async () => {

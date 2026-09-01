@@ -387,6 +387,38 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     }
   });
 
+  it("enforces non-stream upstream body limit at the inclusive boundary", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.limits.nonstreamBodyBytes = 1_048_576;
+    const boundary = exactJsonObjectBytes(runtime.limits.nonstreamBodyBytes);
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: boundary },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const ok = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(ok.status).toBe(200);
+      expect((await ok.arrayBuffer()).byteLength).toBe(runtime.limits.nonstreamBodyBytes);
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects non-stream upstream bodies over the captured limit", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.limits.nonstreamBodyBytes = 1_048_576;
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: exactJsonObjectBytes(runtime.limits.nonstreamBodyBytes + 1) },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(502);
+    } finally {
+      await close();
+    }
+  });
+
   it("suppresses duplicate usage counters from telemetry without mutating wire data", async () => {
     const usageUpdates: unknown[] = [];
     const backend = new CapturingCopilotBackend({
@@ -498,6 +530,45 @@ describe("RM-09 OpenAI Chat endpoint", () => {
       expect(await response.text()).toBe(
         "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
       );
+    } finally {
+      await close();
+    }
+  });
+
+  it("accepts an upstream SSE event at the inclusive event limit", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.limits.sseEventBytes = 65_536;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: streamFromText(`${exactSseEventText(runtime.limits.sseEventBytes)}data: [DONE]\n\n`, 65_536),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("data: [DONE]\n\n");
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects an upstream SSE event over the captured event limit", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.limits.sseEventBytes = 65_536;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: streamFromText(exactSseEventText(runtime.limits.sseEventBytes + 1), 65_536),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      expect(response.status).toBe(502);
     } finally {
       await close();
     }
@@ -661,6 +732,16 @@ function cancelableBytes(onCancel: () => void, first?: Uint8Array): AsyncIterabl
       };
     },
   };
+}
+
+function exactJsonObjectBytes(size: number): Uint8Array {
+  return encoder.encode(`{"x":"${"x".repeat(size - 8)}"}`);
+}
+
+function exactSseEventText(size: number): string {
+  const prefix = "data: {\"choices\":[],\"x\":\"";
+  const suffix = "\"}\n\n";
+  return `${prefix}${"x".repeat(size - prefix.length - suffix.length)}${suffix}`;
 }
 
 async function withScriptedFirstByteTimeout(

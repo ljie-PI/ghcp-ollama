@@ -163,12 +163,16 @@ function expectedOpenAiChatFixture(entry: FixtureManifestEntry): string | undefi
     return "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}";
   case "openai-chat.buffered.success":
     return "{\"id\":\"chatcmpl_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
+  case "openai-chat.buffered.limit-boundary":
+    return "{\"inclusiveStatus\":200,\"overLimitStatus\":502,\"defaultLimitBytes\":33554432}";
   case "openai-chat.usage.observation":
     return "{\"inputTokens\":1,\"outputTokens\":2,\"cacheTokens\":3}";
   case "openai-chat.model.preferred":
     return "{\"messages\":[],\"model\":\"preferred\"}";
   case "openai-chat.stream.truncated":
     return "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}";
+  case "openai-chat.stream.limit-boundary":
+    return "{\"inclusiveStatus\":200,\"overLimitStatus\":502,\"defaultLimitBytes\":4194304}";
   case "openai-chat.abort.zero-bytes":
     return "";
   default:

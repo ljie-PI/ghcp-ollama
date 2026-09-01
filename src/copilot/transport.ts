@@ -121,19 +121,22 @@ async function fetchWithRedirects(
   let current = url;
   let headers = outboundHeaders(token, extraHeaders);
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
-    const timeout = responseStartTimeout(undefined, firstByteTimeoutMs);
+    const timeout = responseStartTimeout(connectTimeoutMs, firstByteTimeoutMs);
     const fetchSignal = timeout === undefined ? signal : AbortSignal.any([signal, timeout.signal]);
     let response: Response;
     try {
-      response = await fetchImpl(current, {
+      const fetchPromise = fetchImpl(current, {
         method: "POST",
         headers,
         body: Buffer.from(body),
         signal: fetchSignal,
         redirect: "manual",
       });
+      response = await (timeout === undefined
+        ? fetchPromise
+        : Promise.race([fetchPromise, timeout.promise]));
     } catch (error: unknown) {
-      if (timeout?.timedOut() === true) {
+      if (timeout?.timedOut() === true || error instanceof UpstreamTimeoutError) {
         throw new UpstreamTimeoutError();
       }
       throw error;
@@ -229,19 +232,31 @@ async function undiciWithRedirects(
 function responseStartTimeout(
   connectTimeoutMs: number | undefined,
   firstByteTimeoutMs: number | undefined,
-): { readonly signal: AbortSignal; readonly clear: () => void; readonly timedOut: () => boolean } | undefined {
+): {
+  readonly signal: AbortSignal;
+  readonly promise: Promise<Response>;
+  readonly clear: () => void;
+  readonly timedOut: () => boolean;
+} | undefined {
   if (connectTimeoutMs === undefined && firstByteTimeoutMs === undefined) {
     return undefined;
   }
   const controller = new AbortController();
   let timedOut = false;
-  const ms = firstByteTimeoutMs ?? connectTimeoutMs ?? 0;
+  let rejectTimeout: (error: unknown) => void = () => undefined;
+  const promise = new Promise<Response>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const ms = Math.min(connectTimeoutMs ?? Number.POSITIVE_INFINITY, firstByteTimeoutMs ?? Number.POSITIVE_INFINITY);
   const timer = setTimeout(() => {
     timedOut = true;
-    controller.abort(new UpstreamTimeoutError());
+    const error = new UpstreamTimeoutError();
+    controller.abort(error);
+    rejectTimeout(error);
   }, ms);
   return {
     signal: controller.signal,
+    promise,
     clear: () => clearTimeout(timer),
     timedOut: () => timedOut,
   };
