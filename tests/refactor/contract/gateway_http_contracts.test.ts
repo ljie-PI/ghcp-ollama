@@ -22,7 +22,9 @@ const fakePresenter: FailurePresenter = (failure, requestId) => {
       ? 413
       : failure.kind === "unsupported_media_type"
         ? 415
-        : 400;
+        : failure.kind === "upstream_timeout"
+          ? 504
+          : 400;
   return new Response(JSON.stringify({ kind: failure.kind, requestId }), {
     status,
     headers: {
@@ -88,6 +90,39 @@ function jsonRequest(pathName: string, body: string, headers: HeadersInit = {}):
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
     body,
+  });
+}
+
+interface StreamingRequestInit extends RequestInit {
+  readonly duplex: "half";
+}
+
+function streamingJsonRequest(
+  pathName: string,
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): Request {
+  const init: StreamingRequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: stream,
+    ...(signal === undefined ? {} : { signal }),
+    duplex: "half",
+  };
+  return new Request(`http://127.0.0.1:31400${pathName}`, init);
+}
+
+function stalledJsonBody(onCancel: () => void): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller): void {
+      controller.enqueue(new TextEncoder().encode("{"));
+    },
+    pull: async (): Promise<void> => {
+      await new Promise<void>(() => undefined);
+    },
+    cancel(): void {
+      onCancel();
+    },
   });
 }
 
@@ -235,6 +270,72 @@ describe("RM-03 body reading and fake presenter", () => {
     }));
     expect(response.headers.get("x-request-id")).toBe("req_generated_1");
     await gw.close();
+  });
+
+  it("times out stalled uploads and releases the inference slot", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    runtime.timeouts.totalMs = 1;
+    let canceled = false;
+    const gw = await gatewayWith([echoRoute()], { runtime });
+    try {
+      const timedOut = await gw.fetch(streamingJsonRequest("/v1/echo", stalledJsonBody(() => {
+        canceled = true;
+      })));
+      expect(timedOut.status).toBe(504);
+      expect(JSON.parse(await timedOut.text())).toMatchObject({ kind: "upstream_timeout" });
+      expect(canceled).toBe(true);
+
+      const after = await gw.fetch(jsonRequest("/v1/echo", "{}"));
+      expect(after.status).toBe(200);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("cancels body reads on client abort without writing a response", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    let canceled = false;
+    const controller = new AbortController();
+    const gw = await gatewayWith([echoRoute()], { runtime });
+    try {
+      const pending = gw.fetch(streamingJsonRequest("/v1/echo", stalledJsonBody(() => {
+        canceled = true;
+      }), controller.signal));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      controller.abort();
+      const response = await pending;
+      expect(response.body).toBeNull();
+      expect(canceled).toBe(true);
+
+      const after = await gw.fetch(jsonRequest("/v1/echo", "{}"));
+      expect(after.status).toBe(200);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("cancels in-flight body reads when the gateway closes", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    let canceled = false;
+    const gw = await gatewayWith([echoRoute()], { runtime });
+    try {
+      const pending = gw.fetch(streamingJsonRequest("/v1/echo", stalledJsonBody(() => {
+        canceled = true;
+      })));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await gw.close();
+      const response = await pending;
+      expect(response.body).toBeNull();
+      expect(canceled).toBe(true);
+    } finally {
+      await gw.close();
+    }
   });
 });
 

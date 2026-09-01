@@ -110,7 +110,7 @@ async function handleRoute(
     const url = new URL(request.url);
     let decoded: DecodedHttpRequest = { url, headers: request.headers };
     if (route.body === "wire-json-object") {
-      const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes);
+      const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes, controller.signal);
       decoded = { url, headers: request.headers, body };
     }
 
