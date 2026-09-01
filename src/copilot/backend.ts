@@ -31,7 +31,7 @@ export interface CopilotBackend {
 
 export interface ScriptedCopilotHandlers {
   chat?: ChatResponse | ((request: ChatRequest) => ChatResponse | Promise<ChatResponse>);
-  chatStream?: Uint8Array[] | AsyncIterable<Uint8Array>;
+  chatStream?: Uint8Array[] | AsyncIterable<Uint8Array> | ((request: ChatRequest) => Uint8Array[] | AsyncIterable<Uint8Array>);
   responses?: UpstreamByteResponse;
   responsesStream?: Uint8Array[];
 }
@@ -63,12 +63,15 @@ export class ScriptedCopilotBackend implements CopilotBackend {
         }
         throw new Error("scripted chat missing");
       },
-      async openChatStream() {
+      async openChatStream(request) {
         captured.push({ accountId: account.accountId, kind: "chat-stream" });
+        const stream = typeof handlers.chatStream === "function"
+          ? handlers.chatStream(request)
+          : handlers.chatStream;
         return {
           status: 200,
           headers: new Headers({ "content-type": "text/event-stream" }),
-          bytes: asAsync(handlers.chatStream ?? []),
+          bytes: asAsync(stream ?? []),
         };
       },
       async completeResponses() {

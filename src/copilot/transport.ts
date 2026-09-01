@@ -26,8 +26,8 @@ export class HttpCopilotBackend implements CopilotBackend {
     return {
       accountId: account.accountId,
       target,
-      completeChat: (request) => this.completeJson(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl),
-      openChatStream: (request) => this.openStream(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl),
+      completeChat: (request) => this.completeJson(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, chatExtraHeaders(request.hasVisionInput)),
+      openChatStream: (request) => this.openStream(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, chatExtraHeaders(request.hasVisionInput)),
       completeResponses: (request) => this.completeJson(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl),
       openResponsesStream: (request) => this.openStream(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl),
     };
@@ -39,8 +39,9 @@ export class HttpCopilotBackend implements CopilotBackend {
     body: Uint8Array,
     signal: AbortSignal,
     fetchImpl: typeof fetch,
+    extraHeaders?: Headers,
   ): Promise<ChatResponse & UpstreamByteResponse> {
-    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal);
+    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, extraHeaders);
     const bytes = new Uint8Array(await response.arrayBuffer());
     return { status: response.status, headers: response.headers, body: bytes };
   }
@@ -51,8 +52,9 @@ export class HttpCopilotBackend implements CopilotBackend {
     body: Uint8Array,
     signal: AbortSignal,
     fetchImpl: typeof fetch,
+    extraHeaders?: Headers,
   ): Promise<UpstreamByteStream> {
-    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal);
+    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, extraHeaders);
     const stream = response.body;
     return {
       status: response.status,
@@ -68,9 +70,10 @@ async function fetchWithRedirects(
   token: string,
   body: Uint8Array,
   signal: AbortSignal,
+  extraHeaders?: Headers,
 ): Promise<Response> {
   let current = url;
-  let headers = outboundHeaders(token);
+  let headers = outboundHeaders(token, extraHeaders);
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
     const response = await fetchImpl(current, {
       method: "POST",
@@ -91,6 +94,14 @@ async function fetchWithRedirects(
     current = next;
   }
   throw new Error("too many redirects");
+}
+
+function chatExtraHeaders(hasVisionInput: boolean): Headers {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (hasVisionInput) {
+    headers.set("copilot-vision-request", "true");
+  }
+  return headers;
 }
 
 async function* empty(): AsyncIterable<Uint8Array> {}

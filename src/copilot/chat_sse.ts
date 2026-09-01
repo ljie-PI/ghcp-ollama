@@ -4,10 +4,10 @@ import type { ChatStreamFrame } from "../protocols/chat_completions/types.js";
 const DEFAULT_EVENT_LIMIT = 4 * 1024 * 1024;
 
 export class ChatSseError extends Error {
-  readonly code: "event_too_large" | "truncated";
+  readonly code: "event_too_large" | "invalid_utf8" | "truncated";
 
-  constructor(code: ChatSseError["code"], message: string) {
-    super(message);
+  constructor(code: ChatSseError["code"], message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "ChatSseError";
     this.code = code;
   }
@@ -17,15 +17,15 @@ export async function* parseChatSse(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes = DEFAULT_EVENT_LIMIT,
 ): AsyncGenerator<ChatStreamFrame> {
-  let line = "";
+  let lineBytes: number[] = [];
   let pendingCr = false;
   let eventLines: string[] = [];
   let eventBytes = 0;
   let terminal = false;
-  let bomSkip = 3;
+  let firstLine = true;
 
   const finishLine = function* (): Generator<ChatStreamFrame> {
-    if (line.length === 0) {
+    if (lineBytes.length === 0) {
       const frame = parseEvent(eventLines);
       eventLines = [];
       eventBytes = 0;
@@ -37,19 +37,12 @@ export async function* parseChatSse(
       }
       return;
     }
-    eventLines.push(line);
-    line = "";
+    eventLines.push(decodeLine(lineBytes, firstLine));
+    firstLine = false;
+    lineBytes = [];
   };
 
   const pushByte = function* (byte: number): Generator<ChatStreamFrame> {
-    if (bomSkip > 0) {
-      const expected = bomSkip === 3 ? 0xef : bomSkip === 2 ? 0xbb : 0xbf;
-      if (byte === expected) {
-        bomSkip -= 1;
-        return;
-      }
-      bomSkip = 0;
-    }
     eventBytes += 1;
     if (eventBytes > eventLimitBytes) {
       throw new ChatSseError("event_too_large", "SSE event exceeds limit");
@@ -70,7 +63,7 @@ export async function* parseChatSse(
       yield* finishLine();
       return;
     }
-    line += String.fromCharCode(byte);
+    lineBytes.push(byte);
   };
 
   for await (const part of bytes) {
@@ -84,8 +77,20 @@ export async function* parseChatSse(
   if (pendingCr) {
     yield* finishLine();
   }
-  if (line.length > 0 || eventLines.length > 0 || !terminal) {
+  if (lineBytes.length > 0 || eventLines.length > 0 || !terminal) {
     throw new ChatSseError("truncated", "truncated SSE stream");
+  }
+}
+
+function decodeLine(bytes: readonly number[], stripInitialBom: boolean): string {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+    if (stripInitialBom && text.startsWith("\uFEFF")) {
+      return text.slice(1);
+    }
+    return text;
+  } catch (error: unknown) {
+    throw new ChatSseError("invalid_utf8", "invalid UTF-8 in SSE line", { cause: error });
   }
 }
 
@@ -115,8 +120,9 @@ function parseEvent(lines: readonly string[]): ChatStreamFrame | undefined {
     return { kind: "done" };
   }
   try {
-    const payload = parseWireJson(new TextEncoder().encode(data), {
-      maxBytes: Math.max(data.length, 1),
+    const jsonBytes = new TextEncoder().encode(data);
+    const payload = parseWireJson(jsonBytes, {
+      maxBytes: Math.max(jsonBytes.byteLength, 1),
       maxDepth: 64,
     });
     if (!isWireJsonObject(payload)) {

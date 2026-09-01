@@ -1,0 +1,306 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import { AccountDirectory, type BoundAccount } from "../../../src/accounts/account_directory.js";
+import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
+import type { BoundCopilot, CopilotBackend, CopilotTarget } from "../../../src/copilot/backend.js";
+import { CopilotModelCatalog, type CapiModelsResponse } from "../../../src/copilot/model_catalog.js";
+import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
+import { parseStartupConfig } from "../../../src/config/startup_config.js";
+import { createGateway, type Gateway } from "../../../src/gateway/create_gateway.js";
+import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
+import { embedMigration } from "../../../src/persistence/migrations.js";
+import { migration as runtimeConfigMigration } from "../../../src/persistence/migrations/001_runtime_config.js";
+import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
+import { createOpenAiChatRoute } from "../../../src/protocols/openai_chat/endpoint.js";
+import type { ChatRequest, ChatResponse, NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../../../src/protocols/chat_completions/types.js";
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const nowMs = (): number => 1_700_000_000_000;
+
+class CapturingCopilotBackend implements CopilotBackend {
+  readonly chatRequests: ChatRequest[] = [];
+  readonly chatStreamRequests: ChatRequest[] = [];
+
+  constructor(
+    private readonly options: {
+      readonly chat?: ChatResponse;
+      readonly chatStream?: UpstreamByteStream;
+    },
+  ) {}
+
+  async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
+    const target: CopilotTarget = { endpoint: "https://api.githubcopilot.com", token: "scripted-token" };
+    return {
+      accountId: account.accountId,
+      target,
+      completeChat: async (request) => {
+        this.chatRequests.push(request);
+        if (this.options.chat === undefined) {
+          throw new Error("missing scripted chat response");
+        }
+        return this.options.chat;
+      },
+      openChatStream: async (request) => {
+        this.chatStreamRequests.push(request);
+        if (this.options.chatStream === undefined) {
+          throw new Error("missing scripted stream response");
+        }
+        return this.options.chatStream;
+      },
+      completeResponses: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteResponse> => {
+        throw new Error("responses must not be called");
+      },
+      openResponsesStream: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteStream> => {
+        throw new Error("responses stream must not be called");
+      },
+    };
+  }
+}
+
+async function openAiGateway(backend: CapturingCopilotBackend, options: {
+  readonly preferred?: "valid" | "invalid" | "missing";
+  readonly requestId?: string;
+} = {}): Promise<{ readonly gw: Gateway; readonly close: () => Promise<void> }> {
+  const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-openai-chat-"));
+  const database = openDatabase({
+    path: path.join(dir, "state.db"),
+    migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+    nowMs,
+  });
+  const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+  const account = await accounts.upsertAuthenticated({
+    host: "github.com",
+    userId: "1",
+    secret: { generation: 0, githubToken: "t" },
+  });
+  if (options.preferred !== "missing") {
+    const preference = accounts.preferences.set(account.accountId, {
+      modelId: options.preferred === "invalid" ? "missing-model" : "gpt",
+      catalogGeneration: 0,
+    }, 0);
+    if (options.preferred === "invalid") {
+      accounts.preferences.markInvalidIfMissing(account.accountId, new Set(["gpt"]), preference.catalogGeneration + 1);
+    }
+  }
+  const capi: CapiModelsResponse = {
+    data: [
+      { id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true },
+      { id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true },
+    ],
+  };
+  const catalog = new CopilotModelCatalog({
+    async fetch() {
+      return capi;
+    },
+  }, () => new Date("2026-08-30T05:00:00.000Z"));
+  const dependencies: { readonly createRequestId?: () => string } = options.requestId === undefined
+    ? {}
+    : { createRequestId: () => options.requestId ?? "req_test" };
+  const gw = await createGateway({
+    startup: parseStartupConfig([], {}, { homedir: dir }),
+    runtime: defaultRuntimeConfigSnapshot(),
+  }, [createOpenAiChatRoute({
+    directory: accounts,
+    catalog,
+    copilot: backend,
+  })], dependencies);
+  return {
+    gw,
+    close: async () => {
+      await gw.close();
+      closeDatabase(database);
+    },
+  };
+}
+
+function jsonRequest(body: string): Request {
+  return new Request("http://127.0.0.1:31400/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": "******",
+      "x-request-id": "client",
+    },
+    body,
+  });
+}
+
+describe("RM-09 OpenAI Chat endpoint", () => {
+  it("registers only the exact route", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      for (const url of ["/chat/completions", "/v1/chat/completions/", "/openai/v1/chat/completions"]) {
+        const response = await gw.fetch(new Request(`http://127.0.0.1:31400${url}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }));
+        expect(response.status, url).toBe(404);
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("preserves non-owned fields while rewriting the explicit model", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: {
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        body: encoder.encode("{\"z\":-0,\"choices\":[],\"usage\":{\"prompt_tokens\":1}}"),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { requestId: "req_generated" });
+    try {
+      const response = await gw.fetch(jsonRequest([
+        "{\"unknown\":1e+2,",
+        "\"stream\":false,",
+        "\"model\":\"gpt\",",
+        "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      ].join("")));
+      expect(response.status).toBe(201);
+      expect(response.headers.get("x-request-id")).toBe("req_generated");
+      expect(await response.text()).toBe("{\"z\":-0,\"choices\":[],\"usage\":{\"prompt_tokens\":1}}");
+      expect(decoder.decode(backend.chatRequests[0]?.body)).toBe(
+        "{\"unknown\":1e+2,\"stream\":false,\"model\":\"gpt\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      );
+      expect(backend.chatRequests[0]?.hasVisionInput).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  it("appends a valid preferred model when model is missing", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"messages\":[]}"));
+      expect(response.status).toBe(200);
+      expect(decoder.decode(backend.chatRequests[0]?.body)).toBe("{\"messages\":[],\"model\":\"gpt\"}");
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects duplicate top-level keys, invalid preference, and unknown explicit models before chat", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend, { preferred: "invalid", requestId: "req_error" });
+    try {
+      const duplicate = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"\\u006dodel\":\"gpt\"}"));
+      expect(duplicate.status).toBe(400);
+      expect(await duplicate.text()).toBe(
+        "{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      );
+
+      const missing = await gw.fetch(jsonRequest("{\"messages\":[]}"));
+      expect(missing.status).toBe(400);
+
+      const unknown = await gw.fetch(jsonRequest("{\"model\":\"unknown\",\"messages\":[]}"));
+      expect(unknown.status).toBe(404);
+      expect(await unknown.text()).toBe(
+        "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}",
+      );
+      expect(backend.chatRequests).toHaveLength(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it("injects stream usage options in place and detects vision without mutating content", async () => {
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: streamFromText("data: [DONE]\n\n", 1),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest([
+        "{\"model\":\"gpt\",",
+        "\"stream_options\":{\"a\":1,\"include_usage\":false,\"z\":-0},",
+        "\"stream\":true,",
+        "\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,aa\"}}]}]}",
+      ].join("")));
+      expect(await response.text()).toBe("data: [DONE]\n\n");
+      expect(backend.chatStreamRequests[0]?.hasVisionInput).toBe(true);
+      expect(decoder.decode(backend.chatStreamRequests[0]?.body)).toBe(
+        "{\"model\":\"gpt\",\"stream_options\":{\"a\":1,\"include_usage\":true,\"z\":-0},\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,aa\"}}]}]}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects stream-true non-object stream_options", async () => {
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: streamFromText("data: [DONE]\n\n", 8),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true,\"stream_options\":null}"));
+      expect(response.status).toBe(400);
+      expect(backend.chatStreamRequests).toHaveLength(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it("rebuilds upstream HTTP failures safely with Retry-After only for 429", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: {
+        status: 429,
+        headers: new Headers({ "retry-after": "120" }),
+        body: encoder.encode("{\"secret\":\"nope\"}"),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBe("120");
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream request failed\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects invalid upstream non-stream bodies before success", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("[]") },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+});
+
+async function* streamFromText(text: string, split: number): AsyncIterable<Uint8Array> {
+  const bytes = encoder.encode(text);
+  for (let index = 0; index < bytes.byteLength; index += split) {
+    yield bytes.slice(index, index + split);
+  }
+}

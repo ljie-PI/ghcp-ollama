@@ -5,6 +5,7 @@ import { resolveGitHubEnvironment } from "../../../src/accounts/github_environme
 import { outboundHeaders, ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
 import { discoverEndpoint, fallbackEndpoint, stripSecretsOnRedirect } from "../../../src/copilot/endpoint_discovery.js";
 import { copilotHeaders } from "../../../src/copilot/identity.js";
+import { HttpCopilotBackend } from "../../../src/copilot/transport.js";
 import { getValidToken, needsRefresh } from "../../../src/copilot/token_refresh.js";
 
 function account(kind: "github.com" | "ghes" = "github.com"): BoundAccount {
@@ -103,5 +104,39 @@ describe("RM-07 Copilot transport", () => {
       signal: new AbortController().signal,
     });
     expect(backend.captured).toEqual([{ accountId: "github.com/1", kind: "chat" }]);
+  });
+
+  it("sends JSON and vision headers only from typed Chat request state", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    let captured: { readonly input: RequestInfo | URL; readonly init: RequestInit | undefined } | undefined;
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async (input, init) => {
+        captured = { input, init };
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    await copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: true,
+      signal: new AbortController().signal,
+    });
+    const headers = new Headers(captured?.init?.headers);
+    expect(captured?.input).toBe("https://api.githubcopilot.com/chat/completions");
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("copilot-vision-request")).toBe("true");
+    expect(headers.has("authorization")).toBe(true);
   });
 });
