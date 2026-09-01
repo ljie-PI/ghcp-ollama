@@ -114,10 +114,32 @@ async function main(): Promise<void> {
     }
 
     const entries = await verifyFixtureManifests();
+    const entry = entries.find((candidate) => candidate.caseId === caseId);
+    if (entry?.owner === "RM-09") {
+      await generateOpenAiChatFixture(entry);
+      return;
+    }
     assertFixtureGeneratorAvailable(caseId, entries);
   }
 
   throw new Error("usage: fixtures.ts verify | generate --case <caseId> --accept");
+}
+
+async function generateOpenAiChatFixture(entry: FixtureManifestEntry): Promise<void> {
+  const expectedPath = path.join(FIXTURE_ROOT, "openai-chat", entry.expected);
+  if (entry.caseId === "openai-chat.request.model-rewrite") {
+    await writeFile(expectedPath, "{\"unknown\":1e+2,\"stream\":true,\"model\":\"resolved\",\"stream_options\":{\"include_usage\":true},\"messages\":[]}\n", "utf8");
+    return;
+  }
+  if (entry.caseId === "openai-chat.stream.done") {
+    await writeFile(expectedPath, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n", "utf8");
+    return;
+  }
+  if (entry.caseId === "openai-chat.presenter.model-not-found") {
+    await writeFile(expectedPath, "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}\n", "utf8");
+    return;
+  }
+  assertFixtureGeneratorAvailable(entry.caseId, [entry]);
 }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

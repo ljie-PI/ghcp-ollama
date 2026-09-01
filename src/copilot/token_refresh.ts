@@ -27,9 +27,11 @@ export async function withAccountLock(accountId: string, work: () => Promise<voi
     await waitForPrevious(previous, signal);
   } catch (error: unknown) {
     release();
-    if (locks.get(accountId) === queued) {
-      locks.delete(accountId);
-    }
+    void queued.finally(() => {
+      if (locks.get(accountId) === queued) {
+        locks.delete(accountId);
+      }
+    });
     throw error;
   }
   try {

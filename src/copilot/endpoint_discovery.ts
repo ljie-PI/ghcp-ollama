@@ -33,9 +33,11 @@ export async function discoverEndpoint(
     await waitForPrevious(previous, signal);
   } catch (error: unknown) {
     release();
-    if (locks.get(account.accountId) === queued) {
-      locks.delete(account.accountId);
-    }
+    void queued.finally(() => {
+      if (locks.get(account.accountId) === queued) {
+        locks.delete(account.accountId);
+      }
+    });
     throw error;
   }
   throwIfAborted(signal);
