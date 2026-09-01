@@ -284,6 +284,66 @@ describe("RM-06 account directory", () => {
     }
   });
 
+  it("does not let a failed activation prune another committed credential", async () => {
+    const { directory: accounts, credentials, database, close } = await directory();
+    try {
+      database.prepare(
+        "CREATE TRIGGER fail_user_one_insert BEFORE INSERT ON accounts WHEN NEW.numeric_user_id = '1' BEGIN SELECT RAISE(ABORT, 'account insert failed'); END",
+      ).run();
+      const other = await accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "2",
+        secret: { generation: 0, githubToken: "other" },
+      });
+      await expect(accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "failed" },
+      })).rejects.toThrow(/account insert failed/u);
+      expect(await credentials.readGeneration(other.accountId, other.credentialGeneration)).toEqual({
+        generation: 1,
+        githubToken: "other",
+      });
+      expect(await credentials.readGeneration("github.com/1", 1)).toBeNull();
+    } finally {
+      close();
+    }
+  });
+
+  it("serializes concurrent same-account activation across generation pruning", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-acc-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const credentials = new MemoryCredentialStore();
+    const accounts = new AccountDirectory(database, credentials, nowMs);
+    try {
+      const first = accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "first" },
+      });
+      const second = accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "second" },
+      });
+      const settled = await Promise.allSettled([first, second]);
+      expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(2);
+      const bound = await accounts.bindDefault();
+      expect(bound.credentialGeneration).toBe(2);
+      expect(await credentials.readGeneration(bound.accountId, 1)).toBeNull();
+      expect(await credentials.readGeneration(bound.accountId, 2)).toEqual({
+        generation: 2,
+        githubToken: "second",
+      });
+    } finally {
+      closeDatabase(database);
+    }
+  });
+
   it("marks missing preferred models invalid without choosing another", async () => {
     const { directory: accounts, close } = await directory();
     try {
