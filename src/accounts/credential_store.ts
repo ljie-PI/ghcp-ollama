@@ -139,6 +139,7 @@ export function ensureProtectedDirectory(directory: string): void {
   assertOwnedByCurrentUser(stat);
   if (process.platform === "win32") {
     restrictWindowsAcl(directory);
+    assertWindowsAclCurrentUserOnly(directory);
     return;
   }
   chmodSync(directory, 0o700);
@@ -152,6 +153,9 @@ function assertProtectedFile(filePath: string): void {
   assertOwnedByCurrentUser(stat);
   if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
     throw new Error("credential file permissions must be 0600");
+  }
+  if (process.platform === "win32") {
+    assertWindowsAclCurrentUserOnly(filePath);
   }
 }
 
@@ -167,15 +171,64 @@ function assertOwnedByCurrentUser(stat: { uid: number }): void {
 function protectFile(filePath: string): void {
   if (process.platform === "win32") {
     restrictWindowsAcl(filePath);
+    assertWindowsAclCurrentUserOnly(filePath);
     return;
   }
   chmodSync(filePath, 0o600);
 }
 
 function restrictWindowsAcl(target: string): void {
-  execFileSync("icacls", [target, "/inheritance:r", "/grant:r", `${process.env.USERNAME ?? ""}:(F)`], {
-    stdio: "ignore",
-  });
+  const current = currentWindowsIdentity();
+  const grant = isDirectory(target) ? `*${current.sid}:(OI)(CI)(F)` : `*${current.sid}:(F)`;
+  execFileSync("icacls", [target, "/inheritance:r", "/grant:r", grant], { stdio: "ignore" });
+  for (const identity of windowsAclIdentities(target)) {
+    if (!isCurrentWindowsIdentity(identity, current)) {
+      execFileSync("icacls", [target, "/remove:g", identity], { stdio: "ignore" });
+    }
+  }
+}
+
+function assertWindowsAclCurrentUserOnly(target: string): void {
+  const current = currentWindowsIdentity();
+  const identities = windowsAclIdentities(target);
+  if (identities.length !== 1 || !isCurrentWindowsIdentity(identities[0] ?? "", current)) {
+    throw new Error("credential ACL must be restricted to the current user");
+  }
+}
+
+function currentWindowsIdentity(): { readonly name: string; readonly sid: string } {
+  const csv = execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim();
+  const match = /^"([^"]+)","([^"]+)"$/u.exec(csv);
+  if (match === null || match[1] === undefined || match[2] === undefined) {
+    throw new Error("unable to resolve current Windows identity");
+  }
+  return { name: match[1].toLowerCase(), sid: match[2].toLowerCase() };
+}
+
+function windowsAclIdentities(target: string): readonly string[] {
+  const output = execFileSync("icacls", [target], { encoding: "utf8" });
+  const identities: string[] = [];
+  for (const rawLine of output.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("Successfully processed") || line.startsWith("Failed processing")) {
+      continue;
+    }
+    const entry = rawLine.startsWith(target) ? rawLine.slice(target.length).trim() : line;
+    const separator = entry.indexOf(":(");
+    if (separator > 0) {
+      identities.push(entry.slice(0, separator));
+    }
+  }
+  return identities;
+}
+
+function isCurrentWindowsIdentity(identity: string, current: { readonly name: string; readonly sid: string }): boolean {
+  const normalized = identity.toLowerCase();
+  return normalized === current.name || normalized === current.sid;
+}
+
+function isDirectory(target: string): boolean {
+  return lstatSync(target).isDirectory();
 }
 
 function isNotFound(error: unknown): boolean {
