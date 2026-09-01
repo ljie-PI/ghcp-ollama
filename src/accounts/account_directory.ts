@@ -100,59 +100,59 @@ export class AccountDirectory {
     if (activating && this.activeCount() >= this.maxAuthenticated) {
       throw new AccountDirectoryError("capacity", "authenticated account capacity reached");
     }
+    const previousCredentialReferences = this.activeCredentialReferences();
     const generation = (existing?.credential_generation ?? 0) + 1;
     const secret = { ...input.secret, generation };
     await this.credentials.putGeneration(accountId, generation, secret);
 
     const now = this.nowMs();
-    if (existing === undefined) {
-      this.database.prepare(
-        `INSERT INTO accounts (
-           account_id, revision, normalized_host, numeric_user_id, environment_kind,
-           login, display_name, authenticated_at_ms, credential_generation, credential_state,
-           created_at_ms, updated_at_ms
-         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-      ).run(
-        accountId,
-        environment.host,
-        userId,
-        environment.kind,
-        input.login ?? null,
-        input.displayName ?? null,
-        now,
-        generation,
-        now,
-        now,
-      );
-    } else {
-      this.database.prepare(
-        `UPDATE accounts SET
-           revision = revision + 1,
-           login = ?,
-           display_name = ?,
-           authenticated_at_ms = ?,
-           credential_generation = ?,
-           credential_state = 'active',
-           updated_at_ms = ?
-         WHERE account_id = ?`,
-      ).run(input.login ?? existing.login, input.displayName ?? existing.display_name, now, generation, now, accountId);
+    try {
+      this.database.transaction(() => {
+        if (existing === undefined) {
+          this.database.prepare(
+            `INSERT INTO accounts (
+               account_id, revision, normalized_host, numeric_user_id, environment_kind,
+               login, display_name, authenticated_at_ms, credential_generation, credential_state,
+               created_at_ms, updated_at_ms
+             ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+          ).run(
+            accountId,
+            environment.host,
+            userId,
+            environment.kind,
+            input.login ?? null,
+            input.displayName ?? null,
+            now,
+            generation,
+            now,
+            now,
+          );
+        } else {
+          this.database.prepare(
+            `UPDATE accounts SET
+               revision = revision + 1,
+               login = ?,
+               display_name = ?,
+               authenticated_at_ms = ?,
+               credential_generation = ?,
+               credential_state = 'active',
+               updated_at_ms = ?
+             WHERE account_id = ?`,
+          ).run(input.login ?? existing.login, input.displayName ?? existing.display_name, now, generation, now, accountId);
+        }
+
+        if (this.readPrefs().default_account_id === null) {
+          this.database.prepare(
+            "UPDATE gateway_preferences SET default_account_id = ?, revision = revision + 1, updated_at_ms = ? WHERE singleton_id = 1",
+          ).run(accountId, now);
+        }
+      })();
+    } catch (error: unknown) {
+      await this.credentials.prune(previousCredentialReferences);
+      throw error;
     }
 
-    if (this.readPrefs().default_account_id === null) {
-      this.database.prepare(
-        "UPDATE gateway_preferences SET default_account_id = ?, revision = revision + 1, updated_at_ms = ? WHERE singleton_id = 1",
-      ).run(accountId, now);
-    }
-
-    const references = new Map<AccountId, number>();
-    const active = this.database.prepare(
-      "SELECT account_id, credential_generation FROM accounts WHERE credential_state = 'active' AND credential_generation IS NOT NULL",
-    ).all() as Array<{ account_id: string; credential_generation: number }>;
-    for (const row of active) {
-      references.set(row.account_id, row.credential_generation);
-    }
-    references.set(accountId, generation);
-    await this.credentials.prune(references);
+    await this.credentials.prune(this.activeCredentialReferences());
     return this.bind(accountId);
   }
 
@@ -240,6 +240,13 @@ export class AccountDirectory {
       "SELECT COUNT(*) AS count FROM accounts WHERE credential_state = 'active'",
     ).get() as { count: number };
     return row.count;
+  }
+
+  private activeCredentialReferences(): ReadonlyMap<AccountId, number> {
+    const active = this.database.prepare(
+      "SELECT account_id, credential_generation FROM accounts WHERE credential_state = 'active' AND credential_generation IS NOT NULL",
+    ).all() as Array<{ account_id: string; credential_generation: number }>;
+    return new Map(active.map((row) => [row.account_id, row.credential_generation]));
   }
 
   private readPrefs(): { revision: number; default_account_id: string | null } {

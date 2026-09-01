@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory, AccountDirectoryError } from "../../../src/accounts/account_directory.js";
-import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
+import { MemoryCredentialStore, type CredentialStore, type SecretCredential } from "../../../src/accounts/credential_store.js";
 import {
   canonicalUserId,
   formatAccountId,
@@ -201,6 +201,86 @@ describe("RM-06 account directory", () => {
       });
     } finally {
       close();
+    }
+  });
+
+  it("prunes a newly written credential if account activation rolls back", async () => {
+    const { directory: accounts, credentials, database, close } = await directory();
+    try {
+      database.prepare(
+        "CREATE TRIGGER fail_account_insert BEFORE INSERT ON accounts BEGIN SELECT RAISE(ABORT, 'account insert failed'); END",
+      ).run();
+      await expect(accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "orphan" },
+      })).rejects.toThrow(/account insert failed/u);
+      expect(await credentials.readGeneration("github.com/1", 1)).toBeNull();
+      expect(accounts.list()).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("keeps the previous active generation if relogin activation rolls back", async () => {
+    const { directory: accounts, credentials, database, close } = await directory();
+    try {
+      const first = await accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "old" },
+      });
+      database.prepare(
+        "CREATE TRIGGER fail_account_update BEFORE UPDATE ON accounts BEGIN SELECT RAISE(ABORT, 'account update failed'); END",
+      ).run();
+      await expect(accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "new" },
+      })).rejects.toThrow(/account update failed/u);
+      expect(await credentials.readGeneration(first.accountId, 1)).toEqual({
+        generation: 1,
+        githubToken: "old",
+      });
+      expect(await credentials.readGeneration(first.accountId, 2)).toBeNull();
+      expect((await accounts.bindDefault()).credentialGeneration).toBe(1);
+    } finally {
+      close();
+    }
+  });
+
+  it("does not mutate account state when the credential write fails first", async () => {
+    class FailingCredentialStore implements CredentialStore {
+      async readGeneration(): Promise<SecretCredential | null> {
+        return null;
+      }
+
+      async putGeneration(): Promise<void> {
+        throw new Error("credential write failed");
+      }
+
+      async removeAccount(): Promise<void> {}
+
+      async prune(): Promise<void> {}
+    }
+
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-acc-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new FailingCredentialStore(), nowMs);
+    try {
+      await expect(accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "new" },
+      })).rejects.toThrow(/credential write failed/u);
+      expect(accounts.list()).toEqual([]);
+      await expect(accounts.bindDefault()).rejects.toBeInstanceOf(AccountDirectoryError);
+    } finally {
+      closeDatabase(database);
     }
   });
 
