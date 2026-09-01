@@ -124,9 +124,6 @@ describe("RM-08 CAPI parse and cache", () => {
     const timeoutSource = new HttpCopilotModelsSource(
       async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
       async () => new Response(new ReadableStream<Uint8Array>({
-        pull: async () => {
-          await new Promise<void>(() => undefined);
-        },
         cancel(): void {
           timeoutCanceled = true;
         },
@@ -134,6 +131,9 @@ describe("RM-08 CAPI parse and cache", () => {
       { connectTimeoutMs: 20, totalTimeoutMs: 1, bodyLimitBytes: 32 },
     );
     await expect(timeoutSource.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    for (let index = 0; index < 20 && !timeoutCanceled; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
     expect(timeoutCanceled).toBe(true);
 
     let abortCanceled = false;
@@ -141,9 +141,6 @@ describe("RM-08 CAPI parse and cache", () => {
     const abortSource = new HttpCopilotModelsSource(
       async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
       async () => new Response(new ReadableStream<Uint8Array>({
-        pull: async () => {
-          await new Promise<void>(() => undefined);
-        },
         cancel(): void {
           abortCanceled = true;
         },
@@ -153,6 +150,9 @@ describe("RM-08 CAPI parse and cache", () => {
     const pending = abortSource.fetch("github.com/1", abortController.signal);
     abortController.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    for (let index = 0; index < 20 && !abortCanceled; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
     expect(abortCanceled).toBe(true);
   });
 

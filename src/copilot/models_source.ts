@@ -4,10 +4,19 @@ import { copilotHeaders } from "./identity.js";
 import { capiModelsUrl, type CapiModelsResponse, type CopilotModelsSource } from "./model_catalog.js";
 import { MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
 
+export type CapiFailureKind = "upstream_http" | "upstream_timeout" | "invalid_upstream_response";
+
 interface CapiTransportLimits {
   readonly connectTimeoutMs: number;
   readonly totalTimeoutMs: number;
   readonly bodyLimitBytes: number;
+}
+
+interface CapiHttpResponse {
+  readonly status: number;
+  readonly headers: Headers;
+  readonly body: AsyncIterable<Uint8Array>;
+  cancel(): Promise<void>;
 }
 
 const DEFAULT_CAPI_LIMITS: CapiTransportLimits = {
@@ -20,6 +29,7 @@ export class CapiFetchError extends Error {
   constructor(
     readonly status: number,
     readonly retryAfter?: string,
+    readonly failureKind: CapiFailureKind = "upstream_http",
   ) {
     super("capi fetch failed");
     this.name = "CapiFetchError";
@@ -38,22 +48,26 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
     const deadlineMs = Date.now() + this.limits.totalTimeoutMs;
     const response = await getWithRedirects(this.fetchImpl, capiModelsUrl(endpoint), token, signal, deadlineMs, this.limits);
     if (response.status < 200 || response.status >= 300) {
-      await cancelResponseBody(response);
+      await response.cancel();
       const status = response.status >= 300 && response.status < 400 ? 502 : response.status;
-      throw new CapiFetchError(status, response.status === 429 ? validRetryAfter(response.headers) : undefined);
+      throw new CapiFetchError(
+        status,
+        response.status === 429 ? validRetryAfter(response.headers) : undefined,
+        status === response.status ? "upstream_http" : "invalid_upstream_response",
+      );
     }
     try {
-      const bytes = await readLimitedBody(response, signal, deadlineMs, this.limits);
+      const bytes = await readLimitedBody(response.body, signal, deadlineMs, this.limits);
       return JSON.parse(new TextDecoder().decode(bytes)) as CapiModelsResponse;
     } catch (error: unknown) {
-      await cancelResponseBody(response);
+      await response.cancel();
       if (signal.aborted) {
         throw new DOMException("aborted", "AbortError");
       }
       if (error instanceof CapiFetchError || isAbortError(error)) {
         throw error;
       }
-      throw new CapiFetchError(502);
+      throw new CapiFetchError(502, undefined, "invalid_upstream_response");
     }
   }
 }
@@ -65,7 +79,7 @@ async function getWithRedirects(
   signal: AbortSignal,
   deadlineMs: number,
   limits: CapiTransportLimits,
-): Promise<Response> {
+): Promise<CapiHttpResponse> {
   let current = url;
   let headers = new Headers({ ...copilotHeaders(), authorization: `Bearer ${token}`, "content-type": "application/json" });
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
@@ -75,58 +89,6 @@ async function getWithRedirects(
     if (response.status < 300 || response.status >= 400) {
       return response;
     }
-
-    async function undiciWithTimeout(
-      url: string,
-      headers: Headers,
-      signal: AbortSignal,
-      deadlineMs: number,
-      limits: CapiTransportLimits,
-    ): Promise<Response> {
-      const dispatcher = new Agent({
-        connectTimeout: limits.connectTimeoutMs,
-        headersTimeout: positiveTimeoutMs(deadlineMs),
-        bodyTimeout: 0,
-      });
-      const timeout = timeoutPromise<Awaited<ReturnType<typeof undiciRequest>>>(remainingMs(deadlineMs), signal);
-      try {
-        const response = await Promise.race([undiciRequest(url, {
-          method: "GET",
-          headers: headersToRecord(headers),
-          signal: timeout.signal,
-          dispatcher,
-        }), timeout.promise]);
-        const body = response.body;
-        const iterator = body[Symbol.asyncIterator]();
-        const stream = new ReadableStream<Uint8Array>({
-          async pull(controller): Promise<void> {
-            const next = await iterator.next();
-            if (next.done === true) {
-              controller.close();
-              await dispatcher.close().catch(() => undefined);
-              return;
-            }
-            controller.enqueue(next.value instanceof Uint8Array ? next.value : Buffer.from(next.value));
-          },
-          async cancel(): Promise<void> {
-            body.destroy();
-            await dispatcher.close().catch(() => undefined);
-          },
-        });
-        return new Response(stream, {
-          status: response.statusCode,
-          headers: incomingHeadersToHeaders(response.headers),
-        });
-      } catch (error: unknown) {
-        await dispatcher.close().catch(() => undefined);
-        if (isUndiciTimeout(error)) {
-          throw new CapiFetchError(502);
-        }
-        throw error;
-      } finally {
-        timeout.clear();
-      }
-    }
     const location = response.headers.get("location");
     if (location === null) {
       return response;
@@ -135,14 +97,14 @@ async function getWithRedirects(
     try {
       next = new URL(location, current).toString();
     } catch (_error: unknown) {
-      await cancelResponseBody(response);
-      throw new CapiFetchError(502);
+      await response.cancel();
+      throw new CapiFetchError(502, undefined, "invalid_upstream_response");
     }
     headers = stripSecretsOnRedirect(current, next, headers);
-    await cancelResponseBody(response);
+    await response.cancel();
     current = next;
   }
-  throw new CapiFetchError(502);
+  throw new CapiFetchError(502, undefined, "invalid_upstream_response");
 }
 
 async function fetchWithTimeout(
@@ -152,16 +114,23 @@ async function fetchWithTimeout(
   signal: AbortSignal,
   deadlineMs: number,
   limits: CapiTransportLimits,
-): Promise<Response> {
+): Promise<CapiHttpResponse> {
   const timeout = timeoutPromise<Response>(Math.min(limits.connectTimeoutMs, remainingMs(deadlineMs)), signal);
   try {
-    return await Promise.race([
+    const response = await Promise.race([
       fetchImpl(url, { method: "GET", headers, signal: timeout.signal, redirect: "manual" }),
       timeout.promise,
     ]);
+    const wrappedBody = response.body === null ? emptyBody() : createWebBody(response.body);
+    return {
+      status: response.status,
+      headers: response.headers,
+      body: wrappedBody.bytes,
+      cancel: wrappedBody.cancel,
+    };
   } catch (error: unknown) {
     if (timeout.timedOut()) {
-      throw new CapiFetchError(502);
+      throw new CapiFetchError(502, undefined, "upstream_timeout");
     }
     throw error;
   } finally {
@@ -169,43 +138,83 @@ async function fetchWithTimeout(
   }
 }
 
-async function readLimitedBody(response: Response, signal: AbortSignal, deadlineMs: number, limits: CapiTransportLimits): Promise<Uint8Array> {
-  const body = response.body;
-  if (body === null) {
-    return new Uint8Array();
+async function undiciWithTimeout(
+  url: string,
+  headers: Headers,
+  signal: AbortSignal,
+  deadlineMs: number,
+  limits: CapiTransportLimits,
+): Promise<CapiHttpResponse> {
+  const dispatcher = new Agent({
+    connectTimeout: limits.connectTimeoutMs,
+    headersTimeout: positiveTimeoutMs(deadlineMs),
+    bodyTimeout: 0,
+  });
+  const timeout = timeoutPromise<Awaited<ReturnType<typeof undiciRequest>>>(remainingMs(deadlineMs), signal);
+  try {
+    const response = await Promise.race([undiciRequest(url, {
+      method: "GET",
+      headers: headersToRecord(headers),
+      signal: timeout.signal,
+      dispatcher,
+    }), timeout.promise]);
+    const body = response.body;
+    return {
+      status: response.statusCode,
+      headers: incomingHeadersToHeaders(response.headers),
+      body: undiciBody(body, dispatcher),
+      cancel: async () => {
+        destroyUndiciBody(body);
+        await dispatcher.close().catch(() => undefined);
+      },
+    };
+  } catch (error: unknown) {
+    await dispatcher.close().catch(() => undefined);
+    if (timeout.timedOut() || isUndiciTimeout(error)) {
+      throw new CapiFetchError(502, undefined, "upstream_timeout");
+    }
+    throw error;
+  } finally {
+    timeout.clear();
   }
-  const reader = body.getReader();
+}
+
+async function readLimitedBody(
+  source: AsyncIterable<Uint8Array>,
+  signal: AbortSignal,
+  deadlineMs: number,
+  limits: CapiTransportLimits,
+): Promise<Uint8Array> {
+  const iterator = source[Symbol.asyncIterator]();
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
     for (;;) {
-      const timeout = timeoutPromise<ReadableStreamReadResult<Uint8Array>>(remainingMs(deadlineMs), signal);
-      let next: ReadableStreamReadResult<Uint8Array>;
+      const timeout = timeoutPromise<IteratorResult<Uint8Array>>(remainingMs(deadlineMs), signal);
+      let next: IteratorResult<Uint8Array>;
       try {
-        next = await Promise.race([reader.read(), timeout.promise]);
+        next = await Promise.race([iterator.next(), timeout.promise]);
       } catch (error: unknown) {
         if (timeout.timedOut()) {
-          throw new CapiFetchError(502);
+          throw new CapiFetchError(502, undefined, "upstream_timeout");
         }
         throw error;
       } finally {
         timeout.clear();
       }
-      if (next.done) {
+      if (next.done === true) {
         break;
-      }
-      if (next.value === undefined) {
-        continue;
       }
       total += next.value.byteLength;
       if (total > limits.bodyLimitBytes) {
-        void reader.cancel().catch(() => undefined);
-        throw new CapiFetchError(502);
+        void iterator.return?.().catch(() => undefined);
+        throw new CapiFetchError(502, undefined, "invalid_upstream_response");
       }
       chunks.push(next.value);
     }
-  } finally {
-    reader.releaseLock();
+  } catch (error: unknown) {
+    void iterator.return?.().catch(() => undefined);
+    throw error;
   }
 
   const bytes = new Uint8Array(total);
@@ -233,12 +242,7 @@ function timeoutPromise<T>(ms: number, signal: AbortSignal): {
   if (signal.aborted) {
     controller.abort();
     rejectTimeout(new DOMException("aborted", "AbortError"));
-    return {
-      signal: combined,
-      promise,
-      clear: () => undefined,
-      timedOut: () => false,
-    };
+    return { signal: combined, promise, clear: () => undefined, timedOut: () => false };
   }
   const onAbort = (): void => {
     controller.abort();
@@ -248,7 +252,7 @@ function timeoutPromise<T>(ms: number, signal: AbortSignal): {
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-    rejectTimeout(new CapiFetchError(502));
+    rejectTimeout(new CapiFetchError(502, undefined, "upstream_timeout"));
   }, Math.max(0, ms));
   return {
     signal: combined,
@@ -261,20 +265,75 @@ function timeoutPromise<T>(ms: number, signal: AbortSignal): {
   };
 }
 
+function emptyBody(): { readonly bytes: AsyncIterable<Uint8Array>; readonly cancel: () => Promise<void> } {
+  return {
+    bytes: {
+      async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {},
+    },
+    cancel: async () => undefined,
+  };
+}
+
+function createWebBody(body: ReadableStream<Uint8Array>): { readonly bytes: AsyncIterable<Uint8Array>; readonly cancel: () => Promise<void> } {
+  const reader = body.getReader();
+  let completed = false;
+  let released = false;
+  const release = (): void => {
+    if (released) {
+      return;
+    }
+    released = true;
+    reader.releaseLock();
+  };
+  return {
+    bytes: {
+      async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        try {
+          for (;;) {
+            const next = await reader.read();
+            if (next.done) {
+              completed = true;
+              return;
+            }
+            if (next.value !== undefined) {
+              yield next.value;
+            }
+          }
+        } finally {
+          if (!completed) {
+            void reader.cancel().catch(() => undefined);
+          }
+          release();
+        }
+      },
+    },
+    cancel: async () => {
+      await reader.cancel().catch(() => undefined);
+      release();
+    },
+  };
+}
+
+async function* undiciBody(
+  body: AsyncIterable<Uint8Array | Buffer | string> & { destroy(error?: Error): void; on(event: "error", listener: (error: Error) => void): unknown },
+  dispatcher: Agent,
+): AsyncIterable<Uint8Array> {
+  try {
+    for await (const chunk of body) {
+      yield chunk instanceof Uint8Array ? chunk : Buffer.from(chunk);
+    }
+  } finally {
+    destroyUndiciBody(body);
+    await dispatcher.close().catch(() => undefined);
+  }
+}
+
 function remainingMs(deadlineMs: number): number {
   return Math.max(0, deadlineMs - Date.now());
 }
 
 function positiveTimeoutMs(deadlineMs: number): number {
   return Math.max(1, remainingMs(deadlineMs));
-}
-
-async function cancelResponseBody(response: Response): Promise<void> {
-  await response.body?.cancel().catch(() => undefined);
-}
-
-function isAbortError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 function validRetryAfter(headers: Headers): string | undefined {
@@ -289,6 +348,10 @@ function validRetryAfter(headers: Headers): string | undefined {
     return value;
   }
   return undefined;
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 function headersToRecord(headers: Headers): Record<string, string> {
@@ -320,4 +383,9 @@ function isUndiciTimeout(error: unknown): boolean {
   return error instanceof undiciErrors.ConnectTimeoutError
     || error instanceof undiciErrors.HeadersTimeoutError
     || error instanceof undiciErrors.BodyTimeoutError;
+}
+
+function destroyUndiciBody(body: { destroy(error?: Error): void; on(event: "error", listener: (error: Error) => void): unknown }): void {
+  body.on("error", () => undefined);
+  body.destroy();
 }
