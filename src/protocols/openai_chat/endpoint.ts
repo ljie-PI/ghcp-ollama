@@ -125,11 +125,6 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         signal: upstreamController.signal,
       });
       assertUpstreamSuccess(upstream.status, upstream.headers);
-      if (!isEventStream(upstream.headers)) {
-        upstreamController.abort();
-        await upstream.cancel?.();
-        throw new GatewayFailureError({ kind: "invalid_upstream_response" });
-      }
 
       const frames = parseChatSse(withBodyTimeouts(
         upstream.bytes,
@@ -274,6 +269,9 @@ async function loadCatalog(catalog: CopilotModelCatalog, accountId: string, sign
         status: error.status,
         ...(retry === undefined ? {} : { retryAfter: retry }),
       });
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new GatewayFailureError({ kind: "aborted" });
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
@@ -460,14 +458,6 @@ function validRetryAfterValue(value: string | undefined): string | undefined {
     return value;
   }
   return undefined;
-}
-
-function isEventStream(headers: Headers): boolean {
-  const contentType = headers.get("content-type");
-  if (contentType === null) {
-    return false;
-  }
-  return contentType.split(";", 1)[0]?.trim().toLowerCase() === "text/event-stream";
 }
 
 async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>): Promise<ChatStreamFrame> {

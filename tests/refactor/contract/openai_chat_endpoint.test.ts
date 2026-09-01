@@ -73,6 +73,7 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   readonly nowMs?: () => number;
   readonly runtime?: RuntimeConfigSnapshot;
   readonly capiError?: CapiFetchError;
+  readonly capiFetch?: (signal: AbortSignal) => Promise<CapiModelsResponse>;
   readonly throwingPreferences?: boolean;
 } = {}): Promise<{ readonly gw: Gateway; readonly close: () => Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-openai-chat-"));
@@ -103,9 +104,12 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
     ],
   };
   const catalog = new CopilotModelCatalog({
-    async fetch() {
+    async fetch(_accountId, signal) {
       if (options.capiError !== undefined) {
         throw options.capiError;
+      }
+      if (options.capiFetch !== undefined) {
+        return await options.capiFetch(signal);
       }
       return capi;
     },
@@ -449,6 +453,33 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     }
   });
 
+  it("maps total timeout before commit to the OpenAI upstream timeout presenter", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.totalMs = 1;
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend, {
+      runtime,
+      requestId: "req_total_timeout",
+      capiFetch: async (signal) => {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+        return { data: [] };
+      },
+    });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
   it("closes a committed stream on idle timeout without synthesizing Done", async () => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.streamIdleMs = 1;
@@ -476,11 +507,11 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     const backend = new CapturingCopilotBackend({
       chatStream: {
         status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
+        headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: {
           async *[Symbol.asyncIterator]() {
             try {
-              yield encoder.encode("{}");
+              yield encoder.encode("data: []\n\n");
             } finally {
               canceled = true;
             }
@@ -495,6 +526,9 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     try {
       const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
       expect(response.status).toBe(502);
+      for (let index = 0; index < 20 && !canceled; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
       expect(canceled).toBe(true);
     } finally {
       await close();

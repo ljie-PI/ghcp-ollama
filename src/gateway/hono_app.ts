@@ -3,7 +3,7 @@ import { VERSION } from "../version.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { AdmissionController } from "./admission.js";
 import { readWireJsonObjectBody } from "./body_reader.js";
-import { failureFromUnknown, type GatewayFailure } from "./failures.js";
+import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "./failures.js";
 import { createRequestScope, type RequestScope } from "./request_scope.js";
 import { abortWithTimeout, armTimeout, type TimeoutScheduler } from "./timeouts.js";
 import type { WireJsonObject } from "../serialization/wire_json.js";
@@ -115,11 +115,19 @@ async function handleRoute(
     }
 
     if (controller.signal.aborted) {
+      const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
+      if (timeoutFailure !== undefined && !request.signal.aborted) {
+        return route.presentFailure(timeoutFailure, requestId);
+      }
       return new Response(null);
     }
 
     const response = await route.endpoint(decoded, scope);
     if (controller.signal.aborted) {
+      const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
+      if (timeoutFailure !== undefined && !request.signal.aborted) {
+        return route.presentFailure(timeoutFailure, requestId);
+      }
       return new Response(null);
     }
     holdUntilBody = true;
@@ -127,6 +135,10 @@ async function handleRoute(
   } catch (error: unknown) {
     const failure = failureFromUnknown(error);
     if (failure.kind === "aborted" || request.signal.aborted) {
+      const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
+      if (timeoutFailure !== undefined && !request.signal.aborted) {
+        return route.presentFailure(timeoutFailure, requestId);
+      }
       return new Response(null);
     }
     holdUntilBody = true;
@@ -136,6 +148,14 @@ async function handleRoute(
       cleanup();
     }
   }
+}
+
+function upstreamTimeoutFromSignal(signal: AbortSignal): GatewayFailure | undefined {
+  const reason = signal.reason;
+  if (reason instanceof GatewayFailureError && reason.failure.kind === "upstream_timeout") {
+    return reason.failure;
+  }
+  return undefined;
 }
 
 function attachLifecycle(
