@@ -156,6 +156,44 @@ describe("RM-06 account directory", () => {
     }
   });
 
+  it("retries removing cleanup with the original revision after credential removal fails", async () => {
+    class FlakyRemoveCredentialStore extends MemoryCredentialStore {
+      private failures = 1;
+
+      override async removeAccount(accountId: string): Promise<void> {
+        if (this.failures > 0) {
+          this.failures -= 1;
+          throw new Error("credential removal failed");
+        }
+        await super.removeAccount(accountId);
+      }
+    }
+
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-acc-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const credentials = new FlakyRemoveCredentialStore();
+    const accounts = new AccountDirectory(database, credentials, nowMs);
+    try {
+      const bound = await accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "secret" },
+      });
+      await expect(accounts.remove(bound.accountId, 1)).rejects.toThrow(/credential removal failed/u);
+      expect(accounts.list()[0]?.state).toBe("removing");
+
+      const removed = await accounts.remove(bound.accountId, 1);
+      expect(removed.state).toBe("removed");
+      expect(await credentials.readGeneration(bound.accountId, 1)).toBeNull();
+    } finally {
+      closeDatabase(database);
+    }
+  });
+
   it("reconciles removing rows on startup", async () => {
     const { directory: accounts, database, close } = await directory();
     try {
