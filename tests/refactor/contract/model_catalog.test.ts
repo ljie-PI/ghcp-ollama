@@ -1,5 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../../src/accounts/account_directory.js";
@@ -152,6 +154,33 @@ describe("RM-08 CAPI parse and cache", () => {
     abortController.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(abortCanceled).toBe(true);
+  });
+
+  it("uses the default Undici request path without automatic decompression", async () => {
+    const server = createServer((request, response) => {
+      if (request.url === "/models") {
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "content-encoding": "gzip",
+        });
+        response.end(gzipSync("{\"data\":[]}"));
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    try {
+      const source = new HttpCopilotModelsSource(
+        async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      );
+      await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 

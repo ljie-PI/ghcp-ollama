@@ -1,3 +1,5 @@
+import type { IncomingHttpHeaders } from "node:http";
+import { Agent, errors as undiciErrors, request as undiciRequest } from "undici";
 import { copilotHeaders } from "./identity.js";
 import { capiModelsUrl, type CapiModelsResponse, type CopilotModelsSource } from "./model_catalog.js";
 import { MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
@@ -67,9 +69,60 @@ async function getWithRedirects(
   let current = url;
   let headers = new Headers({ ...copilotHeaders(), authorization: `Bearer ${token}`, "content-type": "application/json" });
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
-    const response = await fetchWithTimeout(fetchImpl, current, headers, signal, deadlineMs, limits);
+    const response = fetchImpl === fetch
+      ? await undiciWithTimeout(current, headers, signal, deadlineMs, limits)
+      : await fetchWithTimeout(fetchImpl, current, headers, signal, deadlineMs, limits);
     if (response.status < 300 || response.status >= 400) {
       return response;
+    }
+
+    async function undiciWithTimeout(
+      url: string,
+      headers: Headers,
+      signal: AbortSignal,
+      deadlineMs: number,
+      limits: CapiTransportLimits,
+    ): Promise<Response> {
+      const dispatcher = new Agent({
+        connectTimeout: limits.connectTimeoutMs,
+        headersTimeout: remainingMs(deadlineMs),
+        bodyTimeout: 0,
+      });
+      try {
+        const response = await undiciRequest(url, {
+          method: "GET",
+          headers: headersToRecord(headers),
+          signal,
+          dispatcher,
+        });
+        const body = response.body;
+        const iterator = body[Symbol.asyncIterator]();
+        const stream = new ReadableStream<Uint8Array>({
+          async pull(controller): Promise<void> {
+            const next = await iterator.next();
+            if (next.done === true) {
+              controller.close();
+              await dispatcher.close().catch(() => undefined);
+              return;
+            }
+            controller.enqueue(next.value instanceof Uint8Array ? next.value : Buffer.from(next.value));
+          },
+          async cancel(): Promise<void> {
+            body.destroy();
+            await dispatcher.close().catch(() => undefined);
+          },
+        });
+        return new Response(stream, {
+          status: response.statusCode,
+          headers: incomingHeadersToHeaders(response.headers),
+        });
+      } catch (error: unknown) {
+        await dispatcher.close().catch(() => undefined);
+        if (isUndiciTimeout(error)) {
+          throw new CapiFetchError(502);
+        }
+        throw error;
+      }
     }
     const location = response.headers.get("location");
     if (location === null) {
@@ -219,4 +272,35 @@ function validRetryAfter(headers: Headers): string | undefined {
     return value;
   }
   return undefined;
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const record: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    record[key] = value;
+  });
+  return record;
+}
+
+function incomingHeadersToHeaders(headers: IncomingHttpHeaders): Headers {
+  const result = new Headers();
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        result.append(key, item);
+      }
+      continue;
+    }
+    result.set(key, value);
+  }
+  return result;
+}
+
+function isUndiciTimeout(error: unknown): boolean {
+  return error instanceof undiciErrors.ConnectTimeoutError
+    || error instanceof undiciErrors.HeadersTimeoutError
+    || error instanceof undiciErrors.BodyTimeoutError;
 }
