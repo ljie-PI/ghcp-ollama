@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { withCredentialGenerationLock } from "./credential_generation_lock.js";
 import { AccountModelPreferences } from "./model_preferences.js";
 import type { CredentialStore, SecretCredential } from "./credential_store.js";
 import {
@@ -97,7 +98,7 @@ export class AccountDirectory {
     const environment = resolveGitHubEnvironment(input.host);
     const userId = canonicalUserId(input.userId);
     const accountId = formatAccountId(environment.host, userId);
-    return await withAccountLifecycleLock(async () => {
+    return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, async () => {
       const existing = this.readAccount(accountId);
       const activating = existing === undefined || existing.credential_state !== "active";
       if (activating && this.activeCount() >= this.maxAuthenticated) {
@@ -156,11 +157,11 @@ export class AccountDirectory {
 
       await this.credentials.prune(this.activeCredentialReferences());
       return this.bind(accountId);
-    });
+    }));
   }
 
   async remove(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
-    return await withAccountLifecycleLock(() => this.removeUnlocked(accountId, expectedRevision));
+    return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, () => this.removeUnlocked(accountId, expectedRevision)));
   }
 
   private async removeUnlocked(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
@@ -204,7 +205,7 @@ export class AccountDirectory {
         "SELECT account_id, revision FROM accounts WHERE credential_state = 'removing'",
       ).all() as Array<{ account_id: string; revision: number }>;
       for (const row of removing) {
-        await this.removeUnlocked(row.account_id, row.revision);
+        await withCredentialGenerationLock(row.account_id, () => this.removeUnlocked(row.account_id, row.revision));
       }
       await this.credentials.prune(this.activeCredentialReferences());
     });

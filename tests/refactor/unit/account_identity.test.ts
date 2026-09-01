@@ -15,6 +15,7 @@ import { closeDatabase, openDatabase } from "../../../src/persistence/database.j
 import { embedMigration } from "../../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
+import { getValidToken } from "../../../src/copilot/token_refresh.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 
@@ -386,6 +387,48 @@ describe("RM-06 account directory", () => {
       });
     } finally {
       closeDatabase(database);
+    }
+  });
+
+  it("serializes relogin with token refresh so old generations cannot be resurrected", async () => {
+    const { directory: accounts, credentials, close } = await directory();
+    let releaseRefresh: () => void = () => undefined;
+    let refreshStarted = false;
+    try {
+      const bound = await accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "old" },
+      });
+      const refresh = getValidToken(credentials, bound, nowMs(), async () => {
+        refreshStarted = true;
+        await new Promise<void>((resolve) => {
+          releaseRefresh = resolve;
+        });
+        return { token: "copilot-old", expiresAtMs: nowMs() + 120_000 };
+      });
+      for (let index = 0; index < 20 && !refreshStarted; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(refreshStarted).toBe(true);
+
+      const relogin = accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "new" },
+      });
+      releaseRefresh();
+      await refresh;
+      const rebound = await relogin;
+
+      expect(rebound.credentialGeneration).toBe(2);
+      expect(await credentials.readGeneration(bound.accountId, 1)).toBeNull();
+      expect(await credentials.readGeneration(bound.accountId, 2)).toEqual({
+        generation: 2,
+        githubToken: "new",
+      });
+    } finally {
+      close();
     }
   });
 
