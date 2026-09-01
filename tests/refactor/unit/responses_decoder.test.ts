@@ -39,8 +39,8 @@ function expectDecodeError(json: string): ResponsesRequestDecodeError {
 }
 
 describe("RM-12 Responses request decoder", () => {
-  it("requires a non-empty string model and rejects duplicate control fields", () => {
-    expect(expectDecodeError("{}").field).toBe("model");
+  it("allows missing model but rejects invalid model and duplicate control fields", () => {
+    expect(decodeResponsesRequest(objectFromJson("{}")).model).toBeUndefined();
     expect(expectDecodeError("{\"model\":null}").field).toBe("model");
     expect(expectDecodeError("{\"model\":4}").field).toBe("model");
     expect(expectDecodeError("{\"model\":\"\",\"input\":\"hi\"}").field).toBe("model");
@@ -77,6 +77,7 @@ describe("RM-12 Responses request decoder", () => {
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"resp_1\"}"))
       .previousResponseId).toBe("resp_1");
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":\"true\"}").field).toBe("stream");
+    expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":null}").field).toBe("stream");
     expect(expectDecodeError("{\"model\":\"gpt\",\"store\":\"false\"}").field).toBe("store");
     expect(expectDecodeError("{\"model\":\"gpt\",\"previous_response_id\":8}").field)
       .toBe("previous_response_id");

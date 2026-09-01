@@ -2,7 +2,7 @@ import type { WireJson, WireJsonObject } from "../../serialization/wire_json.js"
 
 export interface ResponsesRequest {
   readonly body: WireJsonObject;
-  readonly model: string;
+  readonly model?: string;
   readonly stream: boolean;
   readonly store: boolean;
   readonly input?: WireJson;
@@ -54,7 +54,7 @@ export function withResponsesRequestInput(
 
   return {
     body: { kind: "object", members },
-    model: request.model,
+    ...(request.model === undefined ? {} : { model: request.model }),
     stream: request.stream,
     store: request.store,
     input,

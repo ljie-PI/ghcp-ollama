@@ -162,6 +162,28 @@ describe("RM-12 Responses history enrichment", () => {
     }
   });
 
+  it("recovers Unicode call payloads using UTF-8 byte limits", async () => {
+    const { database, store } = history();
+    try {
+      await store.record(callRecord("resp_unicode", [
+        "[{\"type\":\"custom_tool_call\",\"call_id\":\"unicode\",\"name\":\"render\",\"input\":\"汉\"}]",
+      ].join("")), new AbortController().signal);
+      const request = decodeResponsesRequest(objectFromJson([
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"custom_tool_call_output\",",
+        "\"call_id\":\"unicode\",\"output\":\"ok\"}}",
+      ].join("")));
+      const enriched = await store.enrich(request, new AbortController().signal);
+      const items = isWireJsonArray(enriched.input) ? enriched.input.items : [];
+      const restored = items[0];
+      expect(isWireJsonObject(restored)).toBe(true);
+      if (isWireJsonObject(restored)) {
+        expect(memberValues(restored, "input")[0]).toBe("汉");
+      }
+    } finally {
+      database.close();
+    }
+  });
+
   it("stores only recordable call kinds and minimal fields used for enrichment", async () => {
     const { database, store } = history();
     try {

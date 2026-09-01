@@ -397,8 +397,9 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
        ORDER BY ordinal ASC`,
     ).all(responseId) as CallRow[];
     return rows.map((row) => {
-      const item = parseWireJson(new TextEncoder().encode(row.item_json), {
-        maxBytes: Math.max(row.item_json.length, 1),
+      const itemBytes = new TextEncoder().encode(row.item_json);
+      const item = parseWireJson(itemBytes, {
+        maxBytes: Math.max(itemBytes.byteLength, 1),
         maxDepth: 32,
       });
       if (!isWireJsonObject(item)) {

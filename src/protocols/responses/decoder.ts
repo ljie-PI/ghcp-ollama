@@ -21,15 +21,15 @@ export class ResponsesRequestDecodeError extends Error {
 export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
   assertNoDuplicateControlFields(body);
 
-  const model = requiredString(body, "model");
-  const stream = optionalBoolean(body, "stream", false);
-  const store = optionalBoolean(body, "store", true);
+  const model = optionalModel(body);
+  const stream = optionalBoolean(body, "stream", false, false);
+  const store = optionalBoolean(body, "store", true, true);
   const input = memberValues(body, "input")[0];
   const previous = optionalString(body, "previous_response_id");
 
   return {
     body,
-    model,
+    ...(model === undefined ? {} : { model }),
     stream,
     store,
     ...(input === undefined ? {} : { input }),
@@ -50,10 +50,13 @@ function assertNoDuplicateControlFields(body: WireJsonObject): void {
   }
 }
 
-function requiredString(body: WireJsonObject, field: string): string {
-  const value = memberValues(body, field)[0];
+function optionalModel(body: WireJsonObject): string | undefined {
+  const value = memberValues(body, "model")[0];
+  if (value === undefined) {
+    return undefined;
+  }
   if (typeof value !== "string" || value.length === 0) {
-    throw new ResponsesRequestDecodeError(field, `Responses request field ${field} must be a non-empty string`);
+    throw new ResponsesRequestDecodeError("model", "Responses request field model must be a non-empty string when present");
   }
   return value;
 }
@@ -70,9 +73,9 @@ function optionalString(body: WireJsonObject, field: string): string | undefined
   return trimmed.length === 0 ? undefined : trimmed;
 }
 
-function optionalBoolean(body: WireJsonObject, field: string, defaultValue: boolean): boolean {
+function optionalBoolean(body: WireJsonObject, field: string, defaultValue: boolean, allowNull: boolean): boolean {
   const value = memberValues(body, field)[0];
-  if (value === undefined || value === null) {
+  if (value === undefined || (allowNull && value === null)) {
     return defaultValue;
   }
   if (value !== true && value !== false) {
