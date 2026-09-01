@@ -4,6 +4,7 @@ import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
+import { UpstreamBodyLimitError } from "../../copilot/transport.js";
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import {
@@ -76,6 +77,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
           body: prepared.bytes,
           stream: false,
           hasVisionInput: prepared.hasVisionInput,
+          nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
           signal: scope.signal,
         });
         assertUpstreamSuccess(upstream.status, upstream.headers);
@@ -235,10 +237,11 @@ async function loadCatalog(catalog: CopilotModelCatalog, accountId: string, sign
     return await catalog.get(accountId, signal);
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {
+      const retry = validRetryAfterValue(error.retryAfter);
       throw new GatewayFailureError({
         kind: "upstream_http",
         status: error.status,
-        ...(error.retryAfter === undefined ? {} : { retryAfter: error.retryAfter }),
+        ...(retry === undefined ? {} : { retryAfter: retry }),
       });
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
@@ -273,6 +276,9 @@ function upstreamCallFailure(error: unknown): GatewayFailureError {
   }
   if (error instanceof Error && error.name === "AbortError") {
     return new GatewayFailureError({ kind: "aborted" });
+  }
+  if (error instanceof UpstreamBodyLimitError) {
+    return new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
   return new GatewayFailureError({ kind: "upstream_network", cause: error });
 }
@@ -359,8 +365,11 @@ function assertUpstreamSuccess(status: number, headers: Headers): void {
 }
 
 function retryAfter(headers: Headers): string | undefined {
-  const value = headers.get("retry-after");
-  if (value === null || value.length === 0) {
+  return validRetryAfterValue(headers.get("retry-after") ?? undefined);
+}
+
+function validRetryAfterValue(value: string | undefined): string | undefined {
+  if (value === undefined || value.length === 0) {
     return undefined;
   }
   if (/^\d+$/u.test(value)) {
@@ -482,20 +491,28 @@ function usageObservationFromPayload(value: WireJson): ChatUsageObservation {
     return {};
   }
   const usage = memberValues(value, "usage")[0];
+  if (memberValues(value, "usage").length !== 1) {
+    return {};
+  }
   if (!isWireJsonObject(usage)) {
     return {};
   }
-  const promptTokens = nonnegativeInteger(memberValues(usage, "prompt_tokens")[0]);
-  const completionTokens = nonnegativeInteger(memberValues(usage, "completion_tokens")[0]);
-  const details = memberValues(usage, "prompt_tokens_details")[0];
-  const cachedTokens = isWireJsonObject(details)
-    ? nonnegativeInteger(memberValues(details, "cached_tokens")[0])
+  const promptTokens = nonnegativeInteger(singleMemberValue(usage, "prompt_tokens"));
+  const completionTokens = nonnegativeInteger(singleMemberValue(usage, "completion_tokens"));
+  const details = singleMemberValue(usage, "prompt_tokens_details");
+  const cachedTokens = isWireJsonObject(details) && memberValues(details, "cached_tokens").length === 1
+    ? nonnegativeInteger(singleMemberValue(details, "cached_tokens"))
     : undefined;
   return {
     ...(promptTokens === undefined ? {} : { promptTokens }),
     ...(completionTokens === undefined ? {} : { completionTokens }),
     ...(cachedTokens === undefined ? {} : { cachedTokens }),
   };
+}
+
+function singleMemberValue(object: WireJsonObject, key: string): WireJson | undefined {
+  const values = memberValues(object, key);
+  return values.length === 1 ? values[0] : undefined;
 }
 
 function nonnegativeInteger(value: WireJson | undefined): number | undefined {

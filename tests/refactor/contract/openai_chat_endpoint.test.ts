@@ -5,8 +5,9 @@ import { describe, expect, it } from "vitest";
 import { AccountDirectory, type BoundAccount } from "../../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
 import type { BoundCopilot, CopilotBackend, CopilotTarget } from "../../../src/copilot/backend.js";
+import { CapiFetchError } from "../../../src/copilot/models_source.js";
 import { CopilotModelCatalog, type CapiModelsResponse } from "../../../src/copilot/model_catalog.js";
-import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
+import { defaultRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
 import { createGateway, type Gateway } from "../../../src/gateway/create_gateway.js";
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
@@ -27,6 +28,7 @@ class CapturingCopilotBackend implements CopilotBackend {
   constructor(
     private readonly options: {
       readonly chat?: ChatResponse;
+      readonly chatPromise?: Promise<ChatResponse>;
       readonly chatStream?: UpstreamByteStream;
     },
   ) {}
@@ -38,6 +40,9 @@ class CapturingCopilotBackend implements CopilotBackend {
       target,
       completeChat: async (request) => {
         this.chatRequests.push(request);
+        if (this.options.chatPromise !== undefined) {
+          return await this.options.chatPromise;
+        }
         if (this.options.chat === undefined) {
           throw new Error("missing scripted chat response");
         }
@@ -65,6 +70,8 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   readonly requestId?: string;
   readonly usageUpdates?: unknown[];
   readonly nowMs?: () => number;
+  readonly runtime?: RuntimeConfigSnapshot;
+  readonly capiError?: CapiFetchError;
 } = {}): Promise<{ readonly gw: Gateway; readonly close: () => Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-openai-chat-"));
   const database = openDatabase({
@@ -95,6 +102,9 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   };
   const catalog = new CopilotModelCatalog({
     async fetch() {
+      if (options.capiError !== undefined) {
+        throw options.capiError;
+      }
       return capi;
     },
   }, () => new Date("2026-08-30T05:00:00.000Z"));
@@ -118,7 +128,7 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   };
   const gw = await createGateway({
     startup: parseStartupConfig([], {}, { homedir: dir }),
-    runtime: defaultRuntimeConfigSnapshot(),
+    runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
   }, [createOpenAiChatRoute(routeDependencies)], dependencies);
   return {
     gw,
@@ -330,6 +340,21 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     }
   });
 
+  it("drops invalid catalog Retry-After values on 429", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend, { capiError: new CapiFetchError(429, "120, 240") });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBeNull();
+      expect(backend.chatRequests).toHaveLength(0);
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects invalid upstream non-stream bodies before success", async () => {
     const backend = new CapturingCopilotBackend({
       chat: { status: 200, headers: new Headers(), body: encoder.encode("[]") },
@@ -341,6 +366,54 @@ describe("RM-09 OpenAI Chat endpoint", () => {
       expect(await response.text()).toBe(
         "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
       );
+    } finally {
+      await close();
+    }
+  });
+
+  it("suppresses duplicate usage counters from telemetry without mutating wire data", async () => {
+    const usageUpdates: unknown[] = [];
+    const backend = new CapturingCopilotBackend({
+      chat: {
+        status: 200,
+        headers: new Headers(),
+        body: encoder.encode("{\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"prompt_tokens\":2,\"completion_tokens\":3}}"),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { usageUpdates });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(await response.text()).toBe("{\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"prompt_tokens\":2,\"completion_tokens\":3}}");
+      expect(usageUpdates).toMatchObject([{ inputTokens: 0, outputTokens: 3, cacheTokens: 0 }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("uses the OpenAI presenter for queue overload without Retry-After", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    let release!: (response: ChatResponse) => void;
+    const chatPromise = new Promise<ChatResponse>((resolve) => {
+      release = resolve;
+    });
+    const backend = new CapturingCopilotBackend({ chatPromise });
+    const { gw, close } = await openAiGateway(backend, { runtime, requestId: "req_queue" });
+    try {
+      const first = gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      for (let index = 0; index < 50 && backend.chatRequests.length === 0; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(backend.chatRequests).toHaveLength(1);
+      const second = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(second.status).toBe(503);
+      expect(second.headers.get("retry-after")).toBeNull();
+      expect(await second.text()).toBe(
+        "{\"error\":{\"message\":\"server overloaded\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+      release({ status: 200, headers: new Headers(), body: encoder.encode("{}") });
+      expect((await first).status).toBe(200);
     } finally {
       await close();
     }

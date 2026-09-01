@@ -6,6 +6,13 @@ import { getValidToken } from "./token_refresh.js";
 import type { CopilotBackend, CopilotTarget, BoundCopilot } from "./backend.js";
 import type { ChatResponse, UpstreamByteResponse, UpstreamByteStream } from "../protocols/chat_completions/types.js";
 
+export class UpstreamBodyLimitError extends Error {
+  constructor() {
+    super("upstream response body exceeds limit");
+    this.name = "UpstreamBodyLimitError";
+  }
+}
+
 export interface CopilotTransportDeps {
   readonly credentials: CredentialStore;
   readonly nowMs?: () => number;
@@ -26,9 +33,9 @@ export class HttpCopilotBackend implements CopilotBackend {
     return {
       accountId: account.accountId,
       target,
-      completeChat: (request) => this.completeJson(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, chatExtraHeaders(request.hasVisionInput)),
+      completeChat: (request) => this.completeJson(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, request.nonstreamBodyBytes, chatExtraHeaders(request.hasVisionInput)),
       openChatStream: (request) => this.openStream(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, chatExtraHeaders(request.hasVisionInput)),
-      completeResponses: (request) => this.completeJson(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl),
+      completeResponses: (request) => this.completeJson(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl, undefined),
       openResponsesStream: (request) => this.openStream(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl),
     };
   }
@@ -39,10 +46,11 @@ export class HttpCopilotBackend implements CopilotBackend {
     body: Uint8Array,
     signal: AbortSignal,
     fetchImpl: typeof fetch,
+    maxBodyBytes: number | undefined,
     extraHeaders?: Headers,
   ): Promise<ChatResponse & UpstreamByteResponse> {
     const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, extraHeaders);
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    const bytes = await readResponseBody(response, maxBodyBytes, signal);
     return { status: response.status, headers: response.headers, body: bytes };
   }
 
@@ -105,6 +113,45 @@ function chatExtraHeaders(hasVisionInput: boolean): Headers {
 }
 
 async function* empty(): AsyncIterable<Uint8Array> {}
+
+async function readResponseBody(response: Response, maxBodyBytes: number | undefined, signal: AbortSignal): Promise<Uint8Array> {
+  if (maxBodyBytes === undefined || response.body === null) {
+    return new Uint8Array(await response.arrayBuffer());
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      if (signal.aborted) {
+        await reader.cancel().catch(() => undefined);
+        throw new DOMException("aborted", "AbortError");
+      }
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+      if (next.value === undefined) {
+        continue;
+      }
+      total += next.value.byteLength;
+      if (total > maxBodyBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new UpstreamBodyLimitError();
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
 
 async function* iterateBody(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
   const reader = stream.getReader();

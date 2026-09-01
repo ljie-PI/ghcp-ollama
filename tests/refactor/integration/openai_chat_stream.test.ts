@@ -32,12 +32,12 @@ describe("RM-09 OpenAI Chat stream wire", () => {
 
   it("preserves multibyte UTF-8 split across transport chunks", async () => {
     const frames = [];
-    for await (const frame of parseChatSse(streamFromText("data: {\"text\":\"你好\"}\n\ndata: [DONE]\n\n", 1))) {
+    for await (const frame of parseChatSse(streamFromText("data: {\"choices\":[],\"text\":\"你好\"}\n\ndata: [DONE]\n\n", 1))) {
       frames.push(frame);
     }
     expect(frames).toHaveLength(2);
     if (frames[0]?.kind === "chunk" && isWireJsonObject(frames[0].chunk.payload)) {
-      expect(frames[0].chunk.payload.members[0]?.value).toBe("你好");
+      expect(frames[0].chunk.payload.members[1]?.value).toBe("你好");
     }
   });
 
@@ -54,6 +54,15 @@ describe("RM-09 OpenAI Chat stream wire", () => {
   it("classifies root error objects as upstream error frames", async () => {
     const frames = [];
     for await (const frame of parseChatSse(streamFromText("data: {\"error\":{\"message\":\"secret\"}}\n\n", 8))) {
+      frames.push(frame);
+    }
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.kind).toBe("error");
+  });
+
+  it("classifies malformed Chat chunks as upstream error frames", async () => {
+    const frames = [];
+    for await (const frame of parseChatSse(streamFromText("data: {\"id\":\"missing-choices\"}\n\n", 8))) {
       frames.push(frame);
     }
     expect(frames).toHaveLength(1);

@@ -1,4 +1,4 @@
-import { isWireJsonObject, memberValues, parseWireJson } from "../serialization/wire_json.js";
+import { isWireJsonArray, isWireJsonObject, memberValues, parseWireJson } from "../serialization/wire_json.js";
 import type { ChatStreamFrame } from "../protocols/chat_completions/types.js";
 
 const DEFAULT_EVENT_LIMIT = 4 * 1024 * 1024;
@@ -129,11 +129,16 @@ function parseEvent(lines: readonly string[]): ChatStreamFrame | undefined {
     if (!isWireJsonObject(payload)) {
       return { kind: "error", value: data };
     }
-    if (memberValues(payload, "error").length > 0) {
+    if (memberValues(payload, "error").length > 0 || !isValidChatChunk(payload)) {
       return { kind: "error", value: payload };
     }
     return { kind: "chunk", chunk: { payload } };
   } catch (_error) {
     return { kind: "error", value: data };
   }
+}
+
+function isValidChatChunk(payload: Parameters<typeof memberValues>[0]): boolean {
+  const choices = memberValues(payload, "choices");
+  return choices.length === 1 && isWireJsonArray(choices[0]);
 }
