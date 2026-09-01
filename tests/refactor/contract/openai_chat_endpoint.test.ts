@@ -373,6 +373,37 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     }
   });
 
+  it("preserves CAPI timeout and invalid-response failure categories", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const timeoutGateway = await openAiGateway(backend, {
+      capiError: new CapiFetchError(502, undefined, "upstream_timeout"),
+    });
+    try {
+      const response = await timeoutGateway.gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await timeoutGateway.close();
+    }
+
+    const invalidGateway = await openAiGateway(backend, {
+      capiError: new CapiFetchError(502, undefined, "invalid_upstream_response"),
+    });
+    try {
+      const response = await invalidGateway.gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await invalidGateway.close();
+    }
+  });
+
   it("rejects invalid upstream non-stream bodies before success", async () => {
     const backend = new CapturingCopilotBackend({
       chat: { status: 200, headers: new Headers(), body: encoder.encode("[]") },
