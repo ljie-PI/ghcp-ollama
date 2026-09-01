@@ -12,11 +12,12 @@ const UTF8 = "utf-8";
 export async function readWireJsonObjectBody(
   request: Request,
   maxBytes: number,
+  signal: AbortSignal,
 ): Promise<WireJsonObject> {
   assertJsonMediaType(request.headers);
   assertIdentityEncoding(request.headers);
 
-  const bytes = await readLimitedBytes(request, maxBytes);
+  const bytes = await readLimitedBytes(request, maxBytes, signal);
   if (bytes.byteLength === 0) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
@@ -64,7 +65,7 @@ function assertIdentityEncoding(headers: Headers): void {
   }
 }
 
-async function readLimitedBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
+async function readLimitedBytes(request: Request, maxBytes: number, signal: AbortSignal): Promise<Uint8Array> {
   const declared = request.headers.get("content-length");
   if (declared !== null && /^[0-9]+$/u.test(declared)) {
     const length = Number.parseInt(declared, 10);
@@ -75,7 +76,7 @@ async function readLimitedBytes(request: Request, maxBytes: number): Promise<Uin
 
   const body = request.body;
   if (body === null) {
-    const buffered = new Uint8Array(await request.arrayBuffer());
+    const buffered = new Uint8Array(await withAbort(request.arrayBuffer(), signal));
     if (buffered.byteLength > maxBytes) {
       throw new GatewayFailureError({ kind: "body_too_large" });
     }
@@ -87,7 +88,7 @@ async function readLimitedBytes(request: Request, maxBytes: number): Promise<Uin
   let total = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readNext(reader, signal);
       if (done) {
         break;
       }
@@ -96,12 +97,15 @@ async function readLimitedBytes(request: Request, maxBytes: number): Promise<Uin
       }
       total += value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel();
+        void reader.cancel().catch(() => undefined);
         throw new GatewayFailureError({ kind: "body_too_large" });
       }
       chunks.push(value);
     }
   } finally {
+    if (signal.aborted) {
+      void reader.cancel().catch(() => undefined);
+    }
     reader.releaseLock();
   }
 
@@ -110,6 +114,39 @@ async function readLimitedBytes(request: Request, maxBytes: number): Promise<Uin
   for (const chunk of chunks) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
+  }
+
+  function readNext(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    signal: AbortSignal,
+  ): Promise<ReadableStreamReadResult<Uint8Array>> {
+    return withAbort(reader.read(), signal, () => {
+      void reader.cancel().catch(() => undefined);
+    });
+  }
+
+  function withAbort<T>(work: Promise<T>, signal: AbortSignal, onAbort?: () => void): Promise<T> {
+    if (signal.aborted) {
+      onAbort?.();
+      return Promise.reject(new GatewayFailureError({ kind: "aborted" }));
+    }
+    return new Promise<T>((resolve, reject) => {
+      const abort = (): void => {
+        onAbort?.();
+        reject(new GatewayFailureError({ kind: "aborted" }));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      work.then(
+        (value) => {
+          signal.removeEventListener("abort", abort);
+          resolve(value);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      );
+    });
   }
   return bytes;
 }
