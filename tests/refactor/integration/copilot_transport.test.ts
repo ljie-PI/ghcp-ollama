@@ -101,6 +101,9 @@ describe("RM-07 Copilot transport", () => {
       body: new Uint8Array(),
       stream: false,
       hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1_000,
+      firstByteTimeoutMs: 1_000,
       signal: new AbortController().signal,
     });
     expect(backend.captured).toEqual([{ accountId: "github.com/1", kind: "chat" }]);
@@ -131,6 +134,9 @@ describe("RM-07 Copilot transport", () => {
       body: new TextEncoder().encode("{}"),
       stream: false,
       hasVisionInput: true,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1_000,
+      firstByteTimeoutMs: 1_000,
       signal: new AbortController().signal,
     });
     const headers = new Headers(captured?.init?.headers);
@@ -199,6 +205,7 @@ describe("RM-07 Copilot transport", () => {
       stream: false,
       hasVisionInput: false,
       nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1_000,
       firstByteTimeoutMs: 100,
       signal: new AbortController().signal,
     });

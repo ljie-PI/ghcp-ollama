@@ -5,9 +5,9 @@ export interface ChatRequest {
   readonly body: Uint8Array;
   readonly stream: boolean;
   readonly hasVisionInput: boolean;
-  readonly nonstreamBodyBytes?: number;
-  readonly connectTimeoutMs?: number;
-  readonly firstByteTimeoutMs?: number;
+  readonly nonstreamBodyBytes: number;
+  readonly connectTimeoutMs: number;
+  readonly firstByteTimeoutMs: number;
   readonly signal: AbortSignal;
 }
 

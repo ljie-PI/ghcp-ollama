@@ -22,5 +22,45 @@
     "input": "presenter/model-not-found.input.txt",
     "expected": "presenter/model-not-found.expected.json",
     "encoder": "openai-error-presenter"
+  },
+  {
+    "caseId": "openai-chat.buffered.success",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#9-non-stream-success",
+    "input": "buffered/success.input.json",
+    "expected": "buffered/success.expected.json",
+    "encoder": "openai-chat-buffered"
+  },
+  {
+    "caseId": "openai-chat.usage.observation",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#13-usage--telemetry-ownership",
+    "input": "usage/observation.input.json",
+    "expected": "usage/observation.expected.json",
+    "encoder": "openai-chat-usage"
+  },
+  {
+    "caseId": "openai-chat.model.preferred",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#42-missing-model",
+    "input": "model/preferred.input.json",
+    "expected": "model/preferred.expected.json",
+    "encoder": "openai-chat-request"
+  },
+  {
+    "caseId": "openai-chat.stream.truncated",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#103-eof",
+    "input": "stream/truncated.input.txt",
+    "expected": "stream/truncated.expected.json",
+    "encoder": "openai-error-presenter"
+  },
+  {
+    "caseId": "openai-chat.abort.zero-bytes",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#125-client-abort",
+    "input": "abort/zero-bytes.input.txt",
+    "expected": "abort/zero-bytes.expected.txt",
+    "encoder": "openai-chat-abort"
   }
 ]

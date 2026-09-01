@@ -128,7 +128,7 @@ async function main(): Promise<void> {
 async function generateOpenAiChatFixture(entry: FixtureManifestEntry): Promise<void> {
   const expectedPath = path.join(FIXTURE_ROOT, "openai-chat", entry.expected);
   if (entry.caseId === "openai-chat.request.model-rewrite") {
-    await writeFile(expectedPath, "{\"unknown\":1e+2,\"stream\":true,\"model\":\"resolved\",\"stream_options\":{\"include_usage\":true},\"messages\":[]}\n", "utf8");
+    await writeFile(expectedPath, "{\"unknown\":1e+2,\"stream\":true,\"model\":\"resolved\",\"stream_options\":{\"include_usage\":true},\"messages\":[]}", "utf8");
     return;
   }
   if (entry.caseId === "openai-chat.stream.done") {
@@ -136,7 +136,27 @@ async function generateOpenAiChatFixture(entry: FixtureManifestEntry): Promise<v
     return;
   }
   if (entry.caseId === "openai-chat.presenter.model-not-found") {
-    await writeFile(expectedPath, "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}\n", "utf8");
+    await writeFile(expectedPath, "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}", "utf8");
+    return;
+  }
+  if (entry.caseId === "openai-chat.buffered.success") {
+    await writeFile(expectedPath, "{\"id\":\"chatcmpl_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}", "utf8");
+    return;
+  }
+  if (entry.caseId === "openai-chat.usage.observation") {
+    await writeFile(expectedPath, "{\"inputTokens\":1,\"outputTokens\":2,\"cacheTokens\":3}", "utf8");
+    return;
+  }
+  if (entry.caseId === "openai-chat.model.preferred") {
+    await writeFile(expectedPath, "{\"messages\":[],\"model\":\"preferred\"}", "utf8");
+    return;
+  }
+  if (entry.caseId === "openai-chat.stream.truncated") {
+    await writeFile(expectedPath, "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}", "utf8");
+    return;
+  }
+  if (entry.caseId === "openai-chat.abort.zero-bytes") {
+    await writeFile(expectedPath, "", "utf8");
     return;
   }
   assertFixtureGeneratorAvailable(entry.caseId, [entry]);

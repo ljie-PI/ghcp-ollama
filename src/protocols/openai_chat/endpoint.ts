@@ -119,6 +119,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         body: prepared.bytes,
         stream: true,
         hasVisionInput: prepared.hasVisionInput,
+        nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
         connectTimeoutMs: scope.config.timeouts.connectMs,
         firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
         signal: upstreamController.signal,
