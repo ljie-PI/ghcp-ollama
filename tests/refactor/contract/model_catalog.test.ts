@@ -85,11 +85,14 @@ describe("RM-08 CAPI parse and cache", () => {
     await expect(source(async () => new Response(null, { status: 302 })).fetch("github.com/1", new AbortController().signal))
       .rejects.toMatchObject({ status: 502 });
 
-    await expect(source(async () => new Response("{}", {
-      status: 429,
-      headers: { "retry-after": "120, 240" },
-    })).fetch("github.com/1", new AbortController().signal))
-      .rejects.toMatchObject({ status: 429, retryAfter: undefined });
+    for (const headers of [
+      new Headers({ "retry-after": "120, 240" }),
+      duplicateRetryAfterHeaders(),
+      new Headers({ "retry-after": "Foo, 06 Nov 1994 08:49:37 GMT" }),
+    ]) {
+      await expect(source(async () => new Response("{}", { status: 429, headers })).fetch("github.com/1", new AbortController().signal))
+        .rejects.toMatchObject({ status: 429, retryAfter: undefined });
+    }
 
     await expect(source(async () => new Response("{}", {
       status: 429,
@@ -105,6 +108,13 @@ describe("RM-08 CAPI parse and cache", () => {
       return new Response("{\"data\":[]}");
     }).fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
   });
+
+  function duplicateRetryAfterHeaders(): Headers {
+    const headers = new Headers();
+    headers.append("retry-after", "120");
+    headers.append("retry-after", "240");
+    return headers;
+  }
 
   it("cleans up CAPI bodies on invalid redirects, body timeout, and caller abort", async () => {
     let redirectCanceled = false;
