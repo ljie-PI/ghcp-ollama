@@ -88,6 +88,9 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
             body: chatBody,
             stream: false,
             hasVisionInput: false,
+            nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
+            connectTimeoutMs: scope.config.timeouts.connectMs,
+            firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
             signal: scope.signal,
           });
           const content = extractContent(response.body);
@@ -108,6 +111,9 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
           body: chatBody,
           stream: true,
           hasVisionInput: false,
+          nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
+          connectTimeoutMs: scope.config.timeouts.connectMs,
+          firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
           signal: scope.signal,
         });
         void (async () => {

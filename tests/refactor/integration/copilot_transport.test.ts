@@ -5,6 +5,7 @@ import { resolveGitHubEnvironment } from "../../../src/accounts/github_environme
 import { outboundHeaders, ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
 import { discoverEndpoint, fallbackEndpoint, stripSecretsOnRedirect } from "../../../src/copilot/endpoint_discovery.js";
 import { copilotHeaders } from "../../../src/copilot/identity.js";
+import { HttpCopilotBackend } from "../../../src/copilot/transport.js";
 import { getValidToken, needsRefresh } from "../../../src/copilot/token_refresh.js";
 
 function account(kind: "github.com" | "ghes" = "github.com"): BoundAccount {
@@ -100,8 +101,146 @@ describe("RM-07 Copilot transport", () => {
       body: new Uint8Array(),
       stream: false,
       hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1_000,
+      firstByteTimeoutMs: 1_000,
       signal: new AbortController().signal,
     });
     expect(backend.captured).toEqual([{ accountId: "github.com/1", kind: "chat" }]);
+  });
+
+  it("sends JSON and vision headers only from typed Chat request state", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    let captured: { readonly input: RequestInfo | URL; readonly init: RequestInit | undefined } | undefined;
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async (input, init) => {
+        captured = { input, init };
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    await copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: true,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1_000,
+      firstByteTimeoutMs: 1_000,
+      signal: new AbortController().signal,
+    });
+    const headers = new Headers(captured?.init?.headers);
+    expect(captured?.input).toBe("https://api.githubcopilot.com/chat/completions");
+    expect(headers.get("content-type")).toBe("application/json");
+    expect(headers.get("copilot-vision-request")).toBe("true");
+    expect(headers.has("authorization")).toBe(true);
+  });
+
+  it("enforces captured connect timeout on injected fetch transport", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    await expect(copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1,
+      firstByteTimeoutMs: 100,
+      signal: new AbortController().signal,
+    })).rejects.toThrow(/upstream timeout/u);
+  });
+
+  it("cancels non-2xx upstream bodies before returning safe errors", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    let canceled = false;
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
+        cancel(): void {
+          canceled = true;
+        },
+      }), { status: 429 }),
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    const response = await copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1_000,
+      firstByteTimeoutMs: 100,
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(429);
+    expect(canceled).toBe(true);
+  });
+
+  it("times out when non-stream headers arrive but body bytes do not", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
+        pull(): void {
+          // keep headers open without body bytes
+        },
+      }), { status: 200 }),
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    await expect(copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 100,
+      firstByteTimeoutMs: 1,
+      signal: new AbortController().signal,
+    })).rejects.toThrow(/upstream timeout/u);
   });
 });

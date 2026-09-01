@@ -1,13 +1,13 @@
-import { isWireJsonObject, parseWireJson } from "../serialization/wire_json.js";
+import { isWireJsonArray, isWireJsonObject, memberValues, parseWireJson } from "../serialization/wire_json.js";
 import type { ChatStreamFrame } from "../protocols/chat_completions/types.js";
 
 const DEFAULT_EVENT_LIMIT = 4 * 1024 * 1024;
 
 export class ChatSseError extends Error {
-  readonly code: "event_too_large" | "truncated";
+  readonly code: "event_too_large" | "invalid_utf8" | "truncated";
 
-  constructor(code: ChatSseError["code"], message: string) {
-    super(message);
+  constructor(code: ChatSseError["code"], message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "ChatSseError";
     this.code = code;
   }
@@ -17,15 +17,16 @@ export async function* parseChatSse(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes = DEFAULT_EVENT_LIMIT,
 ): AsyncGenerator<ChatStreamFrame> {
-  let line = "";
+  let lineBytes: number[] = [];
   let pendingCr = false;
   let eventLines: string[] = [];
   let eventBytes = 0;
   let terminal = false;
-  let bomSkip = 3;
+  let lineMayStartWithBom = true;
 
   const finishLine = function* (): Generator<ChatStreamFrame> {
-    if (line.length === 0) {
+    if (lineBytes.length === 0) {
+      lineMayStartWithBom = false;
       const frame = parseEvent(eventLines);
       eventLines = [];
       eventBytes = 0;
@@ -37,31 +38,25 @@ export async function* parseChatSse(
       }
       return;
     }
-    eventLines.push(line);
-    line = "";
+    eventLines.push(decodeLine(lineBytes, lineMayStartWithBom));
+    lineMayStartWithBom = false;
+    lineBytes = [];
   };
 
   const pushByte = function* (byte: number): Generator<ChatStreamFrame> {
-    if (bomSkip > 0) {
-      const expected = bomSkip === 3 ? 0xef : bomSkip === 2 ? 0xbb : 0xbf;
-      if (byte === expected) {
-        bomSkip -= 1;
-        return;
-      }
-      bomSkip = 0;
-    }
-    eventBytes += 1;
-    if (eventBytes > eventLimitBytes) {
-      throw new ChatSseError("event_too_large", "SSE event exceeds limit");
-    }
     if (pendingCr) {
       pendingCr = false;
       if (byte === 0x0a) {
+        countEventByte();
         yield* finishLine();
         return;
       }
       yield* finishLine();
+      if (terminal) {
+        return;
+      }
     }
+    countEventByte();
     if (byte === 0x0d) {
       pendingCr = true;
       return;
@@ -70,7 +65,14 @@ export async function* parseChatSse(
       yield* finishLine();
       return;
     }
-    line += String.fromCharCode(byte);
+    lineBytes.push(byte);
+  };
+
+  const countEventByte = (): void => {
+    eventBytes += 1;
+    if (eventBytes > eventLimitBytes) {
+      throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+    }
   };
 
   for await (const part of bytes) {
@@ -84,8 +86,20 @@ export async function* parseChatSse(
   if (pendingCr) {
     yield* finishLine();
   }
-  if (line.length > 0 || eventLines.length > 0 || !terminal) {
+  if (lineBytes.length > 0 || eventLines.length > 0 || !terminal) {
     throw new ChatSseError("truncated", "truncated SSE stream");
+  }
+}
+
+function decodeLine(bytes: readonly number[], stripInitialBom: boolean): string {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Uint8Array.from(bytes));
+    if (stripInitialBom && text.startsWith("\uFEFF")) {
+      return text.slice(1);
+    }
+    return text;
+  } catch (error: unknown) {
+    throw new ChatSseError("invalid_utf8", "invalid UTF-8 in SSE line", { cause: error });
   }
 }
 
@@ -96,34 +110,46 @@ function parseEvent(lines: readonly string[]): ChatStreamFrame | undefined {
     if (raw.length === 0 || raw.startsWith(":")) {
       continue;
     }
-    if (raw.startsWith("event:")) {
-      eventName = raw.slice(6).replace(/^ /u, "");
+    const separator = raw.indexOf(":");
+    const name = separator === -1 ? raw : raw.slice(0, separator);
+    const value = separator === -1 ? "" : raw.slice(separator + 1).replace(/^ /u, "");
+    if (name === "event") {
+      eventName = value;
       continue;
     }
-    if (raw.startsWith("data:")) {
-      dataLines.push(raw.slice(5).replace(/^ /u, ""));
+    if (name === "data") {
+      dataLines.push(value);
     }
   }
   if (dataLines.length === 0) {
     return undefined;
   }
   const data = dataLines.join("\n");
-  if (eventName === "error") {
-    return { kind: "error", value: data };
-  }
   if (data === "[DONE]") {
     return { kind: "done" };
   }
+  if (eventName === "error") {
+    return { kind: "error", value: data };
+  }
   try {
-    const payload = parseWireJson(new TextEncoder().encode(data), {
-      maxBytes: Math.max(data.length, 1),
+    const jsonBytes = new TextEncoder().encode(data);
+    const payload = parseWireJson(jsonBytes, {
+      maxBytes: Math.max(jsonBytes.byteLength, 1),
       maxDepth: 64,
     });
     if (!isWireJsonObject(payload)) {
       return { kind: "error", value: data };
     }
+    if (memberValues(payload, "error").length > 0 || !isValidChatChunk(payload)) {
+      return { kind: "error", value: payload };
+    }
     return { kind: "chunk", chunk: { payload } };
   } catch (_error) {
     return { kind: "error", value: data };
   }
+}
+
+function isValidChatChunk(payload: Parameters<typeof memberValues>[0]): boolean {
+  const choices = memberValues(payload, "choices");
+  return choices.length === 1 && isWireJsonArray(choices[0]);
 }

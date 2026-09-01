@@ -15,19 +15,30 @@ export class TokenRefreshError extends Error {
 
 const locks = new Map<string, Promise<void>>();
 
-export async function withAccountLock(accountId: string, work: () => Promise<void>): Promise<void> {
+export async function withAccountLock(accountId: string, work: () => Promise<void>, signal?: AbortSignal): Promise<void> {
   const previous = locks.get(accountId) ?? Promise.resolve();
   let release: () => void = () => undefined;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  locks.set(accountId, previous.then(() => current));
-  await previous;
+  const queued = previous.then(() => current);
+  locks.set(accountId, queued);
+  try {
+    await waitForPrevious(previous, signal);
+  } catch (error: unknown) {
+    release();
+    void queued.finally(() => {
+      if (locks.get(accountId) === queued) {
+        locks.delete(accountId);
+      }
+    });
+    throw error;
+  }
   try {
     await work();
   } finally {
     release();
-    if (locks.get(accountId) === current) {
+    if (locks.get(accountId) === queued) {
       locks.delete(accountId);
     }
   }
@@ -47,10 +58,13 @@ export async function getValidToken(
   store: CredentialStore,
   account: BoundAccount,
   nowMs: number,
-  refresh: (githubToken: string) => Promise<{ token: string; expiresAtMs: number }>,
+  refresh: (githubToken: string, signal?: AbortSignal) => Promise<{ token: string; expiresAtMs: number }>,
+  signal?: AbortSignal,
 ): Promise<string> {
+  throwIfAborted(signal);
   const generation = account.credentialGeneration;
   let current = await store.readGeneration(account.accountId, generation);
+  throwIfAborted(signal);
   if (current === null) {
     throw new TokenRefreshError("missing", "credential missing");
   }
@@ -58,7 +72,9 @@ export async function getValidToken(
     return current.githubToken;
   }
   await withAccountLock(account.accountId, async () => {
+    throwIfAborted(signal);
     const again = await store.readGeneration(account.accountId, generation);
+    throwIfAborted(signal);
     if (again === null) {
       throw new TokenRefreshError("missing", "credential missing");
     }
@@ -66,16 +82,41 @@ export async function getValidToken(
     if (!needsRefresh(again, nowMs, "github.com")) {
       return;
     }
-    const refreshed = await refresh(again.githubToken);
+    const refreshed = await refresh(again.githubToken, signal);
+    throwIfAborted(signal);
     current = {
       ...again,
       copilotToken: refreshed.token,
       copilotExpiresAtMs: refreshed.expiresAtMs,
     };
     await store.putGeneration(account.accountId, generation, current);
-  });
+    throwIfAborted(signal);
+  }, signal);
   if (current.copilotToken === undefined) {
     throw new TokenRefreshError("missing", "copilot token missing");
   }
   return current.copilotToken;
+}
+
+async function waitForPrevious(previous: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  if (signal === undefined) {
+    await previous;
+    return;
+  }
+  let removeAbortListener = (): void => undefined;
+  await Promise.race([
+    previous,
+    new Promise<void>((_resolve, reject) => {
+      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }),
+  ]).finally(removeAbortListener);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
+  }
 }

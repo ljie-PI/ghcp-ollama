@@ -5,6 +5,9 @@ export interface ChatRequest {
   readonly body: Uint8Array;
   readonly stream: boolean;
   readonly hasVisionInput: boolean;
+  readonly nonstreamBodyBytes: number;
+  readonly connectTimeoutMs: number;
+  readonly firstByteTimeoutMs: number;
   readonly signal: AbortSignal;
 }
 
@@ -40,4 +43,5 @@ export interface UpstreamByteStream {
   readonly status: number;
   readonly headers: Headers;
   readonly bytes: AsyncIterable<Uint8Array>;
+  cancel(): Promise<void>;
 }
