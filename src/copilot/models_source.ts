@@ -4,7 +4,7 @@ import { copilotHeaders } from "./identity.js";
 import { capiModelsUrl, type CapiModelsResponse, type CopilotModelsSource } from "./model_catalog.js";
 import { MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
 
-export type CapiFailureKind = "upstream_http" | "upstream_timeout" | "invalid_upstream_response";
+export type CapiFailureKind = "upstream_http" | "upstream_timeout" | "upstream_network" | "invalid_upstream_response";
 
 interface CapiTransportLimits {
   readonly connectTimeoutMs: number;
@@ -132,7 +132,10 @@ async function fetchWithTimeout(
     if (timeout.timedOut()) {
       throw new CapiFetchError(502, undefined, "upstream_timeout");
     }
-    throw error;
+    if (isAbortError(error)) {
+      throw error;
+    }
+    throw new CapiFetchError(502, undefined, "upstream_network");
   } finally {
     timeout.clear();
   }
@@ -173,7 +176,10 @@ async function undiciWithTimeout(
     if (timeout.timedOut() || isUndiciTimeout(error)) {
       throw new CapiFetchError(502, undefined, "upstream_timeout");
     }
-    throw error;
+    if (isAbortError(error)) {
+      throw error;
+    }
+    throw new CapiFetchError(502, undefined, "upstream_network");
   } finally {
     timeout.clear();
   }

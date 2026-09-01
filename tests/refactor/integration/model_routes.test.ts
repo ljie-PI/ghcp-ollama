@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
+import { CapiFetchError } from "../../../src/copilot/models_source.js";
 import { CopilotModelCatalog } from "../../../src/copilot/model_catalog.js";
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
@@ -61,6 +62,49 @@ describe("RM-08 model routes errors and preferences", () => {
       await empty.get("github.com/1", new AbortController().signal);
       accounts.preferences.markInvalidIfMissing("github.com/1", new Set(), 2);
       expect(accounts.preferences.get("github.com/1")?.validity).toBe("invalid");
+    } finally {
+      await gw.close();
+      closeDatabase(database);
+    }
+  });
+
+  it("exposes Retry-After only for valid final CAPI 429 values", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-cat-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    let retryAfter: string | undefined = "120";
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        throw new CapiFetchError(429, retryAfter);
+      },
+    });
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: dir }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      catalog,
+      preferences: accounts.preferences,
+    }));
+    try {
+      const valid = await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      expect(valid.status).toBe(429);
+      expect(valid.headers.get("retry-after")).toBe("120");
+
+      retryAfter = undefined;
+      catalog.invalidate("github.com/1");
+      const invalid = await gw.fetch(new Request("http://127.0.0.1:31400/api/tags"));
+      expect(invalid.status).toBe(429);
+      expect(invalid.headers.get("retry-after")).toBeNull();
     } finally {
       await gw.close();
       closeDatabase(database);
