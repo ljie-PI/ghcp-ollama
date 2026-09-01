@@ -196,6 +196,40 @@ describe("RM-06 account directory", () => {
     }
   });
 
+  it("does not reactivate an account while removal cleanup is pending", async () => {
+    class FlakyRemoveCredentialStore extends MemoryCredentialStore {
+      override async removeAccount(): Promise<void> {
+        throw new Error("credential removal failed");
+      }
+    }
+
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-acc-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const credentials = new FlakyRemoveCredentialStore();
+    const accounts = new AccountDirectory(database, credentials, nowMs);
+    try {
+      const bound = await accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "secret" },
+      });
+      await expect(accounts.remove(bound.accountId, 1)).rejects.toThrow(/credential removal failed/u);
+      await expect(accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "new" },
+      })).rejects.toBeInstanceOf(AccountDirectoryError);
+      expect(accounts.list()[0]?.state).toBe("removing");
+      expect(await credentials.readGeneration(bound.accountId, 2)).toBeNull();
+    } finally {
+      closeDatabase(database);
+    }
+  });
+
   it("reconciles removing rows on startup", async () => {
     const { directory: accounts, database, close } = await directory();
     try {

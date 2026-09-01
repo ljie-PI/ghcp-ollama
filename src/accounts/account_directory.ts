@@ -100,6 +100,9 @@ export class AccountDirectory {
     const accountId = formatAccountId(environment.host, userId);
     return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, async () => {
       const existing = this.readAccount(accountId);
+      if (existing?.credential_state === "removing") {
+        throw new AccountDirectoryError("revision_conflict", "account removal is in progress");
+      }
       const activating = existing === undefined || existing.credential_state !== "active";
       if (activating && this.activeCount() >= this.maxAuthenticated) {
         throw new AccountDirectoryError("capacity", "authenticated account capacity reached");
