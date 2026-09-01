@@ -15,19 +15,28 @@ export class TokenRefreshError extends Error {
 
 const locks = new Map<string, Promise<void>>();
 
-export async function withAccountLock(accountId: string, work: () => Promise<void>): Promise<void> {
+export async function withAccountLock(accountId: string, work: () => Promise<void>, signal?: AbortSignal): Promise<void> {
   const previous = locks.get(accountId) ?? Promise.resolve();
   let release: () => void = () => undefined;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
-  locks.set(accountId, previous.then(() => current));
-  await previous;
+  const queued = previous.then(() => current);
+  locks.set(accountId, queued);
+  try {
+    await waitForPrevious(previous, signal);
+  } catch (error: unknown) {
+    release();
+    if (locks.get(accountId) === queued) {
+      locks.delete(accountId);
+    }
+    throw error;
+  }
   try {
     await work();
   } finally {
     release();
-    if (locks.get(accountId) === current) {
+    if (locks.get(accountId) === queued) {
       locks.delete(accountId);
     }
   }
@@ -80,11 +89,28 @@ export async function getValidToken(
     };
     await store.putGeneration(account.accountId, generation, current);
     throwIfAborted(signal);
-  });
+  }, signal);
   if (current.copilotToken === undefined) {
     throw new TokenRefreshError("missing", "copilot token missing");
   }
   return current.copilotToken;
+}
+
+async function waitForPrevious(previous: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  if (signal === undefined) {
+    await previous;
+    return;
+  }
+  let removeAbortListener = (): void => undefined;
+  await Promise.race([
+    previous,
+    new Promise<void>((_resolve, reject) => {
+      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }),
+  ]).finally(removeAbortListener);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

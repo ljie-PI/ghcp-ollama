@@ -102,12 +102,15 @@ function parseEvent(lines: readonly string[]): ChatStreamFrame | undefined {
     if (raw.length === 0 || raw.startsWith(":")) {
       continue;
     }
-    if (raw.startsWith("event:")) {
-      eventName = raw.slice(6).replace(/^ /u, "");
+    const separator = raw.indexOf(":");
+    const name = separator === -1 ? raw : raw.slice(0, separator);
+    const value = separator === -1 ? "" : raw.slice(separator + 1).replace(/^ /u, "");
+    if (name === "event") {
+      eventName = value;
       continue;
     }
-    if (raw.startsWith("data:")) {
-      dataLines.push(raw.slice(5).replace(/^ /u, ""));
+    if (name === "data") {
+      dataLines.push(value);
     }
   }
   if (dataLines.length === 0) {

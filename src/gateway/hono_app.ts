@@ -87,7 +87,7 @@ async function handleRoute(
   const onAbort = (): void => controller.abort();
   request.signal.addEventListener("abort", onAbort, { once: true });
 
-  const scope = createRequestScope(requestId, controller.signal, snapshot, dependencies.scheduler);
+  const scope = createRequestScope(requestId, controller.signal, snapshot);
   let release: (() => void) | undefined;
   let disarmTotal: (() => void) | undefined;
   let holdUntilBody = false;

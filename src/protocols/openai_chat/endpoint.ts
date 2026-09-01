@@ -9,7 +9,6 @@ import { mapTokenRefreshError, UpstreamBodyLimitError, UpstreamTimeoutError } fr
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
-import { armTimeout } from "../../gateway/timeouts.js";
 import {
   duplicateMemberNames,
   isWireJsonArray,
@@ -273,6 +272,9 @@ async function loadCatalog(catalog: CopilotModelCatalog, accountId: string, sign
     if (error instanceof Error && error.name === "AbortError") {
       throw new GatewayFailureError({ kind: "aborted" });
     }
+    if (error instanceof TypeError) {
+      throw new GatewayFailureError({ kind: "upstream_network", cause: error });
+    }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
 }
@@ -320,15 +322,21 @@ async function withOperationTimeout<T>(
   const timeout = new Promise<T>((_resolve, reject) => {
     rejectTimeout = reject;
   });
-  const disarm = armTimeout(ms, scope.signal, scope.scheduler, () => {
+  const timer = setTimeout(() => {
     const error = new GatewayFailureError({ kind: "upstream_timeout" });
     timeoutController.abort(error);
     rejectTimeout(error);
-  });
+  }, ms);
+  const onAbort = (): void => {
+    timeoutController.abort();
+    rejectTimeout(new GatewayFailureError({ kind: "aborted" }));
+  };
+  scope.signal.addEventListener("abort", onAbort, { once: true });
   try {
     return await Promise.race([work(operationSignal), timeout]);
   } finally {
-    disarm();
+    clearTimeout(timer);
+    scope.signal.removeEventListener("abort", onAbort);
     if (!timeoutController.signal.aborted) {
       timeoutController.abort();
     }

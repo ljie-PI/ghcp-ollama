@@ -51,4 +51,12 @@ describe("RM-07 Chat SSE", () => {
     }
     expect(frames.map((frame) => frame.kind)).toEqual(["done"]);
   });
+
+  it("treats a data field without a colon as empty data", async () => {
+    const frames = [];
+    for await (const frame of parseChatSse(splitBytes("data\n\ndata: [DONE]\n\n", 1))) {
+      frames.push(frame);
+    }
+    expect(frames.map((frame) => frame.kind)).toEqual(["error"]);
+  });
 });

@@ -27,8 +27,17 @@ export async function discoverEndpoint(
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  locks.set(account.accountId, previous.then(() => gate));
-  await previous;
+  const queued = previous.then(() => gate);
+  locks.set(account.accountId, queued);
+  try {
+    await waitForPrevious(previous, signal);
+  } catch (error: unknown) {
+    release();
+    if (locks.get(account.accountId) === queued) {
+      locks.delete(account.accountId);
+    }
+    throw error;
+  }
   throwIfAborted(signal);
   try {
     const again = cache.get(account.accountId);
@@ -42,7 +51,7 @@ export async function discoverEndpoint(
     return { endpoint, cached: false };
   } finally {
     release();
-    if (locks.get(account.accountId) === gate) {
+    if (locks.get(account.accountId) === queued) {
       locks.delete(account.accountId);
     }
   }
@@ -85,4 +94,21 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) {
     throw new DOMException("aborted", "AbortError");
   }
+}
+
+async function waitForPrevious(previous: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  if (signal === undefined) {
+    await previous;
+    return;
+  }
+  let removeAbortListener = (): void => undefined;
+  await Promise.race([
+    previous,
+    new Promise<void>((_resolve, reject) => {
+      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }),
+  ]).finally(removeAbortListener);
 }
