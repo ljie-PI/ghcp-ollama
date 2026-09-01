@@ -48,7 +48,7 @@ describe("RM-12 Responses request decoder", () => {
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":false,\"stream\":true}").field).toBe("stream");
   });
 
-  it("applies null/missing defaults only to control fields without coercion", () => {
+  it("applies stream default without coercing preserved fields", () => {
     const decoded = decodeResponsesRequest(objectFromJson([
       "{\"metadata\":{\"temperature\":0.7},",
       "\"model\":\"gpt-4.1\",",
@@ -59,7 +59,7 @@ describe("RM-12 Responses request decoder", () => {
 
     expect(decoded.model).toBe("gpt-4.1");
     expect(decoded.stream).toBe(false);
-    expect(decoded.store).toBe(true);
+    expect(decoded.store).toBeUndefined();
     expect(decoded.previousResponseId).toBeUndefined();
     expect(isWireJsonObject(decoded.input)).toBe(true);
     expect(decoded.body.members.map((member) => member.key)).toEqual([
@@ -71,7 +71,7 @@ describe("RM-12 Responses request decoder", () => {
     ]);
   });
 
-  it("validates stream, store, and previous_response_id types", () => {
+  it("validates stream but preserves store and previous_response_id without schema failure", () => {
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"stream\":true}")).stream).toBe(true);
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"store\":false}")).store).toBe(false);
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"resp_1\"}"))
@@ -82,9 +82,12 @@ describe("RM-12 Responses request decoder", () => {
       .previousResponseId).toBe("");
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":\"true\"}").field).toBe("stream");
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":null}").field).toBe("stream");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"store\":\"false\"}").field).toBe("store");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"previous_response_id\":8}").field)
-      .toBe("previous_response_id");
+    const rawStore = decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"store\":{\"raw\":true}}"));
+    expect(rawStore.store).toBeUndefined();
+    expect(rawStore.body.members[1]?.key).toBe("store");
+    const numericPrevious = decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":8}"));
+    expect(numericPrevious.previousResponseId).toBeUndefined();
+    expect(numericPrevious.body.members[1]?.key).toBe("previous_response_id");
   });
 
   it("rejects duplicate top-level unknown fields but preserves nested duplicates and number lexemes", () => {

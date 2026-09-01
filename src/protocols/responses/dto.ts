@@ -4,7 +4,7 @@ export interface ResponsesRequest {
   readonly body: WireJsonObject;
   readonly model?: string;
   readonly stream: boolean;
-  readonly store: boolean;
+  readonly store?: boolean;
   readonly input?: WireJson;
   readonly previousResponseId?: string;
 }
@@ -48,7 +48,7 @@ export function withResponsesRequestInput(
     body: { kind: "object", members },
     ...(request.model === undefined ? {} : { model: request.model }),
     stream: request.stream,
-    store: request.store,
+    ...(request.store === undefined ? {} : { store: request.store }),
     input,
     ...(request.previousResponseId === undefined
       ? {}

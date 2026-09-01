@@ -21,15 +21,15 @@ export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
 
   const model = optionalModel(body);
   const stream = optionalBoolean(body, "stream", false, false);
-  const store = optionalBoolean(body, "store", true, true);
+  const store = preservedBoolean(body, "store");
   const input = memberValues(body, "input")[0];
-  const previous = optionalExactString(body, "previous_response_id");
+  const previous = preservedString(body, "previous_response_id");
 
   return {
     body,
     ...(model === undefined ? {} : { model }),
     stream,
-    store,
+    ...(store === undefined ? {} : { store }),
     ...(input === undefined ? {} : { input }),
     ...(previous === undefined ? {} : { previousResponseId: previous }),
   };
@@ -53,15 +53,14 @@ function optionalModel(body: WireJsonObject): string | undefined {
   return value;
 }
 
-function optionalExactString(body: WireJsonObject, field: string): string | undefined {
+function preservedString(body: WireJsonObject, field: string): string | undefined {
   const value = memberValues(body, field)[0];
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== "string") {
-    throw new ResponsesRequestDecodeError(field, `Responses request field ${field} must be a string or null`);
-  }
-  return value;
+  return typeof value === "string" ? value : undefined;
+}
+
+function preservedBoolean(body: WireJsonObject, field: string): boolean | undefined {
+  const value = memberValues(body, field)[0];
+  return value === true || value === false ? value : undefined;
 }
 
 function optionalBoolean(body: WireJsonObject, field: string, defaultValue: boolean, allowNull: boolean): boolean {
