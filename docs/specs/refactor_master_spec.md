@@ -1578,11 +1578,16 @@ authority for invoking them。
 
 ### 12.3 Code review blocker policy
 
-The review loop blocks merge on any finding that makes the PR unsafe to merge, regardless of whether the finding is
-reported as `High`、`Medium`、`important` or a judgement-call smell。Severity labels are evidence, not the final
-definition of blocker。The PR owner must fix or explicitly reclassify each finding before PR creation；a reclassification
-is only valid when the finding does not meet any blocker category below and is recorded in the PR handoff or a follow-up
-issue。
+The review loop blocks merge on findings that make the PR unsafe to merge。Review labels such as `High`、`Medium`、
+`important` and judgement-call smells are triage hints only；they are not the merge rule。A finding blocks merge only
+when it meets one of the blocker categories below。
+
+The PR owner must classify every review finding before PR creation or merge：
+
+- **Must fix before merge**：the finding meets one or more blocker categories below。
+- **May defer**：the finding does not meet any blocker category, does not make later slices depend on a broken seam, and
+  has an explicit follow-up issue linked from the PR。
+- **No action**：the finding is a false positive；the PR records the reason, with the relevant spec or code citation。
 
 A finding is a merge blocker when it is any of：
 
@@ -1600,6 +1605,17 @@ A finding is a merge blocker when it is any of：
 6. **Unreasonable code structure**：even when behavior currently passes, code that has unclear ownership, duplicated
    protocol state machines, scattered shotgun-surgery changes, misleading abstractions, hard-to-test hidden coupling,
    or control flow that obscures abort/timeout/commit boundaries is a blocker until the structure is made reasonable。
+
+Findings that do **not** meet these categories may be deferred only when all follow-up requirements are met：
+
+1. Create a GitHub issue before merge, titled `[Follow-up] <specific gap>` or linked to the owning future RM slice。
+2. The issue body includes the original review finding, affected files, why deferral is safe for the current PR, and
+   concrete acceptance criteria。
+3. The current PR description lists the issue under `Deferred follow-ups`。
+4. If the finding reveals a spec gap, merge a spec-only correction before implementing behavior that depends on the
+   unclear rule。
+5. If a finding affects a shared seam consumed by later slices, it is not deferable unless the later slice explicitly
+   owns that seam and the current PR leaves no fail-open behavior or hidden coupling behind。
 
 Implementation agents must read the required specs and code before editing, then turn the issue acceptance criteria into
 a local checklist covering behavior, structure, shared seams, tests, fixtures and handoff evidence。Before invoking
