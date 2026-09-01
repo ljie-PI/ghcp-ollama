@@ -50,7 +50,7 @@ function assertManifestEntry(value: unknown, manifestPath: string, index: number
   return candidate as unknown as FixtureManifestEntry;
 }
 
-export async function verifyFixtureManifests(root = FIXTURE_ROOT): Promise<readonly FixtureManifestEntry[]> {
+export async function verifyFixtureManifests(root = FIXTURE_ROOT, verifyExpectedBytes = true): Promise<readonly FixtureManifestEntry[]> {
   const manifests = await findManifests(root);
   const seen = new Set<string>();
   const entries: FixtureManifestEntry[] = [];
@@ -70,6 +70,9 @@ export async function verifyFixtureManifests(root = FIXTURE_ROOT): Promise<reado
     }
   }
 
+  if (verifyExpectedBytes) {
+    await verifyOpenAiChatFixtures(entries);
+  }
   return entries;
 }
 
@@ -113,7 +116,7 @@ async function main(): Promise<void> {
       throw new Error("fixture generation requires --case <caseId>");
     }
 
-    const entries = await verifyFixtureManifests();
+    const entries = await verifyFixtureManifests(FIXTURE_ROOT, false);
     const entry = entries.find((candidate) => candidate.caseId === caseId);
     if (entry?.owner === "RM-09") {
       await generateOpenAiChatFixture(entry);
@@ -127,39 +130,50 @@ async function main(): Promise<void> {
 
 async function generateOpenAiChatFixture(entry: FixtureManifestEntry): Promise<void> {
   const expectedPath = path.join(FIXTURE_ROOT, "openai-chat", entry.expected);
-  if (entry.caseId === "openai-chat.request.model-rewrite") {
-    await writeFile(expectedPath, "{\"unknown\":1e+2,\"stream\":true,\"model\":\"resolved\",\"stream_options\":{\"include_usage\":true},\"messages\":[]}", "utf8");
-    return;
-  }
-  if (entry.caseId === "openai-chat.stream.done") {
-    await writeFile(expectedPath, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n", "utf8");
-    return;
-  }
-  if (entry.caseId === "openai-chat.presenter.model-not-found") {
-    await writeFile(expectedPath, "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}", "utf8");
-    return;
-  }
-  if (entry.caseId === "openai-chat.buffered.success") {
-    await writeFile(expectedPath, "{\"id\":\"chatcmpl_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}", "utf8");
-    return;
-  }
-  if (entry.caseId === "openai-chat.usage.observation") {
-    await writeFile(expectedPath, "{\"inputTokens\":1,\"outputTokens\":2,\"cacheTokens\":3}", "utf8");
-    return;
-  }
-  if (entry.caseId === "openai-chat.model.preferred") {
-    await writeFile(expectedPath, "{\"messages\":[],\"model\":\"preferred\"}", "utf8");
-    return;
-  }
-  if (entry.caseId === "openai-chat.stream.truncated") {
-    await writeFile(expectedPath, "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}", "utf8");
-    return;
-  }
-  if (entry.caseId === "openai-chat.abort.zero-bytes") {
-    await writeFile(expectedPath, "", "utf8");
+  const expected = expectedOpenAiChatFixture(entry);
+  if (expected !== undefined) {
+    await writeFile(expectedPath, expected, "utf8");
     return;
   }
   assertFixtureGeneratorAvailable(entry.caseId, [entry]);
+}
+
+async function verifyOpenAiChatFixtures(entries: readonly FixtureManifestEntry[]): Promise<void> {
+  for (const entry of entries.filter((candidate) => candidate.owner === "RM-09")) {
+    const expected = expectedOpenAiChatFixture(entry);
+    if (expected === undefined) {
+      throw new Error(`fixture case ${entry.caseId} does not have an RM-09 generator`);
+    }
+    const actual = await readFile(path.join(FIXTURE_ROOT, "openai-chat", entry.expected), "utf8");
+    if (actual !== expected) {
+      throw new Error(`fixture case ${entry.caseId} expected bytes are stale; run fixtures:generate -- --case ${entry.caseId} --accept`);
+    }
+  }
+}
+
+function expectedOpenAiChatFixture(entry: FixtureManifestEntry): string | undefined {
+  switch (entry.caseId) {
+  case "openai-chat.request.model-rewrite":
+    return "{\"unknown\":1e+2,\"stream\":true,\"model\":\"resolved\",\"stream_options\":{\"include_usage\":true},\"messages\":[]}";
+  case "openai-chat.request.capture":
+    return "{\"upstreamUrl\":\"https://api.githubcopilot.com/chat/completions\",\"headers\":{\"content-type\":\"application/json\",\"copilot-integration-id\":\"vscode-chat\",\"editor-version\":\"vscode/1.110.1\",\"editor-plugin-version\":\"copilot-chat/0.38.2\",\"user-agent\":\"GitHubCopilotChat/0.38.2\",\"x-github-api-version\":\"2025-10-01\",\"copilot-vision-request\":\"true\"},\"body\":\"{\\\"model\\\":\\\"gpt\\\",\\\"stream\\\":true,\\\"stream_options\\\":{\\\"include_usage\\\":true},\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":[{\\\"type\\\":\\\"image_url\\\",\\\"image_url\\\":{\\\"url\\\":\\\"data:image/png;base64,aa\\\"}}]}]}\",\"chatCallCount\":1}";
+  case "openai-chat.stream.done":
+    return "data: {\"choices\":[]}\n\ndata: [DONE]\n\n";
+  case "openai-chat.presenter.model-not-found":
+    return "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}";
+  case "openai-chat.buffered.success":
+    return "{\"id\":\"chatcmpl_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
+  case "openai-chat.usage.observation":
+    return "{\"inputTokens\":1,\"outputTokens\":2,\"cacheTokens\":3}";
+  case "openai-chat.model.preferred":
+    return "{\"messages\":[],\"model\":\"preferred\"}";
+  case "openai-chat.stream.truncated":
+    return "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}";
+  case "openai-chat.abort.zero-bytes":
+    return "";
+  default:
+    return undefined;
+  }
 }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
