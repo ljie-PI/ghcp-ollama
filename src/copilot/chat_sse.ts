@@ -1,4 +1,4 @@
-import { isWireJsonObject, parseWireJson } from "../serialization/wire_json.js";
+import { isWireJsonObject, memberValues, parseWireJson } from "../serialization/wire_json.js";
 import type { ChatStreamFrame } from "../protocols/chat_completions/types.js";
 
 const DEFAULT_EVENT_LIMIT = 4 * 1024 * 1024;
@@ -22,10 +22,11 @@ export async function* parseChatSse(
   let eventLines: string[] = [];
   let eventBytes = 0;
   let terminal = false;
-  let firstLine = true;
+  let lineMayStartWithBom = true;
 
   const finishLine = function* (): Generator<ChatStreamFrame> {
     if (lineBytes.length === 0) {
+      lineMayStartWithBom = false;
       const frame = parseEvent(eventLines);
       eventLines = [];
       eventBytes = 0;
@@ -37,8 +38,8 @@ export async function* parseChatSse(
       }
       return;
     }
-    eventLines.push(decodeLine(lineBytes, firstLine));
-    firstLine = false;
+    eventLines.push(decodeLine(lineBytes, lineMayStartWithBom));
+    lineMayStartWithBom = false;
     lineBytes = [];
   };
 
@@ -84,7 +85,7 @@ export async function* parseChatSse(
 
 function decodeLine(bytes: readonly number[], stripInitialBom: boolean): string {
   try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Uint8Array.from(bytes));
     if (stripInitialBom && text.startsWith("\uFEFF")) {
       return text.slice(1);
     }
@@ -127,6 +128,9 @@ function parseEvent(lines: readonly string[]): ChatStreamFrame | undefined {
     });
     if (!isWireJsonObject(payload)) {
       return { kind: "error", value: data };
+    }
+    if (memberValues(payload, "error").length > 0) {
+      return { kind: "error", value: payload };
     }
     return { kind: "chunk", chunk: { payload } };
   } catch (_error) {

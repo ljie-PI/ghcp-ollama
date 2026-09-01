@@ -51,6 +51,15 @@ describe("RM-09 OpenAI Chat stream wire", () => {
     }).rejects.toMatchObject({ code: "invalid_utf8" });
   });
 
+  it("classifies root error objects as upstream error frames", async () => {
+    const frames = [];
+    for await (const frame of parseChatSse(streamFromText("data: {\"error\":{\"message\":\"secret\"}}\n\n", 8))) {
+      frames.push(frame);
+    }
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.kind).toBe("error");
+  });
+
   it("requires a Done terminal", async () => {
     await expect(async () => {
       for await (const _frame of parseChatSse(streamFromText("data: {\"choices\":[]}\n\n", 2))) {

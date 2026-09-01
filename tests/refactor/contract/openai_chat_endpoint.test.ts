@@ -63,6 +63,8 @@ class CapturingCopilotBackend implements CopilotBackend {
 async function openAiGateway(backend: CapturingCopilotBackend, options: {
   readonly preferred?: "valid" | "invalid" | "missing";
   readonly requestId?: string;
+  readonly usageUpdates?: unknown[];
+  readonly nowMs?: () => number;
 } = {}): Promise<{ readonly gw: Gateway; readonly close: () => Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-openai-chat-"));
   const database = openDatabase({
@@ -99,14 +101,25 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   const dependencies: { readonly createRequestId?: () => string } = options.requestId === undefined
     ? {}
     : { createRequestId: () => options.requestId ?? "req_test" };
-  const gw = await createGateway({
-    startup: parseStartupConfig([], {}, { homedir: dir }),
-    runtime: defaultRuntimeConfigSnapshot(),
-  }, [createOpenAiChatRoute({
+  const routeDependencies = {
     directory: accounts,
     catalog,
     copilot: backend,
-  })], dependencies);
+    ...(options.usageUpdates === undefined
+      ? {}
+      : {
+        usageRecorder: {
+          recordUsage: (update: unknown): void => {
+            options.usageUpdates?.push(update);
+          },
+        },
+      }),
+    ...(options.nowMs === undefined ? {} : { nowMs: options.nowMs }),
+  };
+  const gw = await createGateway({
+    startup: parseStartupConfig([], {}, { homedir: dir }),
+    runtime: defaultRuntimeConfigSnapshot(),
+  }, [createOpenAiChatRoute(routeDependencies)], dependencies);
   return {
     gw,
     close: async () => {
@@ -149,14 +162,23 @@ describe("RM-09 OpenAI Chat endpoint", () => {
   });
 
   it("preserves non-owned fields while rewriting the explicit model", async () => {
+    const usageUpdates: unknown[] = [];
+    let now = 1_000;
     const backend = new CapturingCopilotBackend({
       chat: {
         status: 201,
         headers: new Headers({ "content-type": "application/json" }),
-        body: encoder.encode("{\"z\":-0,\"choices\":[],\"usage\":{\"prompt_tokens\":1}}"),
+        body: encoder.encode("{\"z\":-0,\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":3}}}"),
       },
     });
-    const { gw, close } = await openAiGateway(backend, { requestId: "req_generated" });
+    const { gw, close } = await openAiGateway(backend, {
+      requestId: "req_generated",
+      usageUpdates,
+      nowMs: () => {
+        now += 5;
+        return now;
+      },
+    });
     try {
       const response = await gw.fetch(jsonRequest([
         "{\"unknown\":1e+2,",
@@ -166,11 +188,20 @@ describe("RM-09 OpenAI Chat endpoint", () => {
       ].join("")));
       expect(response.status).toBe(201);
       expect(response.headers.get("x-request-id")).toBe("req_generated");
-      expect(await response.text()).toBe("{\"z\":-0,\"choices\":[],\"usage\":{\"prompt_tokens\":1}}");
+      expect(await response.text()).toBe("{\"z\":-0,\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":3}}}");
       expect(decoder.decode(backend.chatRequests[0]?.body)).toBe(
         "{\"unknown\":1e+2,\"stream\":false,\"model\":\"gpt\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
       );
       expect(backend.chatRequests[0]?.hasVisionInput).toBe(false);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "github.com/1",
+        protocol: "openai_chat",
+        resolvedModel: "gpt",
+        outcome: "success",
+        inputTokens: 1,
+        outputTokens: 2,
+        cacheTokens: 3,
+      }]);
     } finally {
       await close();
     }
@@ -276,6 +307,24 @@ describe("RM-09 OpenAI Chat endpoint", () => {
       expect(await response.text()).toBe(
         "{\"error\":{\"message\":\"upstream request failed\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":null}}",
       );
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps valid HTTP-date Retry-After values on upstream 429", async () => {
+    const backend = new CapturingCopilotBackend({
+      chat: {
+        status: 429,
+        headers: new Headers({ "retry-after": "Sun, 06 Nov 1994 08:49:37 GMT" }),
+        body: encoder.encode("{\"secret\":\"nope\"}"),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBe("Sun, 06 Nov 1994 08:49:37 GMT");
     } finally {
       await close();
     }

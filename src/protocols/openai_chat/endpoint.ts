@@ -6,7 +6,6 @@ import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
-import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
   duplicateMemberNames,
   isWireJsonArray,
@@ -19,6 +18,7 @@ import {
 } from "../../serialization/wire_json.js";
 import { resolveModel, type ResolvedModel } from "../model_catalog/resolver.js";
 import type { ChatRequest, ChatStreamFrame } from "../chat_completions/types.js";
+import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "./wire.js";
 
 export interface OpenAiChatRouteDependencies {
@@ -26,6 +26,8 @@ export interface OpenAiChatRouteDependencies {
   readonly catalog: CopilotModelCatalog;
   readonly preferences?: AccountModelPreferences;
   readonly copilot: CopilotBackend;
+  readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
+  readonly nowMs?: () => number;
 }
 
 interface DecodedOpenAiChatRequest {
@@ -55,6 +57,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
     body: "wire-json-object",
     presentFailure: presentOpenAiFailure,
     endpoint: async (request, scope) => {
+      const startedAtMs = (dependencies.nowMs ?? Date.now)();
       if (request.body === undefined) {
         throw new GatewayFailureError({ kind: "invalid_request" });
       }
@@ -80,6 +83,17 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
           throw new GatewayFailureError({ kind: "invalid_upstream_response" });
         }
         const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+        recordUsageSample(dependencies, {
+          occurredAtMs: (dependencies.nowMs ?? Date.now)(),
+          accountId: account.accountId,
+          protocol: "openai_chat",
+          resolvedModel: resolved.upstreamModel,
+          outcome: "success",
+          requestCount: 1,
+          errorCount: 0,
+          ...usageNumbers(usageObservationFromPayload(payload)),
+          latencyMs: (dependencies.nowMs ?? Date.now)() - startedAtMs,
+        });
         return new Response(Buffer.from(serializeWireJson(payload)), {
           status: upstream.status,
           headers: {
@@ -108,17 +122,17 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         throw new GatewayFailureError({ kind: "invalid_upstream_response" });
       }
 
-      const writer = createStreamResponseWriter({
+      return openAiChatStreamResponse({
         status: upstream.status,
         signal: scope.signal,
-        headers: {
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "x-request-id": scope.requestId,
-        },
+        requestId: scope.requestId,
+        first,
+        frames,
+        dependencies,
+        accountId: account.accountId,
+        resolvedModel: resolved.upstreamModel,
+        startedAtMs,
       });
-
-      void pumpOpenAiChatStream(first, frames, writer, scope.signal);
-      return writer.response;
     },
   };
 }
@@ -136,6 +150,12 @@ export function decodeOpenAiChatRequest(body: WireJsonObject): DecodedOpenAiChat
   const streamValue = memberValues(body, "stream")[0];
   if (streamValue !== undefined && streamValue !== true && streamValue !== false) {
     throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  if (streamValue === true) {
+    const streamOptions = memberValues(body, "stream_options")[0];
+    if (streamOptions !== undefined) {
+      validateStreamOptions(streamOptions);
+    }
   }
 
   return {
@@ -276,6 +296,7 @@ function parseUpstreamObject(body: Uint8Array, maxBytes: number): WireJsonObject
 }
 
 function prepareStreamOptions(value: WireJson): WireJsonObject {
+  validateStreamOptions(value);
   if (!isWireJsonObject(value)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
@@ -292,6 +313,15 @@ function prepareStreamOptions(value: WireJson): WireJsonObject {
       ? { key: member.key, value: true }
       : member),
   };
+}
+
+function validateStreamOptions(value: WireJson): void {
+  if (!isWireJsonObject(value)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  if (value.members.filter((member) => member.key === "include_usage").length > 1) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
 }
 
 function hasVisionInput(body: WireJsonObject): boolean {
@@ -330,10 +360,13 @@ function assertUpstreamSuccess(status: number, headers: Headers): void {
 
 function retryAfter(headers: Headers): string | undefined {
   const value = headers.get("retry-after");
-  if (value === null || value.length === 0 || value.includes(",")) {
+  if (value === null || value.length === 0) {
     return undefined;
   }
-  if (/^\d+$/u.test(value) || !Number.isNaN(Date.parse(value))) {
+  if (/^\d+$/u.test(value)) {
+    return value;
+  }
+  if (/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/u.test(value) && !Number.isNaN(Date.parse(value))) {
     return value;
   }
   return undefined;
@@ -362,49 +395,142 @@ async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>): Promise<ChatS
   }
 }
 
-async function pumpOpenAiChatStream(
-  first: ChatStreamFrame,
-  frames: AsyncGenerator<ChatStreamFrame>,
-  writer: ReturnType<typeof createStreamResponseWriter>,
-  signal: AbortSignal,
-): Promise<void> {
-  try {
-    if (!await emitOpenAiChatFrame(first, writer)) {
-      await frames.return(undefined);
+function openAiChatStreamResponse(input: {
+  readonly status: number;
+  readonly signal: AbortSignal;
+  readonly requestId: string;
+  readonly first: ChatStreamFrame;
+  readonly frames: AsyncGenerator<ChatStreamFrame>;
+  readonly dependencies: OpenAiChatRouteDependencies;
+  readonly accountId: string;
+  readonly resolvedModel: string;
+  readonly startedAtMs: number;
+}): Response {
+  let pending: ChatStreamFrame | undefined = input.first;
+  let closed = false;
+  let usage: ChatUsageObservation = {};
+  const closeFrames = async (): Promise<void> => {
+    if (closed) {
       return;
     }
-    for await (const frame of frames) {
-      if (signal.aborted) {
-        await frames.return(undefined);
-        writer.abort();
+    closed = true;
+    await input.frames.return(undefined).catch(() => undefined);
+  };
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller): Promise<void> {
+      if (input.signal.aborted) {
+        await closeFrames();
+        controller.close();
         return;
       }
-      if (!await emitOpenAiChatFrame(frame, writer)) {
-        await frames.return(undefined);
-        return;
+      try {
+        const frame = pending ?? await nextFrame(input.frames);
+        pending = undefined;
+        if (frame.kind === "chunk") {
+          usage = mergeUsageObservation(usage, usageObservationFromPayload(frame.chunk.payload));
+          controller.enqueue(encodeOpenAiChatSseChunk(frame.chunk.payload));
+          return;
+        }
+        if (frame.kind === "done") {
+          controller.enqueue(encodeOpenAiChatDone());
+          recordUsageSample(input.dependencies, {
+            occurredAtMs: (input.dependencies.nowMs ?? Date.now)(),
+            accountId: input.accountId,
+            protocol: "openai_chat",
+            resolvedModel: input.resolvedModel,
+            outcome: "success",
+            requestCount: 1,
+            errorCount: 0,
+            ...usageNumbers(usage),
+            latencyMs: (input.dependencies.nowMs ?? Date.now)() - input.startedAtMs,
+          });
+          await closeFrames();
+          controller.close();
+          return;
+        }
+        await closeFrames();
+        controller.error(new Error("upstream stream error"));
+      } catch (_error) {
+        await closeFrames();
+        controller.error(new Error("upstream stream error"));
       }
-    }
-    writer.abort();
-  } catch (_error) {
-    writer.abort();
-    await frames.return(undefined).catch(() => undefined);
-  }
+    },
+    async cancel(): Promise<void> {
+      await closeFrames();
+    },
+  });
+  input.signal.addEventListener("abort", () => {
+    void closeFrames();
+  }, { once: true });
+  return new Response(stream, {
+    status: input.status,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "x-request-id": input.requestId,
+    },
+  });
 }
 
-async function emitOpenAiChatFrame(
-  frame: ChatStreamFrame,
-  writer: ReturnType<typeof createStreamResponseWriter>,
-): Promise<boolean> {
-  if (frame.kind === "chunk") {
-    return writer.enqueue(encodeOpenAiChatSseChunk(frame.chunk.payload));
+interface ChatUsageObservation {
+  readonly promptTokens?: number;
+  readonly completionTokens?: number;
+  readonly cachedTokens?: number;
+}
+
+function usageObservationFromPayload(value: WireJson): ChatUsageObservation {
+  if (!isWireJsonObject(value)) {
+    return {};
   }
-  if (frame.kind === "done") {
-    const accepted = await writer.enqueue(encodeOpenAiChatDone());
-    writer.close();
-    return accepted;
+  const usage = memberValues(value, "usage")[0];
+  if (!isWireJsonObject(usage)) {
+    return {};
   }
-  writer.abort();
-  return false;
+  const promptTokens = nonnegativeInteger(memberValues(usage, "prompt_tokens")[0]);
+  const completionTokens = nonnegativeInteger(memberValues(usage, "completion_tokens")[0]);
+  const details = memberValues(usage, "prompt_tokens_details")[0];
+  const cachedTokens = isWireJsonObject(details)
+    ? nonnegativeInteger(memberValues(details, "cached_tokens")[0])
+    : undefined;
+  return {
+    ...(promptTokens === undefined ? {} : { promptTokens }),
+    ...(completionTokens === undefined ? {} : { completionTokens }),
+    ...(cachedTokens === undefined ? {} : { cachedTokens }),
+  };
+}
+
+function nonnegativeInteger(value: WireJson | undefined): number | undefined {
+  if (value === undefined || typeof value !== "object" || value === null || !("kind" in value) || value.kind !== "number") {
+    return undefined;
+  }
+  if (!/^(?:0|[1-9]\d*)$/u.test(value.lexeme)) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value.lexeme, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function mergeUsageObservation(left: ChatUsageObservation, right: ChatUsageObservation): ChatUsageObservation {
+  return {
+    ...((right.promptTokens ?? left.promptTokens) === undefined ? {} : { promptTokens: right.promptTokens ?? left.promptTokens }),
+    ...((right.completionTokens ?? left.completionTokens) === undefined ? {} : { completionTokens: right.completionTokens ?? left.completionTokens }),
+    ...((right.cachedTokens ?? left.cachedTokens) === undefined ? {} : { cachedTokens: right.cachedTokens ?? left.cachedTokens }),
+  };
+}
+
+function usageNumbers(observation: ChatUsageObservation): Pick<UsageUpdate, "inputTokens" | "outputTokens" | "cacheTokens"> {
+  return {
+    inputTokens: observation.promptTokens ?? 0,
+    outputTokens: observation.completionTokens ?? 0,
+    cacheTokens: observation.cachedTokens ?? 0,
+  };
+}
+
+function recordUsageSample(dependencies: OpenAiChatRouteDependencies, update: UsageUpdate): void {
+  try {
+    dependencies.usageRecorder?.recordUsage(update);
+  } catch (_error) {
+    // Telemetry is noncritical and must not change protocol bytes.
+  }
 }
 
 function presentOpenAiFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
