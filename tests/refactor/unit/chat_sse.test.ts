@@ -43,4 +43,12 @@ describe("RM-07 Chat SSE", () => {
       }
     }).rejects.toMatchObject({ code: "truncated" });
   });
+
+  it("classifies exact [DONE] before event:error", async () => {
+    const frames = [];
+    for await (const frame of parseChatSse(splitBytes("event: error\ndata: [DONE]\n\n", 1))) {
+      frames.push(frame);
+    }
+    expect(frames.map((frame) => frame.kind)).toEqual(["done"]);
+  });
 });

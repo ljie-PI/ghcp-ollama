@@ -48,9 +48,12 @@ export async function getValidToken(
   account: BoundAccount,
   nowMs: number,
   refresh: (githubToken: string) => Promise<{ token: string; expiresAtMs: number }>,
+  signal?: AbortSignal,
 ): Promise<string> {
+  throwIfAborted(signal);
   const generation = account.credentialGeneration;
   let current = await store.readGeneration(account.accountId, generation);
+  throwIfAborted(signal);
   if (current === null) {
     throw new TokenRefreshError("missing", "credential missing");
   }
@@ -58,7 +61,9 @@ export async function getValidToken(
     return current.githubToken;
   }
   await withAccountLock(account.accountId, async () => {
+    throwIfAborted(signal);
     const again = await store.readGeneration(account.accountId, generation);
+    throwIfAborted(signal);
     if (again === null) {
       throw new TokenRefreshError("missing", "credential missing");
     }
@@ -67,15 +72,23 @@ export async function getValidToken(
       return;
     }
     const refreshed = await refresh(again.githubToken);
+    throwIfAborted(signal);
     current = {
       ...again,
       copilotToken: refreshed.token,
       copilotExpiresAtMs: refreshed.expiresAtMs,
     };
     await store.putGeneration(account.accountId, generation, current);
+    throwIfAborted(signal);
   });
   if (current.copilotToken === undefined) {
     throw new TokenRefreshError("missing", "copilot token missing");
   }
   return current.copilotToken;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
+  }
 }

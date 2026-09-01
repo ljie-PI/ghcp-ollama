@@ -24,10 +24,10 @@ export interface CopilotTransportDeps {
 export class HttpCopilotBackend implements CopilotBackend {
   constructor(private readonly deps: CopilotTransportDeps) {}
 
-  async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
+  async bind(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<BoundCopilot> {
     const nowMs = this.deps.nowMs ?? Date.now;
-    const token = await getValidToken(this.deps.credentials, account, nowMs(), this.deps.refreshCopilotToken);
-    const discovered = await discoverEndpoint(account, this.deps.fetchDiscovery);
+    const token = await getValidToken(this.deps.credentials, account, nowMs(), this.deps.refreshCopilotToken, signal);
+    const discovered = await discoverEndpoint(account, this.deps.fetchDiscovery, signal);
     const target: CopilotTarget = { endpoint: discovered.endpoint, token };
     const fetchImpl = this.deps.fetchImpl ?? fetch;
     return {

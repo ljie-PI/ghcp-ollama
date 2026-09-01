@@ -418,6 +418,46 @@ describe("RM-09 OpenAI Chat endpoint", () => {
       await close();
     }
   });
+
+  it("maps first-byte timeout to the OpenAI upstream timeout presenter", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 1;
+    const backend = new CapturingCopilotBackend({
+      chatPromise: new Promise<ChatResponse>(() => undefined),
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime, requestId: "req_timeout" });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("closes a committed stream on idle timeout without synthesizing Done", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.streamIdleMs = 1;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: hangingStreamAfter("data: {\"choices\":[]}\n\n"),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      const reader = response.body?.getReader();
+      const first = await reader?.read();
+      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[]}\n\n");
+      await expect(reader?.read()).rejects.toThrow(/stream error/u);
+    } finally {
+      await close();
+    }
+  });
 });
 
 async function* streamFromText(text: string, split: number): AsyncIterable<Uint8Array> {
@@ -425,4 +465,9 @@ async function* streamFromText(text: string, split: number): AsyncIterable<Uint8
   for (let index = 0; index < bytes.byteLength; index += split) {
     yield bytes.slice(index, index + split);
   }
+}
+
+async function* hangingStreamAfter(text: string): AsyncIterable<Uint8Array> {
+  yield encoder.encode(text);
+  await new Promise<void>(() => undefined);
 }

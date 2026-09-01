@@ -15,7 +15,9 @@ const locks = new Map<string, Promise<void>>();
 export async function discoverEndpoint(
   account: BoundAccount,
   fetchDiscovery: (account: BoundAccount) => Promise<string | null>,
+  signal?: AbortSignal,
 ): Promise<DiscoveredEndpoint> {
+  throwIfAborted(signal);
   const cached = cache.get(account.accountId);
   if (cached !== undefined) {
     return { endpoint: cached, cached: true };
@@ -27,12 +29,14 @@ export async function discoverEndpoint(
   });
   locks.set(account.accountId, previous.then(() => gate));
   await previous;
+  throwIfAborted(signal);
   try {
     const again = cache.get(account.accountId);
     if (again !== undefined) {
       return { endpoint: again, cached: true };
     }
     const discovered = await fetchDiscovery(account);
+    throwIfAborted(signal);
     const endpoint = discovered ?? fallbackEndpoint(account);
     cache.set(account.accountId, endpoint);
     return { endpoint, cached: false };
@@ -75,4 +79,10 @@ function effectivePort(url: URL): string {
     return url.port;
   }
   return url.protocol === "https:" ? "443" : "80";
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
+  }
 }

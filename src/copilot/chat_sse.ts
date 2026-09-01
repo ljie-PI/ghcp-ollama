@@ -114,11 +114,11 @@ function parseEvent(lines: readonly string[]): ChatStreamFrame | undefined {
     return undefined;
   }
   const data = dataLines.join("\n");
-  if (eventName === "error") {
-    return { kind: "error", value: data };
-  }
   if (data === "[DONE]") {
     return { kind: "done" };
+  }
+  if (eventName === "error") {
+    return { kind: "error", value: data };
   }
   try {
     const jsonBytes = new TextEncoder().encode(data);
