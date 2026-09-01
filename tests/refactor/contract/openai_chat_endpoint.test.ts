@@ -382,9 +382,9 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     });
     try {
       const response = await timeoutGateway.gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
-      expect(response.status).toBe(504);
+      expect(response.status).toBe(502);
       expect(await response.text()).toBe(
-        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+        "{\"error\":{\"message\":\"upstream request failed\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
       );
     } finally {
       await timeoutGateway.close();

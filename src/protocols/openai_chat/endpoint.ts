@@ -273,7 +273,7 @@ async function loadCatalog(catalog: CopilotModelCatalog, accountId: string, sign
     if (error instanceof CapiFetchError) {
       const retry = validRetryAfterValue(error.retryAfter);
       if (error.failureKind === "upstream_timeout") {
-        throw new GatewayFailureError({ kind: "upstream_timeout", cause: error });
+        throw new GatewayFailureError({ kind: "upstream_network", cause: error });
       }
       if (error.failureKind === "upstream_network") {
         throw new GatewayFailureError({ kind: "upstream_network", cause: error });
