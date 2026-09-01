@@ -182,6 +182,30 @@ describe("RM-08 CAPI parse and cache", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it("enforces timeout on the default Undici request path", async () => {
+    const server = createServer((_request, response) => {
+      setTimeout(() => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{\"data\":[]}");
+      }, 20);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    try {
+      const source = new HttpCopilotModelsSource(
+        async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+        fetch,
+        { connectTimeoutMs: 100, totalTimeoutMs: 1, bodyLimitBytes: 32 },
+      );
+      await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
 
 describe("RM-08 model resolver", () => {

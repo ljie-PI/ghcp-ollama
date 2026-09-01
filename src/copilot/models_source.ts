@@ -85,16 +85,17 @@ async function getWithRedirects(
     ): Promise<Response> {
       const dispatcher = new Agent({
         connectTimeout: limits.connectTimeoutMs,
-        headersTimeout: remainingMs(deadlineMs),
+        headersTimeout: positiveTimeoutMs(deadlineMs),
         bodyTimeout: 0,
       });
+      const timeout = timeoutPromise<Awaited<ReturnType<typeof undiciRequest>>>(remainingMs(deadlineMs), signal);
       try {
-        const response = await undiciRequest(url, {
+        const response = await Promise.race([undiciRequest(url, {
           method: "GET",
           headers: headersToRecord(headers),
-          signal,
+          signal: timeout.signal,
           dispatcher,
-        });
+        }), timeout.promise]);
         const body = response.body;
         const iterator = body[Symbol.asyncIterator]();
         const stream = new ReadableStream<Uint8Array>({
@@ -122,6 +123,8 @@ async function getWithRedirects(
           throw new CapiFetchError(502);
         }
         throw error;
+      } finally {
+        timeout.clear();
       }
     }
     const location = response.headers.get("location");
@@ -227,6 +230,16 @@ function timeoutPromise<T>(ms: number, signal: AbortSignal): {
   const promise = new Promise<T>((_resolve, reject) => {
     rejectTimeout = reject;
   });
+  if (signal.aborted) {
+    controller.abort();
+    rejectTimeout(new DOMException("aborted", "AbortError"));
+    return {
+      signal: combined,
+      promise,
+      clear: () => undefined,
+      timedOut: () => false,
+    };
+  }
   const onAbort = (): void => {
     controller.abort();
     rejectTimeout(new DOMException("aborted", "AbortError"));
@@ -250,6 +263,10 @@ function timeoutPromise<T>(ms: number, signal: AbortSignal): {
 
 function remainingMs(deadlineMs: number): number {
   return Math.max(0, deadlineMs - Date.now());
+}
+
+function positiveTimeoutMs(deadlineMs: number): number {
+  return Math.max(1, remainingMs(deadlineMs));
 }
 
 async function cancelResponseBody(response: Response): Promise<void> {
