@@ -33,20 +33,24 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
 
   async fetch(accountId: string, signal: AbortSignal): Promise<CapiModelsResponse> {
     const { token, endpoint } = await this.resolve(accountId, signal);
-    const response = await getWithRedirects(this.fetchImpl, capiModelsUrl(endpoint), token, signal, Date.now() + this.limits.totalTimeoutMs, this.limits);
+    const deadlineMs = Date.now() + this.limits.totalTimeoutMs;
+    const response = await getWithRedirects(this.fetchImpl, capiModelsUrl(endpoint), token, signal, deadlineMs, this.limits);
     if (response.status < 200 || response.status >= 300) {
       await cancelResponseBody(response);
       const status = response.status >= 300 && response.status < 400 ? 502 : response.status;
       throw new CapiFetchError(status, response.status === 429 ? validRetryAfter(response.headers) : undefined);
     }
     try {
-      const bytes = await readLimitedBody(response, signal, Date.now() + this.limits.totalTimeoutMs, this.limits);
+      const bytes = await readLimitedBody(response, signal, deadlineMs, this.limits);
       return JSON.parse(new TextDecoder().decode(bytes)) as CapiModelsResponse;
     } catch (error: unknown) {
-      if (error instanceof CapiFetchError) {
+      await cancelResponseBody(response);
+      if (signal.aborted) {
+        throw new DOMException("aborted", "AbortError");
+      }
+      if (error instanceof CapiFetchError || isAbortError(error)) {
         throw error;
       }
-      await cancelResponseBody(response);
       throw new CapiFetchError(502);
     }
   }
@@ -71,7 +75,13 @@ async function getWithRedirects(
     if (location === null) {
       return response;
     }
-    const next = new URL(location, current).toString();
+    let next: string;
+    try {
+      next = new URL(location, current).toString();
+    } catch (_error: unknown) {
+      await cancelResponseBody(response);
+      throw new CapiFetchError(502);
+    }
     headers = stripSecretsOnRedirect(current, next, headers);
     await cancelResponseBody(response);
     current = next;
@@ -164,6 +174,11 @@ function timeoutPromise<T>(ms: number, signal: AbortSignal): {
   const promise = new Promise<T>((_resolve, reject) => {
     rejectTimeout = reject;
   });
+  const onAbort = (): void => {
+    controller.abort();
+    rejectTimeout(new DOMException("aborted", "AbortError"));
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -172,7 +187,10 @@ function timeoutPromise<T>(ms: number, signal: AbortSignal): {
   return {
     signal: combined,
     promise,
-    clear: () => clearTimeout(timer),
+    clear: () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    },
     timedOut: () => timedOut,
   };
 }
@@ -183,6 +201,10 @@ function remainingMs(deadlineMs: number): number {
 
 async function cancelResponseBody(response: Response): Promise<void> {
   await response.body?.cancel().catch(() => undefined);
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 function validRetryAfter(headers: Headers): string | undefined {

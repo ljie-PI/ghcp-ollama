@@ -103,6 +103,56 @@ describe("RM-08 CAPI parse and cache", () => {
       return new Response("{\"data\":[]}");
     }).fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
   });
+
+  it("cleans up CAPI bodies on invalid redirects, body timeout, and caller abort", async () => {
+    let redirectCanceled = false;
+    const redirectSource = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(new ReadableStream<Uint8Array>({
+        cancel(): void {
+          redirectCanceled = true;
+        },
+      }), { status: 302, headers: { location: "http://[invalid" } }),
+      { connectTimeoutMs: 20, totalTimeoutMs: 20, bodyLimitBytes: 32 },
+    );
+    await expect(redirectSource.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    expect(redirectCanceled).toBe(true);
+
+    let timeoutCanceled = false;
+    const timeoutSource = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(new ReadableStream<Uint8Array>({
+        pull: async () => {
+          await new Promise<void>(() => undefined);
+        },
+        cancel(): void {
+          timeoutCanceled = true;
+        },
+      }), { status: 200 }),
+      { connectTimeoutMs: 20, totalTimeoutMs: 1, bodyLimitBytes: 32 },
+    );
+    await expect(timeoutSource.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    expect(timeoutCanceled).toBe(true);
+
+    let abortCanceled = false;
+    const abortController = new AbortController();
+    const abortSource = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(new ReadableStream<Uint8Array>({
+        pull: async () => {
+          await new Promise<void>(() => undefined);
+        },
+        cancel(): void {
+          abortCanceled = true;
+        },
+      }), { status: 200 }),
+      { connectTimeoutMs: 20, totalTimeoutMs: 20, bodyLimitBytes: 32 },
+    );
+    const pending = abortSource.fetch("github.com/1", abortController.signal);
+    abortController.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(abortCanceled).toBe(true);
+  });
 });
 
 describe("RM-08 model resolver", () => {
