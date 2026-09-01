@@ -620,9 +620,6 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     try {
       const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
       expect(response.status).toBe(502);
-      for (let index = 0; index < 20 && !canceled; index += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1));
-      }
       expect(canceled).toBe(true);
     } finally {
       await close();

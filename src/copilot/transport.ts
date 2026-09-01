@@ -68,8 +68,13 @@ export class HttpCopilotBackend implements CopilotBackend {
       await response.cancel();
       return { status: response.status, headers: response.headers, body: new Uint8Array() };
     }
-    const bytes = await readResponseBody(response.bytes, maxBodyBytes, firstByteTimeoutMs, signal);
-    return { status: response.status, headers: response.headers, body: bytes };
+    try {
+      const bytes = await readResponseBody(response.bytes, maxBodyBytes, firstByteTimeoutMs, signal);
+      return { status: response.status, headers: response.headers, body: bytes };
+    } catch (error: unknown) {
+      await response.cancel();
+      throw error;
+    }
   }
 
   private async openStream(
@@ -374,7 +379,7 @@ async function* iterateWebBody(stream: ReadableStream<Uint8Array>): AsyncIterabl
     }
   } finally {
     if (!completed) {
-      await reader.cancel().catch(() => undefined);
+      void reader.cancel().catch(() => undefined);
     }
     reader.releaseLock();
   }

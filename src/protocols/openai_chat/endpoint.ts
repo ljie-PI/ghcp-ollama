@@ -106,6 +106,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
           status: upstream.status,
           headers: {
             "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
             "x-request-id": scope.requestId,
           },
         });
@@ -140,11 +141,13 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         });
       } catch (error: unknown) {
         upstreamController.abort();
+        await upstream.cancel?.();
         void frames.return(undefined).catch(() => undefined);
         throw error;
       }
       if (first.kind === "error") {
         upstreamController.abort();
+        await upstream.cancel?.();
         void frames.return(undefined).catch(() => undefined);
         throw new GatewayFailureError({ kind: "invalid_upstream_response" });
       }
