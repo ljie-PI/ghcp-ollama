@@ -480,6 +480,29 @@ describe("RM-09 OpenAI Chat endpoint", () => {
     }
   });
 
+  it("does not let SSE comments bypass the first payload timeout", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: hangingStreamAfter(": keepalive\n\n"),
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
   it("closes a committed stream on idle timeout without synthesizing Done", async () => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.streamIdleMs = 1;

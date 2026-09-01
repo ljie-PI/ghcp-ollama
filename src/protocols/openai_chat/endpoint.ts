@@ -67,10 +67,10 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
 
       const decoded = decodeOpenAiChatRequest(request.body);
       const account = await bindAccount(dependencies.directory, scope.signal);
-      const catalog = await loadCatalog(dependencies.catalog, account.accountId, scope.signal);
       const preference = decoded.requestedModel === undefined
         ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
         : null;
+      const catalog = await loadCatalog(dependencies.catalog, account.accountId, scope.signal);
       const resolved = resolveOpenAiChatModel(decoded, catalog, preference);
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
@@ -135,7 +135,9 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       ), scope.config.limits.sseEventBytes);
       let first: ChatStreamFrame;
       try {
-        first = await nextFrame(frames);
+        first = await firstFrameWithTimeout(scope, frames, scope.config.timeouts.firstByteMs, () => {
+          upstreamController.abort(new GatewayFailureError({ kind: "upstream_timeout" }));
+        });
       } catch (error: unknown) {
         upstreamController.abort();
         void frames.return(undefined).catch(() => undefined);
@@ -481,6 +483,39 @@ async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>): Promise<ChatS
       throw error;
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+  }
+}
+
+async function firstFrameWithTimeout(
+  scope: Readonly<RequestScope>,
+  frames: AsyncGenerator<ChatStreamFrame>,
+  ms: number,
+  onTimeout: () => void,
+): Promise<ChatStreamFrame> {
+  let timedOut = false;
+  let clear = (): void => undefined;
+  const timeout = new Promise<ChatStreamFrame>((_resolve, reject) => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new GatewayFailureError({ kind: "upstream_timeout" }));
+    }, ms);
+    const onAbort = (): void => reject(new GatewayFailureError({ kind: "aborted" }));
+    scope.signal.addEventListener("abort", onAbort, { once: true });
+    clear = () => {
+      clearTimeout(timer);
+      scope.signal.removeEventListener("abort", onAbort);
+    };
+  });
+  try {
+    return await Promise.race([nextFrame(frames), timeout]);
+  } catch (error: unknown) {
+    if (timedOut) {
+      onTimeout();
+      void frames.return(undefined).catch(() => undefined);
+    }
+    throw error;
+  } finally {
+    clear();
   }
 }
 
