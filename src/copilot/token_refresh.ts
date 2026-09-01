@@ -47,7 +47,7 @@ export async function getValidToken(
   store: CredentialStore,
   account: BoundAccount,
   nowMs: number,
-  refresh: (githubToken: string) => Promise<{ token: string; expiresAtMs: number }>,
+  refresh: (githubToken: string, signal?: AbortSignal) => Promise<{ token: string; expiresAtMs: number }>,
   signal?: AbortSignal,
 ): Promise<string> {
   throwIfAborted(signal);
@@ -71,7 +71,7 @@ export async function getValidToken(
     if (!needsRefresh(again, nowMs, "github.com")) {
       return;
     }
-    const refreshed = await refresh(again.githubToken);
+    const refreshed = await refresh(again.githubToken, signal);
     throwIfAborted(signal);
     current = {
       ...again,

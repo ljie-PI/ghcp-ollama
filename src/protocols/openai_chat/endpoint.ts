@@ -4,7 +4,8 @@ import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
-import { UpstreamBodyLimitError, UpstreamTimeoutError } from "../../copilot/transport.js";
+import { TokenRefreshError } from "../../copilot/token_refresh.js";
+import { mapTokenRefreshError, UpstreamBodyLimitError, UpstreamTimeoutError } from "../../copilot/transport.js";
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
@@ -70,7 +71,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       const catalog = await loadCatalog(dependencies.catalog, account.accountId, scope.signal);
       const preference = (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId);
       const resolved = resolveOpenAiChatModel(decoded, catalog, preference);
-      const copilot = await withOperationTimeout(scope, scope.config.timeouts.connectMs, (signal) => dependencies.copilot.bind(account, signal));
+      const copilot = await bindCopilot(dependencies.copilot, account, scope);
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
 
       if (!prepared.stream) {
@@ -80,6 +81,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
           stream: false,
           hasVisionInput: prepared.hasVisionInput,
           nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
+          connectTimeoutMs: scope.config.timeouts.connectMs,
           firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
           signal: scope.signal,
         });
@@ -108,13 +110,17 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         });
       }
 
+      const upstreamController = new AbortController();
+      const abortUpstream = (): void => upstreamController.abort();
+      scope.signal.addEventListener("abort", abortUpstream, { once: true });
       const upstream = await openChatStream(copilot, {
         model: prepared.resolvedModel,
         body: prepared.bytes,
         stream: true,
         hasVisionInput: prepared.hasVisionInput,
+        connectTimeoutMs: scope.config.timeouts.connectMs,
         firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
-        signal: scope.signal,
+        signal: upstreamController.signal,
       });
       assertUpstreamSuccess(upstream.status, upstream.headers);
       if (!isEventStream(upstream.headers)) {
@@ -122,9 +128,12 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       }
 
       const frames = parseChatSse(upstream.bytes, scope.config.limits.sseEventBytes);
-      const first = await withOperationTimeout(scope, scope.config.timeouts.firstByteMs, () => nextFrame(frames));
+      const first = await nextFrameWithTimeout(scope, frames, scope.config.timeouts.firstByteMs, () => {
+        upstreamController.abort(new GatewayFailureError({ kind: "upstream_timeout" }));
+      });
       if (first.kind === "error") {
-        await frames.return(undefined);
+        upstreamController.abort();
+        void frames.return(undefined).catch(() => undefined);
         throw new GatewayFailureError({ kind: "invalid_upstream_response" });
       }
 
@@ -135,6 +144,8 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         first,
         frames,
         scope,
+        abortUpstream,
+        releaseUpstreamAbort: () => scope.signal.removeEventListener("abort", abortUpstream),
         dependencies,
         accountId: account.accountId,
         resolvedModel: resolved.upstreamModel,
@@ -261,6 +272,27 @@ async function completeChat(
     return await copilot.completeChat(request);
   } catch (error: unknown) {
     throw upstreamCallFailure(error);
+  }
+}
+
+async function bindCopilot(
+  copilot: CopilotBackend,
+  account: Awaited<ReturnType<AccountDirectory["bindDefault"]>>,
+  scope: Readonly<RequestScope>,
+): Promise<BoundCopilot> {
+  try {
+    return await withOperationTimeout(scope, scope.config.timeouts.connectMs, (signal) => copilot.bind(account, signal));
+  } catch (error: unknown) {
+    if (error instanceof GatewayFailureError) {
+      throw error;
+    }
+    if (error instanceof TokenRefreshError) {
+      throw new GatewayFailureError({ kind: mapTokenRefreshError(error), cause: error });
+    }
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new GatewayFailureError({ kind: "aborted" });
+    }
+    throw new GatewayFailureError({ kind: "upstream_network", cause: error });
   }
 }
 
@@ -438,6 +470,37 @@ async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>): Promise<ChatS
   }
 }
 
+async function nextFrameWithTimeout(
+  scope: Readonly<RequestScope>,
+  frames: AsyncGenerator<ChatStreamFrame>,
+  ms: number,
+  onTimeout: () => void,
+): Promise<ChatStreamFrame> {
+  try {
+    return await withOperationTimeout(scope, ms, async (signal) => {
+      if (signal.aborted) {
+        throw new GatewayFailureError({ kind: "upstream_timeout" });
+      }
+      const frame = await Promise.race([
+        nextFrame(frames),
+        new Promise<ChatStreamFrame>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new GatewayFailureError({ kind: "upstream_timeout" })), { once: true });
+        }),
+      ]);
+      if (signal.aborted) {
+        throw new GatewayFailureError({ kind: "upstream_timeout" });
+      }
+      return frame;
+    });
+  } catch (error: unknown) {
+    if (error instanceof GatewayFailureError && error.failure.kind === "upstream_timeout") {
+      onTimeout();
+      void frames.return(undefined).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
 function openAiChatStreamResponse(input: {
   readonly status: number;
   readonly signal: AbortSignal;
@@ -445,6 +508,8 @@ function openAiChatStreamResponse(input: {
   readonly first: ChatStreamFrame;
   readonly frames: AsyncGenerator<ChatStreamFrame>;
   readonly scope: Readonly<RequestScope>;
+  readonly abortUpstream: () => void;
+  readonly releaseUpstreamAbort: () => void;
   readonly dependencies: OpenAiChatRouteDependencies;
   readonly accountId: string;
   readonly resolvedModel: string;
@@ -458,6 +523,7 @@ function openAiChatStreamResponse(input: {
       return;
     }
     closed = true;
+    input.releaseUpstreamAbort();
     void input.frames.return(undefined).catch(() => undefined);
   };
   const stream = new ReadableStream<Uint8Array>({
@@ -468,7 +534,7 @@ function openAiChatStreamResponse(input: {
         return;
       }
       try {
-        const frame = pending ?? await withOperationTimeout(input.scope, input.scope.config.timeouts.streamIdleMs, () => nextFrame(input.frames));
+        const frame = pending ?? await nextFrameWithTimeout(input.scope, input.frames, input.scope.config.timeouts.streamIdleMs, input.abortUpstream);
         pending = undefined;
         if (frame.kind === "chunk") {
           usage = mergeUsageObservation(usage, usageObservationFromPayload(frame.chunk.payload));

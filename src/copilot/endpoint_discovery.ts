@@ -14,7 +14,7 @@ const locks = new Map<string, Promise<void>>();
 
 export async function discoverEndpoint(
   account: BoundAccount,
-  fetchDiscovery: (account: BoundAccount) => Promise<string | null>,
+  fetchDiscovery: (account: BoundAccount, signal?: AbortSignal) => Promise<string | null>,
   signal?: AbortSignal,
 ): Promise<DiscoveredEndpoint> {
   throwIfAborted(signal);
@@ -35,7 +35,7 @@ export async function discoverEndpoint(
     if (again !== undefined) {
       return { endpoint: again, cached: true };
     }
-    const discovered = await fetchDiscovery(account);
+    const discovered = await fetchDiscovery(account, signal);
     throwIfAborted(signal);
     const endpoint = discovered ?? fallbackEndpoint(account);
     cache.set(account.accountId, endpoint);

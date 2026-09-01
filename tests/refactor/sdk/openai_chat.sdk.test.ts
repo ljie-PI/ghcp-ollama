@@ -2,8 +2,10 @@ import { describe, it } from "vitest";
 import OpenAI from "openai";
 import { assertOfflineSdkTestsEnabled } from "./harness.js";
 
+const sdkIt = process.env.GHC_GATEWAY_SDK_TESTS === "1" ? it : it.skip;
+
 describe("RM-09 official OpenAI Chat SDK", () => {
-  it.skip("manual-only: Chat Completions non-stream, stream, error class/request ID, and cancellation", async () => {
+  sdkIt("manual-only: Chat Completions non-stream, stream, error class/request ID, and cancellation", async () => {
     assertOfflineSdkTestsEnabled();
     const client = new OpenAI({
       apiKey: "unused-by-ghc-gateway",
