@@ -59,4 +59,13 @@ describe("RM-07 Chat SSE", () => {
     }
     expect(frames.map((frame) => frame.kind)).toEqual(["error"]);
   });
+
+  it("accepts a CR-only SSE event exactly at the event limit", async () => {
+    const first = "data: {\"choices\":[]}\r\r";
+    const frames = [];
+    for await (const frame of parseChatSse(splitBytes(`${first}data: [DONE]\r\r`, 1), new TextEncoder().encode(first).byteLength)) {
+      frames.push(frame);
+    }
+    expect(frames.map((frame) => frame.kind)).toEqual(["chunk", "done"]);
+  });
 });

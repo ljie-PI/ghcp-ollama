@@ -211,4 +211,36 @@ describe("RM-07 Copilot transport", () => {
     expect(response.status).toBe(429);
     expect(canceled).toBe(true);
   });
+
+  it("times out when non-stream headers arrive but body bytes do not", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
+        pull(): void {
+          // keep headers open without body bytes
+        },
+      }), { status: 200 }),
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    await expect(copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 100,
+      firstByteTimeoutMs: 1,
+      signal: new AbortController().signal,
+    })).rejects.toThrow(/upstream timeout/u);
+  });
 });

@@ -68,7 +68,7 @@ export class HttpCopilotBackend implements CopilotBackend {
       await response.cancel();
       return { status: response.status, headers: response.headers, body: new Uint8Array() };
     }
-    const bytes = await readResponseBody(response.bytes, maxBodyBytes, signal);
+    const bytes = await readResponseBody(response.bytes, maxBodyBytes, firstByteTimeoutMs, signal);
     return { status: response.status, headers: response.headers, body: bytes };
   }
 
@@ -286,18 +286,42 @@ function chatExtraHeaders(hasVisionInput: boolean): Headers {
 
 async function* empty(): AsyncIterable<Uint8Array> {}
 
-async function readResponseBody(source: AsyncIterable<Uint8Array>, maxBodyBytes: number | undefined, signal: AbortSignal): Promise<Uint8Array> {
+async function readResponseBody(
+  source: AsyncIterable<Uint8Array>,
+  maxBodyBytes: number | undefined,
+  firstByteTimeoutMs: number | undefined,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const iterator = source[Symbol.asyncIterator]();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for await (const chunk of source) {
-    if (signal.aborted) {
-      throw new DOMException("aborted", "AbortError");
+  let seenBodyBytes = false;
+  try {
+    for (;;) {
+      const next = seenBodyBytes || firstByteTimeoutMs === undefined
+        ? await iterator.next()
+        : await firstBodyChunk(iterator, firstByteTimeoutMs, signal);
+      if (next.done === true) {
+        break;
+      }
+      const chunk = next.value;
+      if (signal.aborted) {
+        throw new DOMException("aborted", "AbortError");
+      }
+      seenBodyBytes = true;
+      total += chunk.byteLength;
+      if (maxBodyBytes !== undefined && total > maxBodyBytes) {
+        throw new UpstreamBodyLimitError();
+      }
+      chunks.push(chunk);
     }
-    total += chunk.byteLength;
-    if (maxBodyBytes !== undefined && total > maxBodyBytes) {
-      throw new UpstreamBodyLimitError();
+  } catch (error: unknown) {
+    void iterator.return?.().catch(() => undefined);
+    throw error;
+  } finally {
+    if (!seenBodyBytes) {
+      void iterator.return?.().catch(() => undefined);
     }
-    chunks.push(chunk);
   }
   const result = new Uint8Array(total);
   let offset = 0;
@@ -306,6 +330,32 @@ async function readResponseBody(source: AsyncIterable<Uint8Array>, maxBodyBytes:
     offset += chunk.byteLength;
   }
   return result;
+}
+
+async function firstBodyChunk(
+  iterator: AsyncIterator<Uint8Array>,
+  ms: number,
+  signal: AbortSignal,
+): Promise<IteratorResult<Uint8Array>> {
+  let clear = (): void => undefined;
+  const timeout = new Promise<IteratorResult<Uint8Array>>((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => reject(new UpstreamTimeoutError()), ms);
+    const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    clear = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    };
+  });
+  try {
+    return await Promise.race([iterator.next(), timeout]);
+  } finally {
+    clear();
+  }
 }
 
 async function* iterateWebBody(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {

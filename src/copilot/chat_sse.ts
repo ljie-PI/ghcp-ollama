@@ -44,18 +44,19 @@ export async function* parseChatSse(
   };
 
   const pushByte = function* (byte: number): Generator<ChatStreamFrame> {
-    eventBytes += 1;
-    if (eventBytes > eventLimitBytes) {
-      throw new ChatSseError("event_too_large", "SSE event exceeds limit");
-    }
     if (pendingCr) {
       pendingCr = false;
       if (byte === 0x0a) {
+        countEventByte();
         yield* finishLine();
         return;
       }
       yield* finishLine();
+      if (terminal) {
+        return;
+      }
     }
+    countEventByte();
     if (byte === 0x0d) {
       pendingCr = true;
       return;
@@ -65,6 +66,13 @@ export async function* parseChatSse(
       return;
     }
     lineBytes.push(byte);
+  };
+
+  const countEventByte = (): void => {
+    eventBytes += 1;
+    if (eventBytes > eventLimitBytes) {
+      throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+    }
   };
 
   for await (const part of bytes) {
