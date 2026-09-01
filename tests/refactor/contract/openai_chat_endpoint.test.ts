@@ -73,6 +73,7 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   readonly nowMs?: () => number;
   readonly runtime?: RuntimeConfigSnapshot;
   readonly capiError?: CapiFetchError;
+  readonly throwingPreferences?: boolean;
 } = {}): Promise<{ readonly gw: Gateway; readonly close: () => Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-openai-chat-"));
   const database = openDatabase({
@@ -116,6 +117,15 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
     directory: accounts,
     catalog,
     copilot: backend,
+    ...(options.throwingPreferences
+      ? {
+        preferences: {
+          get: () => {
+            throw new Error("preference state must not be read");
+          },
+        },
+      }
+      : {}),
     ...(options.usageUpdates === undefined
       ? {}
       : {
@@ -189,6 +199,7 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         now += 5;
         return now;
       },
+      throwingPreferences: true,
     });
     try {
       const response = await gw.fetch(jsonRequest([
@@ -455,6 +466,36 @@ describe("RM-09 OpenAI Chat endpoint", () => {
       const first = await reader?.read();
       expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[]}\n\n");
       await expect(reader?.read()).rejects.toThrow(/stream error/u);
+    } finally {
+      await close();
+    }
+  });
+
+  it("cancels invalid 2xx stream bodies before returning a pre-commit error", async () => {
+    let canceled = false;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        bytes: {
+          async *[Symbol.asyncIterator]() {
+            try {
+              yield encoder.encode("{}");
+            } finally {
+              canceled = true;
+            }
+          },
+        },
+        cancel: async () => {
+          canceled = true;
+        },
+      },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      expect(response.status).toBe(502);
+      expect(canceled).toBe(true);
     } finally {
       await close();
     }

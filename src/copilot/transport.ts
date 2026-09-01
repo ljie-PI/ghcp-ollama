@@ -92,6 +92,7 @@ export class HttpCopilotBackend implements CopilotBackend {
       status: response.status,
       headers: response.headers,
       bytes: response.bytes,
+      cancel: response.cancel,
     };
   }
 }

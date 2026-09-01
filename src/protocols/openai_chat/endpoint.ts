@@ -28,7 +28,7 @@ import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBod
 export interface OpenAiChatRouteDependencies {
   readonly directory: AccountDirectory;
   readonly catalog: CopilotModelCatalog;
-  readonly preferences?: AccountModelPreferences;
+  readonly preferences?: Pick<AccountModelPreferences, "get">;
   readonly copilot: CopilotBackend;
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
   readonly nowMs?: () => number;
@@ -69,7 +69,9 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       const decoded = decodeOpenAiChatRequest(request.body);
       const account = await bindAccount(dependencies.directory, scope.signal);
       const catalog = await loadCatalog(dependencies.catalog, account.accountId, scope.signal);
-      const preference = (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId);
+      const preference = decoded.requestedModel === undefined
+        ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
+        : null;
       const resolved = resolveOpenAiChatModel(decoded, catalog, preference);
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
@@ -125,6 +127,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       assertUpstreamSuccess(upstream.status, upstream.headers);
       if (!isEventStream(upstream.headers)) {
         upstreamController.abort();
+        await upstream.cancel?.();
         throw new GatewayFailureError({ kind: "invalid_upstream_response" });
       }
 
