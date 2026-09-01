@@ -23,7 +23,7 @@ export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
   const stream = optionalBoolean(body, "stream", false, false);
   const store = optionalBoolean(body, "store", true, true);
   const input = memberValues(body, "input")[0];
-  const previous = optionalString(body, "previous_response_id");
+  const previous = optionalExactString(body, "previous_response_id");
 
   return {
     body,
@@ -53,7 +53,7 @@ function optionalModel(body: WireJsonObject): string | undefined {
   return value;
 }
 
-function optionalString(body: WireJsonObject, field: string): string | undefined {
+function optionalExactString(body: WireJsonObject, field: string): string | undefined {
   const value = memberValues(body, field)[0];
   if (value === undefined || value === null) {
     return undefined;
@@ -61,8 +61,7 @@ function optionalString(body: WireJsonObject, field: string): string | undefined
   if (typeof value !== "string") {
     throw new ResponsesRequestDecodeError(field, `Responses request field ${field} must be a string or null`);
   }
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? undefined : trimmed;
+  return value;
 }
 
 function optionalBoolean(body: WireJsonObject, field: string, defaultValue: boolean, allowNull: boolean): boolean {

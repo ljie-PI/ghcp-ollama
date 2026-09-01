@@ -17,7 +17,7 @@ import {
   type WireJsonObject,
 } from "../../../src/serialization/wire_json.js";
 
-const LIMITS = { maxBytes: 8192, maxDepth: 32 } as const;
+const LIMITS = { maxBytes: 8192, maxDepth: 64 } as const;
 
 function objectFromJson(json: string): WireJsonObject {
   const value = parseWireJson(new TextEncoder().encode(json), LIMITS);
@@ -194,7 +194,7 @@ describe("RM-12 Responses history enrichment", () => {
         "{\"type\":\"custom_tool_call\",\"call_id\":\"custom\",\"name\":\"render\",\"input\":\"card\",\"extra\":\"drop\"}",
         "]",
       ].join("")), new AbortController().signal);
-      expect(store.inspect().totalCalls).toBe(2);
+      expect(store.inspect().count).toBe(1);
 
       const request = decodeResponsesRequest(objectFromJson([
         "{\"model\":\"gpt\",\"previous_response_id\":\"resp_previous\",",
@@ -229,6 +229,46 @@ describe("RM-12 Responses history enrichment", () => {
 
       expect(enriched).toBe(request);
       expect(isWireJsonObject(enriched.input)).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("does not trim previous response IDs before scoped lookup", async () => {
+    const { database, store } = history();
+    try {
+      await store.record(callRecord("resp_previous", [
+        "[{\"type\":\"function_call\",\"call_id\":\"ambiguous\",\"name\":\"scoped\",\"arguments\":\"{}\"}]",
+      ].join("")), new AbortController().signal);
+      await store.record(callRecord("resp_other", [
+        "[{\"type\":\"function_call\",\"call_id\":\"ambiguous\",\"name\":\"other\",\"arguments\":\"{}\"}]",
+      ].join("")), new AbortController().signal);
+
+      const enriched = await store.enrich(decodeResponsesRequest(objectFromJson([
+        "{\"model\":\"gpt\",\"previous_response_id\":\" resp_previous \",",
+        "\"input\":{\"type\":\"function_call_output\",\"call_id\":\"ambiguous\",\"output\":\"ok\"}}",
+      ].join(""))), new AbortController().signal);
+
+      expect(typesFromInput(enriched.input)).toEqual(["function_call_output"]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("recovers history stored at the accepted WireJson depth", async () => {
+    const { database, store } = history();
+    try {
+      const nested = "{\"x\":".repeat(40) + "\"leaf\"" + "}".repeat(40);
+      await store.record(callRecord("resp_deep", [
+        "[{\"type\":\"function_call\",\"call_id\":\"deep\",\"name\":\"fn\",\"arguments\":",
+        nested,
+        "}]",
+      ].join("")), new AbortController().signal);
+      const enriched = await store.enrich(decodeResponsesRequest(objectFromJson([
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",",
+        "\"call_id\":\"deep\",\"output\":\"ok\"}}",
+      ].join(""))), new AbortController().signal);
+      expect(typesFromInput(enriched.input)).toEqual(["function_call", "function_call_output"]);
     } finally {
       database.close();
     }

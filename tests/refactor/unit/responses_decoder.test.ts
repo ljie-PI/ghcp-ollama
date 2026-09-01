@@ -76,6 +76,10 @@ describe("RM-12 Responses request decoder", () => {
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"store\":false}")).store).toBe(false);
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"resp_1\"}"))
       .previousResponseId).toBe("resp_1");
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\" resp_1 \"}"))
+      .previousResponseId).toBe(" resp_1 ");
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"\"}"))
+      .previousResponseId).toBe("");
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":\"true\"}").field).toBe("stream");
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":null}").field).toBe("stream");
     expect(expectDecodeError("{\"model\":\"gpt\",\"store\":\"false\"}").field).toBe("store");

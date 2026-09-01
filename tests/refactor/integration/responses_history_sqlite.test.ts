@@ -93,7 +93,7 @@ describe("RM-12 Responses history SQLite", () => {
       for (let index = 0; index < 512; index += 1) {
         await first.store.record(record(`resp_${index}`, `call_${index}`), new AbortController().signal);
       }
-      expect(first.store.inspect().totalResponses).toBe(512);
+      expect(first.store.inspect().count).toBe(512);
       closeDatabase(first.database);
 
       now += 1_000;
@@ -101,7 +101,7 @@ describe("RM-12 Responses history SQLite", () => {
       try {
         expect(await enrichCallName(reopened.store, "call_first")).toBeUndefined();
         expect(await enrichCallName(reopened.store, "call_511")).toBe("fn");
-        expect(reopened.store.inspect().nextInsertionSeq).toBe(514);
+        expect(reopened.store.inspect().count).toBe(512);
       } finally {
         closeDatabase(reopened.database);
       }
@@ -121,13 +121,13 @@ describe("RM-12 Responses history SQLite", () => {
       const afterLookupRevision = first.store.inspect().revision;
       expect(afterLookupRevision).toBe(2);
       await first.store.record(record("resp_new", "call_new"), new AbortController().signal);
-      expect(first.store.inspect().totalResponses).toBe(1);
+      expect(first.store.inspect().count).toBe(1);
       closeDatabase(first.database);
 
       now += 7 * DAY_MS + 1;
       const reopened = openHistory(file, () => now);
       try {
-        expect(reopened.store.inspect().totalResponses).toBe(0);
+        expect(reopened.store.inspect().count).toBe(0);
         expect(reopened.store.inspect().revision).toBe(4);
       } finally {
         closeDatabase(reopened.database);
@@ -146,12 +146,19 @@ describe("RM-12 Responses history SQLite", () => {
       await opened.store.record(record("resp_one", "call_one"), new AbortController().signal);
       const afterRecord = opened.store.inspect();
       expect(afterRecord.revision).toBe(1);
+      expect(afterRecord.count).toBe(1);
+      expect(afterRecord.oldestAt).toBe(1_700_000_000_000);
+      expect(afterRecord.newestAt).toBe(1_700_000_000_000);
+      expect(afterRecord.ttlDays).toBe(7);
+      expect(afterRecord.maxResponses).toBe(512);
       expect(() => opened.store.clear(0)).toThrow(ResponsesHistoryAdminError);
       const afterClear = opened.store.clear(afterRecord.revision);
       expect(afterClear.revision).toBe(2);
-      expect(afterClear.totalResponses).toBe(0);
+      expect(afterClear.count).toBe(0);
+      expect(afterClear.oldestAt).toBeNull();
+      expect(afterClear.newestAt).toBeNull();
       await opened.store.record(record("resp_two", "call_two"), new AbortController().signal);
-      expect(opened.store.inspect().nextInsertionSeq).toBe(3);
+      expect(opened.store.inspect().count).toBe(1);
     } finally {
       closeDatabase(opened.database);
       await rm(path.dirname(file), { recursive: true, force: true });
@@ -174,7 +181,7 @@ describe("RM-12 Responses history SQLite", () => {
         }],
       }, new AbortController().signal)).rejects.toThrow();
       expect(opened.store.inspect().revision).toBe(0);
-      expect(opened.store.inspect().totalResponses).toBe(0);
+      expect(opened.store.inspect().count).toBe(0);
 
       const controller = new AbortController();
       controller.abort();
@@ -182,7 +189,7 @@ describe("RM-12 Responses history SQLite", () => {
         .rejects.toThrow(/aborted/u);
       await expect(opened.store.enrich(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\"}")), controller.signal))
         .rejects.toThrow(/aborted/u);
-      expect(opened.store.inspect().totalResponses).toBe(0);
+      expect(opened.store.inspect().count).toBe(0);
     } finally {
       closeDatabase(opened.database);
       await rm(path.dirname(file), { recursive: true, force: true });

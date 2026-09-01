@@ -60,11 +60,11 @@ export interface ResponsesHistoryRecord {
 
 export interface ResponsesHistoryInspection {
   readonly revision: number;
-  readonly totalResponses: number;
-  readonly totalCalls: number;
-  readonly nextInsertionSeq: number;
-  readonly oldestInsertionSeq?: number;
-  readonly newestInsertionSeq?: number;
+  readonly count: number;
+  readonly oldestAt: number | null;
+  readonly newestAt: number | null;
+  readonly ttlDays: number;
+  readonly maxResponses: number;
 }
 
 export class ResponsesHistoryAdminError extends Error {
@@ -235,23 +235,21 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     const counts = this.database.prepare(
       `SELECT
          (SELECT COUNT(*) FROM responses) AS total_responses,
-         (SELECT COUNT(*) FROM response_calls) AS total_calls,
-         (SELECT MIN(insertion_seq) FROM responses) AS oldest_insertion_seq,
-         (SELECT MAX(insertion_seq) FROM responses) AS newest_insertion_seq`,
+         (SELECT MIN(created_at_ms) FROM responses) AS oldest_at_ms,
+         (SELECT MAX(created_at_ms) FROM responses) AS newest_at_ms`,
     ).get() as {
       total_responses: number;
-      total_calls: number;
-      oldest_insertion_seq: number | null;
-      newest_insertion_seq: number | null;
+      oldest_at_ms: number | null;
+      newest_at_ms: number | null;
     };
 
     return {
       revision: state.revision,
-      totalResponses: counts.total_responses,
-      totalCalls: counts.total_calls,
-      nextInsertionSeq: state.next_insertion_seq,
-      ...(counts.oldest_insertion_seq === null ? {} : { oldestInsertionSeq: counts.oldest_insertion_seq }),
-      ...(counts.newest_insertion_seq === null ? {} : { newestInsertionSeq: counts.newest_insertion_seq }),
+      count: counts.total_responses,
+      oldestAt: counts.oldest_at_ms,
+      newestAt: counts.newest_at_ms,
+      ttlDays: this.ttlMs / DAY_MS,
+      maxResponses: this.maxResponses,
     };
   }
 
@@ -400,7 +398,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       const itemBytes = new TextEncoder().encode(row.item_json);
       const item = parseWireJson(itemBytes, {
         maxBytes: Math.max(itemBytes.byteLength, 1),
-        maxDepth: 32,
+        maxDepth: 64,
       });
       if (!isWireJsonObject(item)) {
         throw new Error("Responses history stored call item must be an object");
