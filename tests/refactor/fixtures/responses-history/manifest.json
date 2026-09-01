@@ -1,0 +1,10 @@
+[
+  {
+    "caseId": "responses-history.enrich.previous-response",
+    "owner": "RM-12",
+    "source": "docs/codex_response_to_chat_completions.md#8-request-history",
+    "input": "previous-response.input.json",
+    "expected": "previous-response.expected.json",
+    "encoder": "responses-history"
+  }
+]
