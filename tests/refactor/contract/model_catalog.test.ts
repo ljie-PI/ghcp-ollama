@@ -8,6 +8,7 @@ import {
   CopilotModelCatalog,
   parseCapiModels,
 } from "../../../src/copilot/model_catalog.js";
+import { CapiFetchError, HttpCopilotModelsSource } from "../../../src/copilot/models_source.js";
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
 import { createGateway } from "../../../src/gateway/create_gateway.js";
@@ -70,6 +71,37 @@ describe("RM-08 CAPI parse and cache", () => {
     expect(b.models).toEqual([]);
     expect(c.accountId).toBe("github.com/2");
     expect(seen).toEqual(["github.com/1", "github.com/2"]);
+  });
+
+  it("maps CAPI redirects, Retry-After, body limits, and timeouts safely", async () => {
+    const source = (fetchImpl: typeof fetch) => new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      fetchImpl,
+      { connectTimeoutMs: 1, totalTimeoutMs: 20, bodyLimitBytes: 32 },
+    );
+
+    await expect(source(async () => new Response(null, { status: 302 })).fetch("github.com/1", new AbortController().signal))
+      .rejects.toMatchObject({ status: 502 });
+
+    await expect(source(async () => new Response("{}", {
+      status: 429,
+      headers: { "retry-after": "120, 240" },
+    })).fetch("github.com/1", new AbortController().signal))
+      .rejects.toMatchObject({ status: 429, retryAfter: undefined });
+
+    await expect(source(async () => new Response("{}", {
+      status: 429,
+      headers: { "retry-after": "Sun, 06 Nov 1994 08:49:37 GMT" },
+    })).fetch("github.com/1", new AbortController().signal))
+      .rejects.toMatchObject({ status: 429, retryAfter: "Sun, 06 Nov 1994 08:49:37 GMT" });
+
+    await expect(source(async () => new Response(`{"data":"${"x".repeat(40)}"}`)).fetch("github.com/1", new AbortController().signal))
+      .rejects.toBeInstanceOf(CapiFetchError);
+
+    await expect(source(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return new Response("{\"data\":[]}");
+    }).fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
   });
 });
 
