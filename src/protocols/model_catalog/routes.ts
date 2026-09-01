@@ -96,6 +96,15 @@ async function loadCatalog(
     return catalog;
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {
+      if (error.failureKind === "upstream_timeout") {
+        throw new GatewayFailureError({ kind: "upstream_timeout", cause: error });
+      }
+      if (error.failureKind === "upstream_network") {
+        throw new GatewayFailureError({ kind: "upstream_network", cause: error });
+      }
+      if (error.failureKind === "invalid_upstream_response") {
+        throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+      }
       throw new GatewayFailureError({
         kind: "upstream_http",
         status: error.status,
