@@ -183,6 +183,33 @@ describe("RM-08 CAPI parse and cache", () => {
     }
   });
 
+  it("strips sensitive CAPI headers on cross-host redirects", async () => {
+    let calls = 0;
+    let redirectedHeaders: Headers | undefined;
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async (_input, init) => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: "https://copilot.example.com/models" },
+          });
+        }
+        redirectedHeaders = new Headers(init?.headers);
+        return new Response("{\"data\":[]}", { status: 200 });
+      },
+      { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 32 },
+    );
+    await source.fetch("github.com/1", new AbortController().signal);
+    expect(calls).toBe(2);
+    expect(redirectedHeaders?.has("authorization")).toBe(false);
+    expect(redirectedHeaders?.has("cookie")).toBe(false);
+    expect(redirectedHeaders?.has("cookie2")).toBe(false);
+    expect(redirectedHeaders?.has("proxy-authorization")).toBe(false);
+    expect(redirectedHeaders?.has("www-authenticate")).toBe(false);
+  });
+
   it("enforces timeout on the default Undici request path", async () => {
     const server = createServer((_request, response) => {
       setTimeout(() => {
