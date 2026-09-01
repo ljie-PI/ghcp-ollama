@@ -124,13 +124,25 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       });
       assertUpstreamSuccess(upstream.status, upstream.headers);
       if (!isEventStream(upstream.headers)) {
+        upstreamController.abort();
         throw new GatewayFailureError({ kind: "invalid_upstream_response" });
       }
 
-      const frames = parseChatSse(upstream.bytes, scope.config.limits.sseEventBytes);
-      const first = await nextFrameWithTimeout(scope, frames, scope.config.timeouts.firstByteMs, () => {
-        upstreamController.abort(new GatewayFailureError({ kind: "upstream_timeout" }));
-      });
+      const frames = parseChatSse(withBodyTimeouts(
+        upstream.bytes,
+        scope,
+        scope.config.timeouts.firstByteMs,
+        scope.config.timeouts.streamIdleMs,
+        () => upstreamController.abort(new GatewayFailureError({ kind: "upstream_timeout" })),
+      ), scope.config.limits.sseEventBytes);
+      let first: ChatStreamFrame;
+      try {
+        first = await nextFrame(frames);
+      } catch (error: unknown) {
+        upstreamController.abort();
+        void frames.return(undefined).catch(() => undefined);
+        throw error;
+      }
       if (first.kind === "error") {
         upstreamController.abort();
         void frames.return(undefined).catch(() => undefined);
@@ -470,35 +482,50 @@ async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>): Promise<ChatS
   }
 }
 
-async function nextFrameWithTimeout(
+async function* withBodyTimeouts(
+  bytes: AsyncIterable<Uint8Array>,
   scope: Readonly<RequestScope>,
-  frames: AsyncGenerator<ChatStreamFrame>,
-  ms: number,
+  firstByteMs: number,
+  idleMs: number,
   onTimeout: () => void,
-): Promise<ChatStreamFrame> {
+): AsyncIterable<Uint8Array> {
+  const iterator = bytes[Symbol.asyncIterator]();
+  let seenBytes = false;
   try {
-    return await withOperationTimeout(scope, ms, async (signal) => {
-      if (signal.aborted) {
-        throw new GatewayFailureError({ kind: "upstream_timeout" });
-      }
-      const frame = await Promise.race([
-        nextFrame(frames),
-        new Promise<ChatStreamFrame>((_resolve, reject) => {
-          signal.addEventListener("abort", () => reject(new GatewayFailureError({ kind: "upstream_timeout" })), { once: true });
-        }),
+    for (;;) {
+      const next = await Promise.race([
+        iterator.next(),
+        timeoutPromise(seenBytes ? idleMs : firstByteMs, scope.signal),
       ]);
-      if (signal.aborted) {
-        throw new GatewayFailureError({ kind: "upstream_timeout" });
+      if (next.done === true) {
+        return;
       }
-      return frame;
-    });
+      seenBytes = true;
+      yield next.value;
+    }
   } catch (error: unknown) {
     if (error instanceof GatewayFailureError && error.failure.kind === "upstream_timeout") {
       onTimeout();
-      void frames.return(undefined).catch(() => undefined);
+      void iterator.return?.().catch(() => undefined);
     }
     throw error;
+  } finally {
+    void iterator.return?.().catch(() => undefined);
   }
+}
+
+function timeoutPromise(ms: number, signal: AbortSignal): Promise<IteratorResult<Uint8Array>> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new GatewayFailureError({ kind: "aborted" }));
+      return;
+    }
+    const timer = setTimeout(() => reject(new GatewayFailureError({ kind: "upstream_timeout" })), ms);
+    signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new GatewayFailureError({ kind: "aborted" }));
+    }, { once: true });
+  });
 }
 
 function openAiChatStreamResponse(input: {
@@ -534,7 +561,7 @@ function openAiChatStreamResponse(input: {
         return;
       }
       try {
-        const frame = pending ?? await nextFrameWithTimeout(input.scope, input.frames, input.scope.config.timeouts.streamIdleMs, input.abortUpstream);
+        const frame = pending ?? await nextFrame(input.frames);
         pending = undefined;
         if (frame.kind === "chunk") {
           usage = mergeUsageObservation(usage, usageObservationFromPayload(frame.chunk.payload));

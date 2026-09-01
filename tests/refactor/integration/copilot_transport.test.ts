@@ -139,4 +139,70 @@ describe("RM-07 Copilot transport", () => {
     expect(headers.get("copilot-vision-request")).toBe("true");
     expect(headers.has("authorization")).toBe(true);
   });
+
+  it("does not shorten first-byte timeout to the connect timeout", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    const response = await copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1,
+      firstByteTimeoutMs: 100,
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it("cancels non-2xx upstream bodies before returning safe errors", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    let canceled = false;
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => null,
+      fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
+        cancel(): void {
+          canceled = true;
+        },
+      }), { status: 429 }),
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    const response = await copilot.completeChat({
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      stream: false,
+      hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      firstByteTimeoutMs: 100,
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(429);
+    expect(canceled).toBe(true);
+  });
 });

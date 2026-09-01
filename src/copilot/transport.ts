@@ -61,6 +61,7 @@ export class HttpCopilotBackend implements CopilotBackend {
   ): Promise<ChatResponse & UpstreamByteResponse> {
     const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, connectTimeoutMs, firstByteTimeoutMs, extraHeaders);
     if (response.status < 200 || response.status >= 300) {
+      await cancelResponseBody(response);
       return { status: response.status, headers: response.headers, body: new Uint8Array() };
     }
     const bytes = await readResponseBody(response, maxBodyBytes, signal);
@@ -78,6 +79,9 @@ export class HttpCopilotBackend implements CopilotBackend {
     extraHeaders?: Headers,
   ): Promise<UpstreamByteStream> {
     const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, connectTimeoutMs, firstByteTimeoutMs, extraHeaders);
+    if (response.status < 200 || response.status >= 300) {
+      await cancelResponseBody(response);
+    }
     const stream = response.body;
     return {
       status: response.status,
@@ -142,7 +146,7 @@ function responseStartTimeout(
   }
   const controller = new AbortController();
   let timedOut = false;
-  const ms = Math.min(connectTimeoutMs ?? Number.POSITIVE_INFINITY, firstByteTimeoutMs ?? Number.POSITIVE_INFINITY);
+  const ms = firstByteTimeoutMs ?? connectTimeoutMs ?? 0;
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort(new UpstreamTimeoutError());
@@ -152,6 +156,10 @@ function responseStartTimeout(
     clear: () => clearTimeout(timer),
     timedOut: () => timedOut,
   };
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
 }
 
 export function mapTokenRefreshError(error: TokenRefreshError): "authentication" | "upstream_network" | "upstream_timeout" {
