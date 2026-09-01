@@ -184,9 +184,11 @@ describe("RM-06 account directory", () => {
         secret: { generation: 0, githubToken: "secret" },
       });
       await expect(accounts.remove(bound.accountId, 1)).rejects.toThrow(/credential removal failed/u);
-      expect(accounts.list()[0]?.state).toBe("removing");
+      const removing = accounts.list()[0];
+      expect(removing?.state).toBe("removing");
+      expect(removing?.revision).toBe(2);
 
-      const removed = await accounts.remove(bound.accountId, 1);
+      const removed = await accounts.remove(bound.accountId, 2);
       expect(removed.state).toBe("removed");
       expect(await credentials.readGeneration(bound.accountId, 1)).toBeNull();
     } finally {

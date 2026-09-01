@@ -169,7 +169,7 @@ export class AccountDirectory {
     if (row === undefined) {
       throw new AccountDirectoryError("not_found", "account not found");
     }
-    if (row.credential_state !== "removing" && row.revision !== expectedRevision) {
+    if (row.revision !== expectedRevision) {
       throw new AccountDirectoryError("revision_conflict", "account revision conflict");
     }
     if (row.credential_state === "removed") {
