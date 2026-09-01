@@ -72,6 +72,7 @@ export class ScriptedCopilotBackend implements CopilotBackend {
           status: 200,
           headers: new Headers({ "content-type": "text/event-stream" }),
           bytes: asAsync(stream ?? []),
+          cancel: async () => undefined,
         };
       },
       async completeResponses() {
@@ -87,6 +88,7 @@ export class ScriptedCopilotBackend implements CopilotBackend {
           status: 200,
           headers: new Headers({ "content-type": "text/event-stream" }),
           bytes: asAsync(handlers.responsesStream ?? []),
+          cancel: async () => undefined,
         };
       },
     };

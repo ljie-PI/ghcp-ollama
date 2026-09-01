@@ -43,5 +43,5 @@ export interface UpstreamByteStream {
   readonly status: number;
   readonly headers: Headers;
   readonly bytes: AsyncIterable<Uint8Array>;
-  cancel?(): Promise<void>;
+  cancel(): Promise<void>;
 }

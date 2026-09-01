@@ -279,6 +279,7 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: streamFromText("data: [DONE]\n\n", 1),
+        cancel: async () => undefined,
       },
     });
     const { gw, close } = await openAiGateway(backend);
@@ -305,6 +306,7 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: streamFromText("data: [DONE]\n\n", 8),
+        cancel: async () => undefined,
       },
     });
     const { gw, close } = await openAiGateway(backend);
@@ -521,6 +523,7 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: hangingStreamAfter(": keepalive\n\n"),
+        cancel: async () => undefined,
       },
     });
     const { gw, close } = await openAiGateway(backend, { runtime });
@@ -543,6 +546,7 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: streamFromText(`${exactSseEventText(runtime.limits.sseEventBytes)}data: [DONE]\n\n`, 65_536),
+        cancel: async () => undefined,
       },
     });
     const { gw, close } = await openAiGateway(backend, { runtime });
@@ -563,6 +567,7 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: streamFromText(exactSseEventText(runtime.limits.sseEventBytes + 1), 65_536),
+        cancel: async () => undefined,
       },
     });
     const { gw, close } = await openAiGateway(backend, { runtime });
@@ -582,6 +587,7 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: hangingStreamAfter("data: {\"choices\":[]}\n\n"),
+        cancel: async () => undefined,
       },
     });
     const { gw, close } = await openAiGateway(backend, { runtime });
@@ -635,6 +641,9 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         bytes: cancelableBytes(() => {
           canceled = true;
         }),
+        cancel: async () => {
+          canceled = true;
+        },
       },
     });
     const { gw, close } = await openAiGateway(backend);
@@ -670,6 +679,9 @@ describe("RM-09 OpenAI Chat endpoint", () => {
         bytes: cancelableBytes(() => {
           canceled = true;
         }, encoder.encode("data: {\"choices\":[]}\n\n")),
+        cancel: async () => {
+          canceled = true;
+        },
       },
     });
     const { gw, close } = await openAiGateway(backend);

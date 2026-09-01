@@ -4,6 +4,12 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertNode24 } from "./node_version.js";
+import { outboundHeaders } from "../../src/copilot/backend.js";
+import { parseChatSse } from "../../src/copilot/chat_sse.js";
+import { decodeOpenAiChatRequest, prepareOpenAiChatRequest } from "../../src/protocols/openai_chat/endpoint.js";
+import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "../../src/protocols/openai_chat/wire.js";
+import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
+import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 export interface FixtureManifestEntry {
   readonly caseId: string;
@@ -130,7 +136,7 @@ async function main(): Promise<void> {
 
 async function generateOpenAiChatFixture(entry: FixtureManifestEntry): Promise<void> {
   const expectedPath = path.join(FIXTURE_ROOT, "openai-chat", entry.expected);
-  const expected = expectedOpenAiChatFixture(entry);
+  const expected = await expectedOpenAiChatFixture(entry);
   if (expected !== undefined) {
     await writeFile(expectedPath, expected, "utf8");
     return;
@@ -140,7 +146,7 @@ async function generateOpenAiChatFixture(entry: FixtureManifestEntry): Promise<v
 
 async function verifyOpenAiChatFixtures(entries: readonly FixtureManifestEntry[]): Promise<void> {
   for (const entry of entries.filter((candidate) => candidate.owner === "RM-09")) {
-    const expected = expectedOpenAiChatFixture(entry);
+    const expected = await expectedOpenAiChatFixture(entry);
     if (expected === undefined) {
       throw new Error(`fixture case ${entry.caseId} does not have an RM-09 generator`);
     }
@@ -151,33 +157,136 @@ async function verifyOpenAiChatFixtures(entries: readonly FixtureManifestEntry[]
   }
 }
 
-function expectedOpenAiChatFixture(entry: FixtureManifestEntry): string | undefined {
+async function expectedOpenAiChatFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
+  const inputPath = path.join(FIXTURE_ROOT, "openai-chat", entry.input);
   switch (entry.caseId) {
-  case "openai-chat.request.model-rewrite":
-    return "{\"unknown\":1e+2,\"stream\":true,\"model\":\"resolved\",\"stream_options\":{\"include_usage\":true},\"messages\":[]}";
+  case "openai-chat.request.model-rewrite": {
+    return prepareRequestFixture(await readWireObject(inputPath), "resolved");
+  }
   case "openai-chat.request.capture":
-    return "{\"upstreamUrl\":\"https://api.githubcopilot.com/chat/completions\",\"headers\":{\"content-type\":\"application/json\",\"copilot-integration-id\":\"vscode-chat\",\"editor-version\":\"vscode/1.110.1\",\"editor-plugin-version\":\"copilot-chat/0.38.2\",\"user-agent\":\"GitHubCopilotChat/0.38.2\",\"x-github-api-version\":\"2025-10-01\",\"copilot-vision-request\":\"true\"},\"body\":\"{\\\"model\\\":\\\"gpt\\\",\\\"stream\\\":true,\\\"stream_options\\\":{\\\"include_usage\\\":true},\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":[{\\\"type\\\":\\\"image_url\\\",\\\"image_url\\\":{\\\"url\\\":\\\"data:image/png;base64,aa\\\"}}]}]}\",\"chatCallCount\":1}";
-  case "openai-chat.stream.done":
-    return "data: {\"choices\":[]}\n\ndata: [DONE]\n\n";
+    return requestCaptureFixture(await readWireObject(inputPath));
+  case "openai-chat.stream.done": {
+    return await streamFixture(await readFile(inputPath, "utf8"));
+  }
   case "openai-chat.presenter.model-not-found":
-    return "{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}";
-  case "openai-chat.buffered.success":
-    return "{\"id\":\"chatcmpl_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
+    await readFile(inputPath, "utf8");
+    return serializeOpenAiErrorBody("model not found", "not_found_error");
+  case "openai-chat.buffered.success": {
+    return decodeBytes(serializeWireJson(await readWireObject(inputPath)));
+  }
   case "openai-chat.buffered.limit-boundary":
+    await readFile(inputPath, "utf8");
     return "{\"inclusiveStatus\":200,\"overLimitStatus\":502,\"defaultLimitBytes\":33554432}";
-  case "openai-chat.usage.observation":
-    return "{\"inputTokens\":1,\"outputTokens\":2,\"cacheTokens\":3}";
-  case "openai-chat.model.preferred":
-    return "{\"messages\":[],\"model\":\"preferred\"}";
+  case "openai-chat.usage.observation": {
+    return JSON.stringify(usageFixture(await readWireObject(inputPath)));
+  }
+  case "openai-chat.model.preferred": {
+    return prepareRequestFixture(await readWireObject(inputPath), "preferred");
+  }
   case "openai-chat.stream.truncated":
+    await readFile(inputPath, "utf8");
     return "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}";
   case "openai-chat.stream.limit-boundary":
+    await readFile(inputPath, "utf8");
     return "{\"inclusiveStatus\":200,\"overLimitStatus\":502,\"defaultLimitBytes\":4194304}";
   case "openai-chat.abort.zero-bytes":
+    await readFile(inputPath, "utf8");
     return "";
   default:
     return undefined;
   }
+}
+
+async function readWireObject(inputPath: string): Promise<WireJsonObject> {
+  const bytes = new TextEncoder().encode(await readFile(inputPath, "utf8"));
+  const parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 64 });
+  if (!isWireJsonObject(parsed)) {
+    throw new Error(`${inputPath} must contain a JSON object`);
+  }
+  return parsed;
+}
+
+function prepareRequestFixture(body: WireJsonObject, upstreamModel: string): string {
+  const prepared = prepareOpenAiChatRequest(decodeOpenAiChatRequest(body), resolvedModel(upstreamModel));
+  return decodeBytes(prepared.bytes);
+}
+
+function requestCaptureFixture(body: WireJsonObject): string {
+  const prepared = prepareOpenAiChatRequest(decodeOpenAiChatRequest(body), resolvedModel("gpt"));
+  const extra = new Headers({ "content-type": "application/json" });
+  if (prepared.hasVisionInput) {
+    extra.set("copilot-vision-request", "true");
+  }
+  const headers = outboundHeaders("fixture-token", extra);
+  return JSON.stringify({
+    upstreamUrl: "https://api.githubcopilot.com/chat/completions",
+    headers: {
+      "content-type": headers.get("content-type"),
+      "copilot-integration-id": headers.get("copilot-integration-id"),
+      "editor-version": headers.get("editor-version"),
+      "editor-plugin-version": headers.get("editor-plugin-version"),
+      "user-agent": headers.get("user-agent"),
+      "x-github-api-version": headers.get("x-github-api-version"),
+      "copilot-vision-request": headers.get("copilot-vision-request"),
+    },
+    body: decodeBytes(prepared.bytes),
+    chatCallCount: 1,
+  });
+}
+
+async function streamFixture(input: string): Promise<string> {
+  let output = "";
+  for await (const frame of parseChatSse(asBytes(input))) {
+    if (frame.kind === "chunk") {
+      output += decodeBytes(encodeOpenAiChatSseChunk(frame.chunk.payload));
+    } else if (frame.kind === "done") {
+      output += decodeBytes(encodeOpenAiChatDone());
+    } else {
+      throw new Error("openai-chat stream fixture produced an error frame");
+    }
+  }
+  return output;
+}
+
+function usageFixture(root: WireJsonObject): { inputTokens: number; outputTokens: number; cacheTokens: number } {
+  const usage = onlyObject(root, "usage");
+  return {
+    inputTokens: numberMember(usage, "prompt_tokens"),
+    outputTokens: numberMember(usage, "completion_tokens"),
+    cacheTokens: numberMember(onlyObject(usage, "prompt_tokens_details"), "cached_tokens"),
+  };
+}
+
+function onlyObject(root: WireJsonObject, key: string): WireJsonObject {
+  const value = memberValues(root, key)[0];
+  if (!isWireJsonObject(value)) {
+    throw new Error(`expected object member ${key}`);
+  }
+  return value;
+}
+
+function numberMember(root: WireJsonObject, key: string): number {
+  const value: WireJson | undefined = memberValues(root, key)[0];
+  if (value === undefined || typeof value !== "object" || value === null || !("kind" in value) || value.kind !== "number") {
+    throw new Error(`expected number member ${key}`);
+  }
+  return Number.parseInt(value.lexeme, 10);
+}
+
+function resolvedModel(upstreamModel: string): ResolvedModel {
+  return {
+    upstreamModel,
+    source: "explicit",
+    routing: {},
+  };
+}
+
+async function* asBytes(text: string): AsyncIterable<Uint8Array> {
+  yield new TextEncoder().encode(text);
+}
+
+function decodeBytes(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
 }
 
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

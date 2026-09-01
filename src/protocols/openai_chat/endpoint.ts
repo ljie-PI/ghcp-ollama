@@ -125,6 +125,9 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
         signal: upstreamController.signal,
       });
+      if (upstream.status < 200 || upstream.status >= 300) {
+        await upstream.cancel();
+      }
       assertUpstreamSuccess(upstream.status, upstream.headers);
 
       const frames = parseChatSse(withBodyTimeouts(
@@ -141,13 +144,13 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         });
       } catch (error: unknown) {
         upstreamController.abort();
-        await upstream.cancel?.();
+        await upstream.cancel();
         void frames.return(undefined).catch(() => undefined);
         throw error;
       }
       if (first.kind === "error") {
         upstreamController.abort();
-        await upstream.cancel?.();
+        await upstream.cancel();
         void frames.return(undefined).catch(() => undefined);
         throw new GatewayFailureError({ kind: "invalid_upstream_response" });
       }
@@ -330,8 +333,8 @@ async function withOperationTimeout<T>(
   });
   const timer = setTimeout(() => {
     const error = new GatewayFailureError({ kind: "upstream_timeout" });
-    timeoutController.abort(error);
     rejectTimeout(error);
+    timeoutController.abort(error);
   }, ms);
   const onAbort = (): void => {
     timeoutController.abort();
@@ -340,6 +343,12 @@ async function withOperationTimeout<T>(
   scope.signal.addEventListener("abort", onAbort, { once: true });
   try {
     return await Promise.race([work(operationSignal), timeout]);
+  } catch (error: unknown) {
+    const reason = timeoutController.signal.reason;
+    if (reason instanceof GatewayFailureError && reason.failure.kind === "upstream_timeout") {
+      throw reason;
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
     scope.signal.removeEventListener("abort", onAbort);
