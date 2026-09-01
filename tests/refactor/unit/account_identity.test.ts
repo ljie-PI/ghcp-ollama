@@ -310,6 +310,51 @@ describe("RM-06 account directory", () => {
     }
   });
 
+  it("rolls back account row and prunes credential when default preference update fails", async () => {
+    const { directory: accounts, credentials, database, close } = await directory();
+    try {
+      database.prepare(
+        "CREATE TRIGGER fail_default_update BEFORE UPDATE ON gateway_preferences BEGIN SELECT RAISE(ABORT, 'default update failed'); END",
+      ).run();
+      await expect(accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "failed" },
+      })).rejects.toThrow(/default update failed/u);
+      expect(accounts.list()).toEqual([]);
+      expect(await credentials.readGeneration("github.com/1", 1)).toBeNull();
+    } finally {
+      close();
+    }
+  });
+
+  it("serializes different-account activation across capacity and prune", async () => {
+    const { directory: accounts, credentials, close } = await directory(1);
+    try {
+      const first = accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "one" },
+      });
+      const second = accounts.upsertAuthenticated({
+        host: "github.com",
+        userId: "2",
+        secret: { generation: 0, githubToken: "two" },
+      });
+      const settled = await Promise.allSettled([first, second]);
+      expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      const active = accounts.list();
+      expect(active).toHaveLength(1);
+      const account = active[0];
+      expect(account).toBeDefined();
+      if (account !== undefined) {
+        expect(await credentials.readGeneration(account.accountId, 1)).not.toBeNull();
+      }
+    } finally {
+      close();
+    }
+  });
+
   it("serializes concurrent same-account activation across generation pruning", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-acc-"));
     const database = openDatabase({

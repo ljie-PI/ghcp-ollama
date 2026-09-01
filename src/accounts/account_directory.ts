@@ -41,7 +41,7 @@ export class AccountDirectoryError extends Error {
   }
 }
 
-const accountMutationLocks = new Map<AccountId, Promise<void>>();
+let accountLifecycleLock: Promise<void> = Promise.resolve();
 
 export class AccountDirectory {
   readonly preferences: AccountModelPreferences;
@@ -97,7 +97,7 @@ export class AccountDirectory {
     const environment = resolveGitHubEnvironment(input.host);
     const userId = canonicalUserId(input.userId);
     const accountId = formatAccountId(environment.host, userId);
-    return await withAccountMutationLock(accountId, async () => {
+    return await withAccountLifecycleLock(async () => {
       const existing = this.readAccount(accountId);
       const activating = existing === undefined || existing.credential_state !== "active";
       if (activating && this.activeCount() >= this.maxAuthenticated) {
@@ -160,6 +160,10 @@ export class AccountDirectory {
   }
 
   async remove(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
+    return await withAccountLifecycleLock(() => this.removeUnlocked(accountId, expectedRevision));
+  }
+
+  private async removeUnlocked(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
     const row = this.readAccount(accountId);
     if (row === undefined) {
       throw new AccountDirectoryError("not_found", "account not found");
@@ -195,17 +199,15 @@ export class AccountDirectory {
   }
 
   async reconcile(): Promise<void> {
-    const removing = this.database.prepare(
-      "SELECT account_id, revision FROM accounts WHERE credential_state = 'removing'",
-    ).all() as Array<{ account_id: string; revision: number }>;
-    for (const row of removing) {
-      await this.remove(row.account_id, row.revision);
-    }
-    const active = this.database.prepare(
-      "SELECT account_id, credential_generation FROM accounts WHERE credential_state = 'active' AND credential_generation IS NOT NULL",
-    ).all() as Array<{ account_id: string; credential_generation: number }>;
-    const references = new Map(active.map((row) => [row.account_id, row.credential_generation]));
-    await this.credentials.prune(references);
+    await withAccountLifecycleLock(async () => {
+      const removing = this.database.prepare(
+        "SELECT account_id, revision FROM accounts WHERE credential_state = 'removing'",
+      ).all() as Array<{ account_id: string; revision: number }>;
+      for (const row of removing) {
+        await this.removeUnlocked(row.account_id, row.revision);
+      }
+      await this.credentials.prune(this.activeCredentialReferences());
+    });
   }
 
   private bind(accountId: AccountId): BoundAccount {
@@ -265,21 +267,21 @@ export class AccountDirectory {
   }
 }
 
-async function withAccountMutationLock<T>(accountId: AccountId, work: () => Promise<T>): Promise<T> {
-  const previous = accountMutationLocks.get(accountId) ?? Promise.resolve();
+async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
+  const previous = accountLifecycleLock;
   let release: () => void = () => undefined;
   const current = new Promise<void>((resolve) => {
     release = resolve;
   });
   const queued = previous.then(() => current);
-  accountMutationLocks.set(accountId, queued);
+  accountLifecycleLock = queued;
   await previous;
   try {
     return await work();
   } finally {
     release();
-    if (accountMutationLocks.get(accountId) === queued) {
-      accountMutationLocks.delete(accountId);
+    if (accountLifecycleLock === queued) {
+      accountLifecycleLock = Promise.resolve();
     }
   }
 }
