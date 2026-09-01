@@ -83,32 +83,33 @@ describe("RM-12 Responses request decoder", () => {
       .toBe("previous_response_id");
   });
 
-  it("preserves member order, duplicate non-control fields, number lexemes, and nested values", () => {
+  it("rejects duplicate top-level unknown fields but preserves nested duplicates and number lexemes", () => {
+    expect(expectDecodeError("{\"model\":\"gpt\",\"metadata\":{},\"metadata\":{}}").field).toBe("metadata");
+    expect(expectDecodeError("{\"model\":\"gpt\",\"x\":1,\"\\u0078\":2}").field).toBe("x");
+
     const decoded = decodeResponsesRequest(objectFromJson([
-      "{\"metadata\":{\"a\":-0,\"nested\":[9007199254740993]},",
+      "{\"metadata\":{\"a\":-0,\"a\":1e+6,\"nested\":[9007199254740993]},",
       "\"model\":\"gpt\",",
-      "\"metadata\":{\"b\":1e+6},",
       "\"temperature\":0.70}",
     ].join("")));
 
     expect(decoded.body.members.map((member) => member.key)).toEqual([
       "metadata",
       "model",
-      "metadata",
       "temperature",
     ]);
     const firstMetadata = decoded.body.members[0]?.value as WireJsonObject;
-    const nested = firstMetadata.members[1]?.value;
+    const nested = firstMetadata.members[2]?.value;
     expect(numberLexeme(firstMetadata.members[0]?.value)).toBe("-0");
+    expect(numberLexeme(firstMetadata.members[1]?.value)).toBe("1e+6");
     expect(isWireJsonArray(nested)).toBe(true);
     if (isWireJsonArray(nested)) {
       expect(numberLexeme(nested.items[0])).toBe("9007199254740993");
     }
-    expect(numberLexeme(decoded.body.members[3]?.value)).toBe("0.70");
+    expect(numberLexeme(decoded.body.members[2]?.value)).toBe("0.70");
     expect(new TextDecoder().decode(serializeWireJson(decoded.body))).toBe([
-      "{\"metadata\":{\"a\":-0,\"nested\":[9007199254740993]},",
+      "{\"metadata\":{\"a\":-0,\"a\":1e+6,\"nested\":[9007199254740993]},",
       "\"model\":\"gpt\",",
-      "\"metadata\":{\"b\":1e+6},",
       "\"temperature\":0.70}",
     ].join(""));
   });

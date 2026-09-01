@@ -1,12 +1,10 @@
 import {
+  duplicateMemberNames,
   memberValues,
   type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
-import {
-  RESPONSE_REQUEST_CONTROL_FIELDS,
-  type ResponsesRequest,
-} from "./dto.js";
+import type { ResponsesRequest } from "./dto.js";
 
 export class ResponsesRequestDecodeError extends Error {
   constructor(
@@ -19,7 +17,7 @@ export class ResponsesRequestDecodeError extends Error {
 }
 
 export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
-  assertNoDuplicateControlFields(body);
+  assertNoDuplicateTopLevelFields(body);
 
   const model = optionalModel(body);
   const stream = optionalBoolean(body, "stream", false, false);
@@ -37,16 +35,10 @@ export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
   };
 }
 
-function assertNoDuplicateControlFields(body: WireJsonObject): void {
-  const seen = new Set<string>();
-  for (const member of body.members) {
-    if (!RESPONSE_REQUEST_CONTROL_FIELDS.has(member.key)) {
-      continue;
-    }
-    if (seen.has(member.key)) {
-      throw new ResponsesRequestDecodeError(member.key, `duplicate Responses request field: ${member.key}`);
-    }
-    seen.add(member.key);
+function assertNoDuplicateTopLevelFields(body: WireJsonObject): void {
+  const duplicate = duplicateMemberNames(body)[0];
+  if (duplicate !== undefined) {
+    throw new ResponsesRequestDecodeError(duplicate, `duplicate Responses request field: ${duplicate}`);
   }
 }
 

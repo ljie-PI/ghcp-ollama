@@ -28,14 +28,6 @@ export const RESPONSE_CALL_OUTPUT_KINDS: readonly ResponsesCallOutputKind[] = [
   "tool_search_output",
 ] as const;
 
-export const RESPONSE_REQUEST_CONTROL_FIELDS: ReadonlySet<string> = new Set([
-  "model",
-  "stream",
-  "store",
-  "input",
-  "previous_response_id",
-]);
-
 export function withResponsesRequestInput(
   request: ResponsesRequest,
   input: WireJson,
