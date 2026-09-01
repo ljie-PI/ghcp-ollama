@@ -1,5 +1,6 @@
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { CredentialStore, SecretCredential } from "../accounts/credential_store.js";
+import { withCredentialGenerationLock } from "../accounts/credential_generation_lock.js";
 
 export const REFRESH_SKEW_MS = 60_000;
 
@@ -10,37 +11,6 @@ export class TokenRefreshError extends Error {
     super(message);
     this.name = "TokenRefreshError";
     this.code = code;
-  }
-}
-
-const locks = new Map<string, Promise<void>>();
-
-export async function withAccountLock(accountId: string, work: () => Promise<void>, signal?: AbortSignal): Promise<void> {
-  const previous = locks.get(accountId) ?? Promise.resolve();
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.then(() => current);
-  locks.set(accountId, queued);
-  try {
-    await waitForPrevious(previous, signal);
-  } catch (error: unknown) {
-    release();
-    void queued.finally(() => {
-      if (locks.get(accountId) === queued) {
-        locks.delete(accountId);
-      }
-    });
-    throw error;
-  }
-  try {
-    await work();
-  } finally {
-    release();
-    if (locks.get(accountId) === queued) {
-      locks.delete(accountId);
-    }
   }
 }
 
@@ -71,7 +41,7 @@ export async function getValidToken(
   if (account.environment.kind === "ghes") {
     return current.githubToken;
   }
-  await withAccountLock(account.accountId, async () => {
+  await withCredentialGenerationLock(account.accountId, async () => {
     throwIfAborted(signal);
     const again = await store.readGeneration(account.accountId, generation);
     throwIfAborted(signal);
@@ -96,23 +66,6 @@ export async function getValidToken(
     throw new TokenRefreshError("missing", "copilot token missing");
   }
   return current.copilotToken;
-}
-
-async function waitForPrevious(previous: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
-  throwIfAborted(signal);
-  if (signal === undefined) {
-    await previous;
-    return;
-  }
-  let removeAbortListener = (): void => undefined;
-  await Promise.race([
-    previous,
-    new Promise<void>((_resolve, reject) => {
-      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
-      signal.addEventListener("abort", onAbort, { once: true });
-      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-    }),
-  ]).finally(removeAbortListener);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

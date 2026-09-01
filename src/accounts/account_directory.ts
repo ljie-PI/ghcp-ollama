@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { withCredentialGenerationLock } from "./credential_generation_lock.js";
 import { AccountModelPreferences } from "./model_preferences.js";
 import type { CredentialStore, SecretCredential } from "./credential_store.js";
 import {
@@ -40,6 +41,8 @@ export class AccountDirectoryError extends Error {
     this.code = code;
   }
 }
+
+let accountLifecycleLock: Promise<void> = Promise.resolve();
 
 export class AccountDirectory {
   readonly preferences: AccountModelPreferences;
@@ -95,68 +98,76 @@ export class AccountDirectory {
     const environment = resolveGitHubEnvironment(input.host);
     const userId = canonicalUserId(input.userId);
     const accountId = formatAccountId(environment.host, userId);
-    const existing = this.readAccount(accountId);
-    const activating = existing === undefined || existing.credential_state !== "active";
-    if (activating && this.activeCount() >= this.maxAuthenticated) {
-      throw new AccountDirectoryError("capacity", "authenticated account capacity reached");
-    }
-    const generation = (existing?.credential_generation ?? 0) + 1;
-    const secret = { ...input.secret, generation };
-    await this.credentials.putGeneration(accountId, generation, secret);
+    return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, async () => {
+      const existing = this.readAccount(accountId);
+      if (existing?.credential_state === "removing") {
+        throw new AccountDirectoryError("revision_conflict", "account removal is in progress");
+      }
+      const activating = existing === undefined || existing.credential_state !== "active";
+      if (activating && this.activeCount() >= this.maxAuthenticated) {
+        throw new AccountDirectoryError("capacity", "authenticated account capacity reached");
+      }
+      const generation = (existing?.credential_generation ?? 0) + 1;
+      const secret = { ...input.secret, generation };
+      await this.credentials.putGeneration(accountId, generation, secret);
 
-    const now = this.nowMs();
-    if (existing === undefined) {
-      this.database.prepare(
-        `INSERT INTO accounts (
-           account_id, revision, normalized_host, numeric_user_id, environment_kind,
-           login, display_name, authenticated_at_ms, credential_generation, credential_state,
-           created_at_ms, updated_at_ms
-         ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-      ).run(
-        accountId,
-        environment.host,
-        userId,
-        environment.kind,
-        input.login ?? null,
-        input.displayName ?? null,
-        now,
-        generation,
-        now,
-        now,
-      );
-    } else {
-      this.database.prepare(
-        `UPDATE accounts SET
-           revision = revision + 1,
-           login = ?,
-           display_name = ?,
-           authenticated_at_ms = ?,
-           credential_generation = ?,
-           credential_state = 'active',
-           updated_at_ms = ?
-         WHERE account_id = ?`,
-      ).run(input.login ?? existing.login, input.displayName ?? existing.display_name, now, generation, now, accountId);
-    }
+      const now = this.nowMs();
+      try {
+        this.database.transaction(() => {
+          if (existing === undefined) {
+            this.database.prepare(
+              `INSERT INTO accounts (
+               account_id, revision, normalized_host, numeric_user_id, environment_kind,
+               login, display_name, authenticated_at_ms, credential_generation, credential_state,
+               created_at_ms, updated_at_ms
+             ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+            ).run(
+              accountId,
+              environment.host,
+              userId,
+              environment.kind,
+              input.login ?? null,
+              input.displayName ?? null,
+              now,
+              generation,
+              now,
+              now,
+            );
+          } else {
+            this.database.prepare(
+              `UPDATE accounts SET
+               revision = revision + 1,
+               login = ?,
+               display_name = ?,
+               authenticated_at_ms = ?,
+               credential_generation = ?,
+               credential_state = 'active',
+               updated_at_ms = ?
+             WHERE account_id = ?`,
+            ).run(input.login ?? existing.login, input.displayName ?? existing.display_name, now, generation, now, accountId);
+          }
 
-    if (this.readPrefs().default_account_id === null) {
-      this.database.prepare(
-        "UPDATE gateway_preferences SET default_account_id = ?, revision = revision + 1, updated_at_ms = ? WHERE singleton_id = 1",
-      ).run(accountId, now);
-    }
+          if (this.readPrefs().default_account_id === null) {
+            this.database.prepare(
+              "UPDATE gateway_preferences SET default_account_id = ?, revision = revision + 1, updated_at_ms = ? WHERE singleton_id = 1",
+            ).run(accountId, now);
+          }
+        })();
+      } catch (error: unknown) {
+        await this.credentials.prune(this.activeCredentialReferences());
+        throw error;
+      }
 
-    const references = new Map<AccountId, number>();
-    const active = this.database.prepare(
-      "SELECT account_id, credential_generation FROM accounts WHERE credential_state = 'active' AND credential_generation IS NOT NULL",
-    ).all() as Array<{ account_id: string; credential_generation: number }>;
-    for (const row of active) {
-      references.set(row.account_id, row.credential_generation);
-    }
-    references.set(accountId, generation);
-    await this.credentials.prune(references);
-    return this.bind(accountId);
+      await this.credentials.prune(this.activeCredentialReferences());
+      return this.bind(accountId);
+    }));
   }
 
   async remove(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
+    return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, () => this.removeUnlocked(accountId, expectedRevision)));
+  }
+
+  private async removeUnlocked(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
     const row = this.readAccount(accountId);
     if (row === undefined) {
       throw new AccountDirectoryError("not_found", "account not found");
@@ -192,17 +203,15 @@ export class AccountDirectory {
   }
 
   async reconcile(): Promise<void> {
-    const removing = this.database.prepare(
-      "SELECT account_id, revision FROM accounts WHERE credential_state = 'removing'",
-    ).all() as Array<{ account_id: string; revision: number }>;
-    for (const row of removing) {
-      await this.remove(row.account_id, row.revision);
-    }
-    const active = this.database.prepare(
-      "SELECT account_id, credential_generation FROM accounts WHERE credential_state = 'active' AND credential_generation IS NOT NULL",
-    ).all() as Array<{ account_id: string; credential_generation: number }>;
-    const references = new Map(active.map((row) => [row.account_id, row.credential_generation]));
-    await this.credentials.prune(references);
+    await withAccountLifecycleLock(async () => {
+      const removing = this.database.prepare(
+        "SELECT account_id, revision FROM accounts WHERE credential_state = 'removing'",
+      ).all() as Array<{ account_id: string; revision: number }>;
+      for (const row of removing) {
+        await withCredentialGenerationLock(row.account_id, () => this.removeUnlocked(row.account_id, row.revision));
+      }
+      await this.credentials.prune(this.activeCredentialReferences());
+    });
   }
 
   private bind(accountId: AccountId): BoundAccount {
@@ -242,6 +251,13 @@ export class AccountDirectory {
     return row.count;
   }
 
+  private activeCredentialReferences(): ReadonlyMap<AccountId, number> {
+    const active = this.database.prepare(
+      "SELECT account_id, credential_generation FROM accounts WHERE credential_state = 'active' AND credential_generation IS NOT NULL",
+    ).all() as Array<{ account_id: string; credential_generation: number }>;
+    return new Map(active.map((row) => [row.account_id, row.credential_generation]));
+  }
+
   private readPrefs(): { revision: number; default_account_id: string | null } {
     return this.database.prepare(
       "SELECT revision, default_account_id FROM gateway_preferences WHERE singleton_id = 1",
@@ -252,6 +268,25 @@ export class AccountDirectory {
     return this.database.prepare(
       "SELECT account_id, revision, normalized_host, numeric_user_id, environment_kind, login, display_name, authenticated_at_ms, credential_generation, credential_state FROM accounts WHERE account_id = ?",
     ).get(accountId) as AccountRow | undefined;
+  }
+}
+
+async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
+  const previous = accountLifecycleLock;
+  let release: () => void = () => undefined;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  accountLifecycleLock = queued;
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (accountLifecycleLock === queued) {
+      accountLifecycleLock = Promise.resolve();
+    }
   }
 }
 
