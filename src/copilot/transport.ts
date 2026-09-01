@@ -13,6 +13,13 @@ export class UpstreamBodyLimitError extends Error {
   }
 }
 
+export class UpstreamTimeoutError extends Error {
+  constructor() {
+    super("upstream timeout");
+    this.name = "UpstreamTimeoutError";
+  }
+}
+
 export interface CopilotTransportDeps {
   readonly credentials: CredentialStore;
   readonly nowMs?: () => number;
@@ -33,10 +40,10 @@ export class HttpCopilotBackend implements CopilotBackend {
     return {
       accountId: account.accountId,
       target,
-      completeChat: (request) => this.completeJson(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, request.nonstreamBodyBytes, chatExtraHeaders(request.hasVisionInput)),
-      openChatStream: (request) => this.openStream(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, chatExtraHeaders(request.hasVisionInput)),
-      completeResponses: (request) => this.completeJson(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl, undefined),
-      openResponsesStream: (request) => this.openStream(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl),
+      completeChat: (request) => this.completeJson(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, request.nonstreamBodyBytes, request.firstByteTimeoutMs, chatExtraHeaders(request.hasVisionInput)),
+      openChatStream: (request) => this.openStream(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, request.firstByteTimeoutMs, chatExtraHeaders(request.hasVisionInput)),
+      completeResponses: (request) => this.completeJson(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl, undefined, undefined),
+      openResponsesStream: (request) => this.openStream(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl, undefined),
     };
   }
 
@@ -47,9 +54,13 @@ export class HttpCopilotBackend implements CopilotBackend {
     signal: AbortSignal,
     fetchImpl: typeof fetch,
     maxBodyBytes: number | undefined,
+    firstByteTimeoutMs: number | undefined,
     extraHeaders?: Headers,
   ): Promise<ChatResponse & UpstreamByteResponse> {
-    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, extraHeaders);
+    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, firstByteTimeoutMs, extraHeaders);
+    if (response.status < 200 || response.status >= 300) {
+      return { status: response.status, headers: response.headers, body: new Uint8Array() };
+    }
     const bytes = await readResponseBody(response, maxBodyBytes, signal);
     return { status: response.status, headers: response.headers, body: bytes };
   }
@@ -60,9 +71,10 @@ export class HttpCopilotBackend implements CopilotBackend {
     body: Uint8Array,
     signal: AbortSignal,
     fetchImpl: typeof fetch,
+    firstByteTimeoutMs: number | undefined,
     extraHeaders?: Headers,
   ): Promise<UpstreamByteStream> {
-    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, extraHeaders);
+    const response = await fetchWithRedirects(fetchImpl, url, token, body, signal, firstByteTimeoutMs, extraHeaders);
     const stream = response.body;
     return {
       status: response.status,
@@ -78,18 +90,31 @@ async function fetchWithRedirects(
   token: string,
   body: Uint8Array,
   signal: AbortSignal,
+  firstByteTimeoutMs: number | undefined,
   extraHeaders?: Headers,
 ): Promise<Response> {
   let current = url;
   let headers = outboundHeaders(token, extraHeaders);
+  const timeout = firstByteTimeoutMs === undefined ? undefined : firstByteTimeout(firstByteTimeoutMs);
+  const fetchSignal = timeout === undefined ? signal : AbortSignal.any([signal, timeout.signal]);
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
-    const response = await fetchImpl(current, {
-      method: "POST",
-      headers,
-      body: Buffer.from(body),
-      signal,
-      redirect: "manual",
-    });
+    let response: Response;
+    try {
+      response = await fetchImpl(current, {
+        method: "POST",
+        headers,
+        body: Buffer.from(body),
+        signal: fetchSignal,
+        redirect: "manual",
+      });
+    } catch (error: unknown) {
+      if (timeout?.timedOut() === true) {
+        throw new UpstreamTimeoutError();
+      }
+      throw error;
+    } finally {
+      timeout?.clear();
+    }
     if (response.status < 300 || response.status >= 400) {
       return response;
     }
@@ -102,6 +127,20 @@ async function fetchWithRedirects(
     current = next;
   }
   throw new Error("too many redirects");
+}
+
+function firstByteTimeout(ms: number): { readonly signal: AbortSignal; readonly clear: () => void; readonly timedOut: () => boolean } {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new UpstreamTimeoutError());
+  }, ms);
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timer),
+    timedOut: () => timedOut,
+  };
 }
 
 function chatExtraHeaders(hasVisionInput: boolean): Headers {
@@ -155,10 +194,12 @@ async function readResponseBody(response: Response, maxBodyBytes: number | undef
 
 async function* iterateBody(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
   const reader = stream.getReader();
+  let completed = false;
   try {
     for (;;) {
       const next = await reader.read();
       if (next.done) {
+        completed = true;
         return;
       }
       if (next.value !== undefined) {
@@ -166,6 +207,9 @@ async function* iterateBody(stream: ReadableStream<Uint8Array>): AsyncIterable<U
       }
     }
   } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => undefined);
+    }
     reader.releaseLock();
   }
 }

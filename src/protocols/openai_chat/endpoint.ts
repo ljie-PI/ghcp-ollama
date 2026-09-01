@@ -4,7 +4,7 @@ import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
-import { UpstreamBodyLimitError } from "../../copilot/transport.js";
+import { UpstreamBodyLimitError, UpstreamTimeoutError } from "../../copilot/transport.js";
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
@@ -74,14 +74,15 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
 
       if (!prepared.stream) {
-        const upstream = await withOperationTimeout(scope, scope.config.timeouts.firstByteMs, (signal) => completeChat(copilot, {
+        const upstream = await completeChat(copilot, {
           model: prepared.resolvedModel,
           body: prepared.bytes,
           stream: false,
           hasVisionInput: prepared.hasVisionInput,
           nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
-          signal,
-        }));
+          firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
+          signal: scope.signal,
+        });
         assertUpstreamSuccess(upstream.status, upstream.headers);
         if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
           throw new GatewayFailureError({ kind: "invalid_upstream_response" });
@@ -107,13 +108,14 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         });
       }
 
-      const upstream = await withOperationTimeout(scope, scope.config.timeouts.firstByteMs, (signal) => openChatStream(copilot, {
+      const upstream = await openChatStream(copilot, {
         model: prepared.resolvedModel,
         body: prepared.bytes,
         stream: true,
         hasVisionInput: prepared.hasVisionInput,
-        signal,
-      }));
+        firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
+        signal: scope.signal,
+      });
       assertUpstreamSuccess(upstream.status, upstream.headers);
       if (!isEventStream(upstream.headers)) {
         throw new GatewayFailureError({ kind: "invalid_upstream_response" });
@@ -308,6 +310,9 @@ function upstreamCallFailure(error: unknown): GatewayFailureError {
   }
   if (error instanceof UpstreamBodyLimitError) {
     return new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+  }
+  if (error instanceof UpstreamTimeoutError) {
+    return new GatewayFailureError({ kind: "upstream_timeout", cause: error });
   }
   return new GatewayFailureError({ kind: "upstream_network", cause: error });
 }

@@ -7,6 +7,7 @@ import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js
 import type { BoundCopilot, CopilotBackend, CopilotTarget } from "../../../src/copilot/backend.js";
 import { CapiFetchError } from "../../../src/copilot/models_source.js";
 import { CopilotModelCatalog, type CapiModelsResponse } from "../../../src/copilot/model_catalog.js";
+import { UpstreamTimeoutError } from "../../../src/copilot/transport.js";
 import { defaultRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
 import { createGateway, type Gateway } from "../../../src/gateway/create_gateway.js";
@@ -41,7 +42,7 @@ class CapturingCopilotBackend implements CopilotBackend {
       completeChat: async (request) => {
         this.chatRequests.push(request);
         if (this.options.chatPromise !== undefined) {
-          return await this.options.chatPromise;
+          return await withScriptedFirstByteTimeout(this.options.chatPromise, request.firstByteTimeoutMs);
         }
         if (this.options.chat === undefined) {
           throw new Error("missing scripted chat response");
@@ -470,4 +471,19 @@ async function* streamFromText(text: string, split: number): AsyncIterable<Uint8
 async function* hangingStreamAfter(text: string): AsyncIterable<Uint8Array> {
   yield encoder.encode(text);
   await new Promise<void>(() => undefined);
+}
+
+async function withScriptedFirstByteTimeout(
+  response: Promise<ChatResponse>,
+  ms: number | undefined,
+): Promise<ChatResponse> {
+  if (ms === undefined) {
+    return await response;
+  }
+  return await Promise.race([
+    response,
+    new Promise<ChatResponse>((_resolve, reject) => {
+      setTimeout(() => reject(new UpstreamTimeoutError()), ms);
+    }),
+  ]);
 }
