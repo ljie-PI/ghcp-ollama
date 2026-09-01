@@ -49,7 +49,7 @@ export function normalizeGitHubHost(input: string): string {
     throw new GitHubEnvironmentError("GitHub host is not a valid domain");
   }
 
-  if (portPart === undefined || portPart === "443") {
+  if (portPart === undefined) {
     return ascii;
   }
   if (!/^[0-9]+$/u.test(portPart)) {
@@ -58,6 +58,9 @@ export function normalizeGitHubHost(input: string): string {
   const port = Number.parseInt(portPart, 10);
   if (port < 1 || port > 65_535) {
     throw new GitHubEnvironmentError("GitHub host port must be in 1..65535");
+  }
+  if (port === 443) {
+    return ascii;
   }
   return `${ascii}:${port}`;
 }
