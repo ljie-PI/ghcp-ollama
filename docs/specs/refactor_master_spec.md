@@ -1576,6 +1576,54 @@ authority for invoking them。
 
 `RM-01` establishes these scripts；for that slice only, equivalent direct tool commands named in its PR are accepted。
 
+### 12.3 Code review blocker policy
+
+The review loop blocks merge on any finding that makes the PR unsafe to merge, regardless of whether the finding is
+reported as `High`、`Medium`、`important` or a judgement-call smell。Severity labels are evidence, not the final
+definition of blocker。The PR owner must fix or explicitly reclassify each finding before PR creation；a reclassification
+is only valid when the finding does not meet any blocker category below and is recorded in the PR handoff or a follow-up
+issue。
+
+A finding is a merge blocker when it is any of：
+
+1. **Spec-visible behavior**：public status、headers、body、event order、wire bytes、terminal behavior、model
+   resolution、history ownership、route surface or SDK-visible behavior differs from the owning production spec。
+2. **Security or disclosure**：credentials、tokens、account metadata、upstream endpoints、request/response content,
+   tool payloads or unsafe upstream errors can reach public responses、logs、metrics or fixtures。
+3. **Resource and lifecycle safety**：admission permits、timers、listeners、locks、sockets、body streams、iterators or
+   per-request state can leak, hang, read ahead unboundedly, ignore abort/timeout, or continue after client abort。
+4. **Gated acceptance coverage**：the slice adds or changes behavior that the spec says must be covered by tests,
+   fixtures, benchmark evidence or exact byte goldens, but the gated commands do not prove it。
+5. **Architecture seam or future-slice compatibility**：the change widens documented shared interfaces without a
+   spec update, mixes Gateway and protocol ownership, creates fail-open optional controls, bypasses a shared module, or
+   makes dependent slices unable to reuse the intended seam safely。
+6. **Unreasonable code structure**：even when behavior currently passes, code that has unclear ownership, duplicated
+   protocol state machines, scattered shotgun-surgery changes, misleading abstractions, hard-to-test hidden coupling,
+   or control flow that obscures abort/timeout/commit boundaries is a blocker until the structure is made reasonable。
+
+Implementation agents must read the required specs and code before editing, then turn the issue acceptance criteria into
+a local checklist covering behavior, structure, shared seams, tests, fixtures and handoff evidence。Before invoking
+`/code-review`, the agent must self-review the diff against this checklist。Do not rely on `/code-review` to discover
+avoidable blockers that the required docs already specify。
+
+When a slice touches a shared seam, the implementation must fail closed across all current callers, not only the new
+route。Examples fixed by `RM-09` and required for later slices：
+
+- Shared Chat transport requests carry mandatory bounded-body、connect-timeout and first-byte-timeout controls from the
+  captured request config；omitting them must not silently disable limits or timeouts。
+- Request-local snapshots such as Bound Account、preferred model、catalog、credential target and config are captured
+  before awaits that could observe concurrent admin changes；later changes affect only later requests。
+- Client abort and gateway timeout are distinct outcomes；pre-commit timeout uses the protocol presenter, while client
+  abort writes zero additional bytes。
+- Stream handling is pull-based and payload-aware：SSE comments、blank events and headers do not satisfy first-payload
+  commit or timeout requirements；idle timers reset on upstream body byte progress after the first payload contract is
+  met。
+- Non-2xx, invalid upstream headers/body, parser failures and pre-commit stream failures must cancel or drain upstream
+  bodies and release sockets/iterators before returning a safe public error。
+- Registered fixture cases must be reproducible through `fixtures:generate -- --case <caseId> --accept` and verified by
+  `fixtures:verify` or by an owner-specific verifier. Fixture families that claim request-capture evidence must assert
+  upstream URL、fixed outbound headers、vision/request-ID behavior、exact serialized body and logical call count。
+
 ## 13. Slice contracts
 
 ### RM-00 — Spec and fixture closure
@@ -1859,11 +1907,15 @@ authority for invoking them。
   SDK non-stream/stream、error class/request ID and cancellation。
 - **Acceptance/done**：one upstream call with bound account/model；raw fast path does not instantiate Ollama/Anthropic/
   Responses state；success terminal exactly once；zero additional bytes on abort；Fetch-surface tests need no private
-  method access。
+  method access；explicit model does not read preferred-model state；missing-model requests capture preferred-model
+  state before catalog awaits；shared Chat transport limits/timeouts are mandatory for all callers；non-2xx and invalid
+  upstream stream paths release body/socket/iterator resources before safe public errors；SSE comments/blank events cannot
+  satisfy first-payload timeout or commit boundaries。
 - **Non-goals/guardrails**：不 add Chat-to-canonical adapter、不 normalize into another protocol、不 fallback to
   legacy or Responses。
 - **PR handoff**：交付 final upstream request fixtures、SSE byte evidence、per-request allocation/latency delta and
-  OpenAI endpoint registration/presenter evidence。
+  OpenAI endpoint registration/presenter evidence；fixture case IDs must include request capture、buffered success、
+  stream success/failure、usage observation、model resolution and abort evidence, with generator and verifier support。
 
 ### RM-10 — Ollama endpoint
 
