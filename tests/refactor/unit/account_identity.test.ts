@@ -44,11 +44,18 @@ describe("RM-06 GitHub host and account id", () => {
   it("normalizes host case, trailing dot, default port, and IDNA", () => {
     expect(normalizeGitHubHost("GitHub.COM.")).toBe("github.com");
     expect(normalizeGitHubHost("github.com:443")).toBe("github.com");
+    expect(normalizeGitHubHost("github.com:0443")).toBe("github.com");
+    expect(resolveGitHubEnvironment("github.com:0443").kind).toBe("github.com");
     expect(normalizeGitHubHost("ghe.example.com:8443")).toBe("ghe.example.com:8443");
+    expect(normalizeGitHubHost("ghe.example.com:0443")).toBe("ghe.example.com");
+    expect(normalizeGitHubHost("ghe.example.com:08443")).toBe("ghe.example.com:8443");
     expect(normalizeGitHubHost("bücher.example")).toBe(normalizeGitHubHost("xn--bcher-kva.example"));
     expect(() => normalizeGitHubHost("github.com/path")).toThrow(GitHubEnvironmentError);
     expect(() => normalizeGitHubHost("https://github.com")).toThrow(GitHubEnvironmentError);
     expect(() => normalizeGitHubHost("user@github.com")).toThrow(GitHubEnvironmentError);
+    expect(() => normalizeGitHubHost("github.com:abc")).toThrow(GitHubEnvironmentError);
+    expect(() => normalizeGitHubHost("github.com:0")).toThrow(GitHubEnvironmentError);
+    expect(() => normalizeGitHubHost("github.com:65536")).toThrow(GitHubEnvironmentError);
     expect(canonicalUserId("00789")).toBe("789");
     expect(formatAccountId("github.com", "00789")).toBe("github.com/789");
   });
