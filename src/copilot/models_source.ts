@@ -1,5 +1,6 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { Agent, errors as undiciErrors, request as undiciRequest } from "undici";
+import type { Dispatcher } from "undici";
 import { copilotHeaders } from "./identity.js";
 import { capiModelsUrl, type CapiModelsResponse, type CopilotModelsSource } from "./model_catalog.js";
 import { MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
@@ -25,6 +26,8 @@ const DEFAULT_CAPI_LIMITS: CapiTransportLimits = {
   bodyLimitBytes: 33_554_432,
 };
 
+const CAPI_DISPATCHER_CONNECTIONS = 8;
+
 export class CapiFetchError extends Error {
   constructor(
     readonly status: number,
@@ -37,16 +40,31 @@ export class CapiFetchError extends Error {
 }
 
 export class HttpCopilotModelsSource implements CopilotModelsSource {
+  private dispatcher: Dispatcher | undefined;
+  private closed = false;
+
   constructor(
     private readonly resolve: (accountId: string, signal: AbortSignal) => Promise<{ token: string; endpoint: string }>,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly limits: CapiTransportLimits = DEFAULT_CAPI_LIMITS,
+    private readonly createDispatcher: (limits: CapiTransportLimits) => Dispatcher = defaultCapiDispatcher,
   ) {}
 
   async fetch(accountId: string, signal: AbortSignal): Promise<CapiModelsResponse> {
+    if (this.closed) {
+      throw new DOMException("closed", "AbortError");
+    }
     const { token, endpoint } = await this.resolve(accountId, signal);
     const deadlineMs = Date.now() + this.limits.totalTimeoutMs;
-    const response = await getWithRedirects(this.fetchImpl, capiModelsUrl(endpoint), token, signal, deadlineMs, this.limits);
+    const response = await getWithRedirects(
+      this.fetchImpl,
+      capiModelsUrl(endpoint),
+      token,
+      signal,
+      deadlineMs,
+      this.limits,
+      this.fetchImpl === fetch ? this.sharedDispatcher() : undefined,
+    );
     if (response.status < 200 || response.status >= 300) {
       await response.cancel();
       const status = response.status >= 300 && response.status < 400 ? 502 : response.status;
@@ -70,6 +88,31 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
       throw new CapiFetchError(502, undefined, "invalid_upstream_response");
     }
   }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    const dispatcher = this.dispatcher;
+    this.dispatcher = undefined;
+    if (dispatcher !== undefined) {
+      await dispatcher.close();
+    }
+  }
+
+  private sharedDispatcher(): Dispatcher {
+    if (this.closed) {
+      throw new DOMException("closed", "AbortError");
+    }
+    this.dispatcher ??= this.createDispatcher(this.limits);
+    return this.dispatcher;
+  }
+}
+
+function defaultCapiDispatcher(limits: CapiTransportLimits): Dispatcher {
+  return new Agent({
+    connectTimeout: limits.connectTimeoutMs,
+    connections: CAPI_DISPATCHER_CONNECTIONS,
+    pipelining: 1,
+  });
 }
 
 async function getWithRedirects(
@@ -79,12 +122,13 @@ async function getWithRedirects(
   signal: AbortSignal,
   deadlineMs: number,
   limits: CapiTransportLimits,
+  dispatcher: Dispatcher | undefined,
 ): Promise<CapiHttpResponse> {
   let current = url;
   let headers = new Headers({ ...copilotHeaders(), authorization: `Bearer ${token}`, "content-type": "application/json" });
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
-    const response = fetchImpl === fetch
-      ? await undiciWithTimeout(current, headers, signal, deadlineMs, limits)
+    const response = fetchImpl === fetch && dispatcher !== undefined
+      ? await undiciWithTimeout(current, headers, signal, deadlineMs, dispatcher)
       : await fetchWithTimeout(fetchImpl, current, headers, signal, deadlineMs, limits);
     if (response.status < 300 || response.status >= 400) {
       return response;
@@ -146,13 +190,8 @@ async function undiciWithTimeout(
   headers: Headers,
   signal: AbortSignal,
   deadlineMs: number,
-  limits: CapiTransportLimits,
+  dispatcher: Dispatcher,
 ): Promise<CapiHttpResponse> {
-  const dispatcher = new Agent({
-    connectTimeout: limits.connectTimeoutMs,
-    headersTimeout: positiveTimeoutMs(deadlineMs),
-    bodyTimeout: 0,
-  });
   const timeout = timeoutPromise<Awaited<ReturnType<typeof undiciRequest>>>(remainingMs(deadlineMs), signal);
   try {
     const response = await Promise.race([undiciRequest(url, {
@@ -160,19 +199,19 @@ async function undiciWithTimeout(
       headers: headersToRecord(headers),
       signal: timeout.signal,
       dispatcher,
+      headersTimeout: positiveTimeoutMs(deadlineMs),
+      bodyTimeout: 0,
     }), timeout.promise]);
     const body = response.body;
     return {
       status: response.statusCode,
       headers: incomingHeadersToHeaders(response.headers),
-      body: undiciBody(body, dispatcher),
+      body: undiciBody(body),
       cancel: async () => {
         destroyUndiciBody(body);
-        await dispatcher.close().catch(() => undefined);
       },
     };
   } catch (error: unknown) {
-    await dispatcher.close().catch(() => undefined);
     if (timeout.timedOut() || isUndiciTimeout(error)) {
       throw new CapiFetchError(502, undefined, "upstream_timeout");
     }
@@ -322,15 +361,17 @@ function createWebBody(body: ReadableStream<Uint8Array>): { readonly bytes: Asyn
 
 async function* undiciBody(
   body: AsyncIterable<Uint8Array | Buffer | string> & { destroy(error?: Error): void; on(event: "error", listener: (error: Error) => void): unknown },
-  dispatcher: Agent,
 ): AsyncIterable<Uint8Array> {
+  let completed = false;
   try {
     for await (const chunk of body) {
       yield chunk instanceof Uint8Array ? chunk : Buffer.from(chunk);
     }
+    completed = true;
   } finally {
-    destroyUndiciBody(body);
-    await dispatcher.close().catch(() => undefined);
+    if (!completed) {
+      destroyUndiciBody(body);
+    }
   }
 }
 
