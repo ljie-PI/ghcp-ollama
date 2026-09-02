@@ -68,6 +68,8 @@ export type LifecycleAction = "start" | "stop" | "restart" | "status";
 export interface CliLifecycleContext {
   readonly dataDir: string;
   readonly startup?: StartupConfig;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
 }
 
 export interface CliLifecycleResult {
@@ -292,10 +294,10 @@ export class HttpControlClient implements ControlClient {
       throw new CliError("daemon_conflict");
     }
     if (action === "status") {
-      const data = await this.controlRequest(endpoint, "GET", "/__ghcg/control/v1/status");
+      const data = await this.controlRequest(endpoint, "GET", "/__ghcg/control/v1/status", undefined, context);
       return lifecycleFromControlStatus(data, context.dataDir);
     }
-    const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/stop");
+    const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/stop", undefined, context);
     return lifecycleFromControlStatus(data, context.dataDir, "stopped");
   }
 
@@ -308,13 +310,13 @@ export class HttpControlClient implements ControlClient {
     const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/command", {
       operation,
       arguments: args,
-    });
+    }, context);
     return data as ControlOperationMap[Operation]["result"];
   }
 
   async adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult> {
     const endpoint = await this.requireEndpoint(context.dataDir);
-    const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/admin-bootstrap");
+    const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/admin-bootstrap", undefined, context);
     const token = isObject(data) && typeof data.token === "string" ? data.token : null;
     if (token === null) {
       throw new CliError("remote_error");
@@ -336,8 +338,10 @@ export class HttpControlClient implements ControlClient {
     method: "GET" | "POST",
     pathPart: string,
     body?: unknown,
+    context: Pick<CliLifecycleContext, "signal" | "timeoutMs"> = {},
   ): Promise<unknown> {
     let response: Response;
+    const timeout = controlTimeout(context.signal, context.timeoutMs ?? 30_000);
     try {
       response = await this.fetchImpl(`http://127.0.0.1:${endpoint.port}${pathPart}`, {
         method,
@@ -347,16 +351,55 @@ export class HttpControlClient implements ControlClient {
           "x-ghcg-instance-nonce": endpoint.instanceNonce,
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: timeout.signal,
       });
     } catch (_error: unknown) {
+      timeout.clear();
+      if (timeout.timedOut()) {
+        throw new CliError("timeout");
+      }
       throw new CliError("daemon_unreachable");
     }
-    const payload = await response.json().catch(() => null) as unknown;
+    let payload: unknown;
+    try {
+      payload = await Promise.race([response.json(), timeout.promise]).catch(() => null) as unknown;
+    } finally {
+      timeout.clear();
+    }
+    if (timeout.timedOut()) {
+      throw new CliError("timeout");
+    }
     if (response.ok && isObject(payload) && "data" in payload) {
       return payload.data;
     }
     throw cliErrorFromControlResponse(response.status, payload);
   }
+}
+
+function controlTimeout(parent: AbortSignal | undefined, ms: number): {
+  readonly signal: AbortSignal;
+  readonly promise: Promise<never>;
+  readonly clear: () => void;
+  readonly timedOut: () => boolean;
+} {
+  const controller = new AbortController();
+  const signal = parent === undefined ? controller.signal : AbortSignal.any([parent, controller.signal]);
+  let timedOut = false;
+  let rejectTimeout: (error: unknown) => void = () => undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    rejectTimeout(new CliError("timeout"));
+  }, ms);
+  return {
+    signal,
+    promise,
+    clear: () => clearTimeout(timer),
+    timedOut: () => timedOut,
+  };
 }
 
 function lifecycleFromControlStatus(data: unknown, dataDir: string, fallbackState: CliLifecycleResult["state"] = "running"): CliLifecycleResult {

@@ -106,6 +106,19 @@ describe("RM-18 CLI commands", () => {
       const poll = await client.request("auth.login.poll", { flowId: login.flowId }, { dataDir: "unused" });
       expect(poll).toMatchObject({ state: "complete", account: { accountId: "github.com/42" } });
       expect(await client.request("accounts.list", {}, { dataDir: "unused" })).toMatchObject({ defaultAccountId: "github.com/42", defaultRevision: 1 });
+      const originalGet = harness.directory.preferences.get.bind(harness.directory.preferences);
+      let forceMissingPreferenceConflict = true;
+      harness.directory.preferences.get = (accountId: string) => {
+        const current = originalGet(accountId);
+        if (accountId === "github.com/42" && forceMissingPreferenceConflict && current === null) {
+          forceMissingPreferenceConflict = false;
+          harness.directory.preferences.set(accountId, { modelId: "gpt", catalogGeneration: 0 }, 0);
+          return null;
+        }
+        return current;
+      };
+      await expect(client.request("models.list", {}, { dataDir: "unused" })).rejects.toMatchObject({ code: "revision_conflict" });
+      harness.directory.preferences.get = originalGet;
       expect(await client.request("models.list", {}, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", items: [{ id: "gpt" }] });
       expect(await client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "gpt", validity: "valid" });
       await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });

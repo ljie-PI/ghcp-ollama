@@ -31,9 +31,10 @@ export class CommandDispatcher {
   async dispatch<Operation extends ControlOperation>(
     operation: Operation,
     args: ControlOperationMap[Operation]["args"],
+    signal: AbortSignal = new AbortController().signal,
   ): Promise<ControlOperationMap[Operation]["result"]> {
     try {
-      return await this.dispatchUnsafe(operation, args);
+      return await this.dispatchUnsafe(operation, args, signal);
     } catch (error: unknown) {
       throw mapDispatcherError(error);
     }
@@ -42,6 +43,7 @@ export class CommandDispatcher {
   private async dispatchUnsafe<Operation extends ControlOperation>(
     operation: Operation,
     args: ControlOperationMap[Operation]["args"],
+    signal: AbortSignal,
   ): Promise<ControlOperationMap[Operation]["result"]> {
     switch (operation) {
     case "auth.login.start": {
@@ -100,12 +102,12 @@ export class CommandDispatcher {
       const input = args as ControlOperationMap["models.list"]["args"];
       const accountId = input.accountId ?? this.defaultAccount().accountId;
       const beforePreference = this.dependencies.directory.preferences.get(accountId);
-      const catalog = await this.dependencies.catalog.get(accountId, new AbortController().signal);
+      const catalog = await this.dependencies.catalog.get(accountId, signal);
       this.dependencies.directory.preferences.markInvalidIfMissing(
         accountId,
         new Set(catalog.models.map((model) => model.id)),
         catalog.generation,
-        beforePreference?.revision,
+        beforePreference?.revision ?? null,
       );
       return adminModelsFromCatalog(
         accountId,
@@ -123,7 +125,7 @@ export class CommandDispatcher {
     case "models.set": {
       const input = args as ControlOperationMap["models.set"]["args"];
       const account = this.defaultAccount();
-      const catalog = await this.dependencies.catalog.get(account.accountId, new AbortController().signal);
+      const catalog = await this.dependencies.catalog.get(account.accountId, signal);
       const current = this.dependencies.directory.preferences.get(account.accountId);
       const manager = new PreferredModelManager(this.dependencies.directory.preferences);
       return manager.setPreferred(account.accountId, input.modelId, current?.revision ?? 0, catalog) as ControlOperationMap[Operation]["result"];
@@ -192,9 +194,9 @@ export class DispatcherControlClient implements Pick<ControlClient, "request"> {
   async request<Operation extends ControlOperation>(
     operation: Operation,
     args: ControlOperationMap[Operation]["args"],
-    _context: Parameters<ControlClient["request"]>[2],
+    context: Parameters<ControlClient["request"]>[2],
   ): Promise<ControlOperationMap[Operation]["result"]> {
-    return await this.dispatcher.dispatch(operation, args);
+    return await this.dispatcher.dispatch(operation, args, context.signal);
   }
 }
 
