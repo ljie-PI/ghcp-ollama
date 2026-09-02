@@ -74,7 +74,7 @@ export class DeviceFlowService {
       userCode: requested.userCode,
       verificationUri: requested.verificationUri,
       expiresAtMs: this.nowMs() + Math.min(requested.expiresInSec * 1000, DEVICE_FLOW_TTL_MS),
-      pollIntervalSeconds: requested.intervalSec,
+      pollIntervalSeconds: Math.max(1, requested.intervalSec),
     };
     this.flows.set(flowId, snapshot);
     return {

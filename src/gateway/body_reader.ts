@@ -39,6 +39,33 @@ export async function readWireJsonObjectBody(
   }
 }
 
+export async function readJsonObjectBody(
+  request: Request,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>> {
+  assertJsonMediaType(request.headers);
+  assertIdentityEncoding(request.headers);
+
+  const bytes = await readLimitedBytes(request, maxBytes, signal);
+  if (bytes.byteLength === 0) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new GatewayFailureError({ kind: "invalid_request" });
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error: unknown) {
+    if (error instanceof GatewayFailureError) {
+      throw error;
+    }
+    throw new GatewayFailureError({ kind: "invalid_request", cause: error });
+  }
+}
+
 export function assertJsonMediaType(headers: Headers): void {
   const raw = headers.get("content-type");
   if (raw === null || raw.includes(",")) {

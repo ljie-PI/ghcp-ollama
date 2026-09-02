@@ -65,6 +65,11 @@ export class AccountDirectory {
     ).all() as AccountRow[]).map(toSummary);
   }
 
+  defaultState(): { readonly defaultRevision: number; readonly defaultAccountId: AccountId | null } {
+    const prefs = this.readPrefs();
+    return { defaultRevision: prefs.revision, defaultAccountId: prefs.default_account_id };
+  }
+
   async bindDefault(_signal?: AbortSignal): Promise<BoundAccount> {
     const preferred = this.database.prepare(
       "SELECT default_account_id FROM gateway_preferences WHERE singleton_id = 1",
@@ -78,11 +83,6 @@ export class AccountDirectory {
 
   async bindAccount(accountId: AccountId, _signal?: AbortSignal): Promise<BoundAccount> {
     return this.bind(accountId);
-  }
-
-  defaultState(): { readonly defaultRevision: number; readonly defaultAccountId: AccountId | null } {
-    const prefs = this.readPrefs();
-    return { defaultRevision: prefs.revision, defaultAccountId: prefs.default_account_id };
   }
 
   defaultPreference(): { readonly revision: number; readonly defaultAccountId: string | null } {

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { VERSION } from "../version.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { AdmissionController } from "./admission.js";
-import { readWireJsonObjectBody } from "./body_reader.js";
+import { readJsonObjectBody, readWireJsonObjectBody } from "./body_reader.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "./failures.js";
 import { createRequestScope, type RequestScope } from "./request_scope.js";
 import { abortWithTimeout, armTimeout, type TimeoutScheduler } from "./timeouts.js";
@@ -14,6 +14,7 @@ export interface DecodedHttpRequest {
   readonly url: URL;
   readonly headers: Headers;
   readonly body?: WireJsonObject;
+  readonly adminBody?: Record<string, unknown>;
 }
 
 export type ProtocolEndpoint = (
@@ -30,7 +31,7 @@ export interface RouteRegistration {
   readonly method: HttpMethod;
   readonly path: string;
   readonly admission: "none" | "inference";
-  readonly body: "none" | "wire-json-object";
+  readonly body: "none" | "wire-json-object" | "admin-json-object";
   readonly presentFailure: FailurePresenter;
   readonly endpoint: ProtocolEndpoint;
 }
@@ -112,6 +113,9 @@ async function handleRoute(
     if (route.body === "wire-json-object") {
       const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes, controller.signal);
       decoded = { url, headers: request.headers, body };
+    } else if (route.body === "admin-json-object") {
+      const adminBody = await readJsonObjectBody(request, snapshot.limits.requestBodyBytes, controller.signal);
+      decoded = { url, headers: request.headers, adminBody };
     }
 
     if (controller.signal.aborted) {
