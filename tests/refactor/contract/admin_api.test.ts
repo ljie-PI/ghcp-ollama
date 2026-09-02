@@ -81,6 +81,7 @@ describe("RM-20 Admin API", () => {
       expect((await rawMutation(harness.gateway, "/admin/api/v1/device-flows", session, "{", "application/json")).status).toBe(400);
       expect((await rawMutation(harness.gateway, "/admin/api/v1/device-flows", session, "[]", "application/json")).status).toBe(400);
       expect((await rawMutation(harness.gateway, "/admin/api/v1/device-flows", session, JSON.stringify({ host: "x".repeat(100) }), "application/json")).status).toBe(400);
+      expect((await rawMutation(harness.gateway, "/admin/api/v1/auth/bootstrap", session, JSON.stringify({ token: "x".repeat(129) }), "application/json")).status).toBe(400);
 
       expect((await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/logout`, {
         method: "POST",

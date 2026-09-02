@@ -17,7 +17,9 @@ import {
 } from "./auth.js";
 import { AdminEventStreamHub } from "./events.js";
 
-const BootstrapSchema = Type.Object({ token: Type.String({ minLength: 1 }) }, { additionalProperties: false });
+const BootstrapSchema = Type.Object({
+  token: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" }),
+}, { additionalProperties: false });
 const DeviceFlowStartSchema = Type.Object({ host: Type.String({ minLength: 1 }) }, { additionalProperties: false });
 const ExpectedRevisionSchema = Type.Object({ expectedRevision: Type.Integer({ minimum: 0 }) }, { additionalProperties: false });
 const DefaultAccountSchema = Type.Object({

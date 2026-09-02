@@ -24,7 +24,7 @@ export interface PerformanceSnapshot {
 export interface PerformanceMetricSnapshot {
   readonly p95: number | null;
   readonly status: MetricStatus;
-  readonly samples: number;
+  readonly samples?: number;
 }
 
 export interface PerformanceEvaluation {
@@ -105,16 +105,22 @@ export class PerformanceWindows {
         status: this.status,
         startedAtMs: this.degradedSinceMs,
         metrics: {
-          bufferedMs: buffered,
-          eventMs: event,
-          checkpointMs: checkpoint,
-          eventLoopMs: eventLoop,
+          bufferedMs: withoutSamples(buffered),
+          eventMs: withoutSamples(event),
+          checkpointMs: withoutSamples(checkpoint),
+          eventLoopMs: withoutSamples(eventLoop),
         },
       },
       transition,
     };
     try {
-      this.observer?.(evaluation);
+      this.observer?.({
+        ...evaluation,
+        snapshot: {
+          ...evaluation.snapshot,
+          metrics: { bufferedMs: buffered, eventMs: event, checkpointMs: checkpoint, eventLoopMs: eventLoop },
+        },
+      });
     } catch {
       // Monitoring observers cannot change performance state transitions.
     }
@@ -140,4 +146,8 @@ function summarize(samples: readonly number[], threshold: number): PerformanceMe
     return { p95: null, status: "insufficient_data", samples: samples.length };
   }
   return { p95, status: p95 > threshold ? "over" : "healthy", samples: samples.length };
+}
+
+function withoutSamples(metric: PerformanceMetricSnapshot): PerformanceMetricSnapshot {
+  return { p95: metric.p95, status: metric.status };
 }

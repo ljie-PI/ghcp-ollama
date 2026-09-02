@@ -572,7 +572,7 @@ function performanceMetric(
     state: input.status === "over" ? "degraded" : input.status,
     actual: input.p95,
     threshold,
-    samples: input.samples,
+    samples: input.samples ?? 0,
     startedAt: input.status === "over" ? startedAt : null,
   };
 }
