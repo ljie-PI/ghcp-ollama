@@ -5,7 +5,6 @@ import {
   isWireJsonObject,
   memberValues,
   parseWireJson,
-  serializeWireJson,
   type WireJson,
   type WireJsonArray,
   type WireJsonObject,
@@ -46,8 +45,8 @@ export function ollamaNonstreamResponse(
     done: true,
     done_reason: doneReason,
     ...(logprobs === undefined ? {} : { logprobs }),
-    prompt_eval_count: usage.promptEvalCount,
-    eval_count: usage.evalCount,
+    ...(usage.promptEvalCount === 0 ? {} : { prompt_eval_count: usage.promptEvalCount }),
+    ...(usage.evalCount === 0 ? {} : { eval_count: usage.evalCount }),
   };
 }
 
@@ -155,14 +154,15 @@ function toolCallFromChat(value: WireJson, position: number): Record<string, unk
   call.function = {
     index: isWireJsonNumber(index) ? Number.parseInt(index.lexeme, 10) : position,
     name,
-    arguments: JSON.parse(new TextDecoder().decode(serializeWireJson(parsedArgs))) as unknown,
+    arguments: parsedArgs,
   };
   return call;
 }
 
 function parseToolArguments(value: string): WireJsonObject {
+  const bytes = new TextEncoder().encode(value);
   try {
-    const parsed = parseWireJson(new TextEncoder().encode(value), { maxBytes: Math.max(value.length, 1), maxDepth: 64 });
+    const parsed = parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 64 });
     if (!isWireJsonObject(parsed)) {
       throw new GatewayFailureError({ kind: "invalid_tool_arguments" });
     }

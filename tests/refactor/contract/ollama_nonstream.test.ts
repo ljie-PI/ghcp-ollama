@@ -9,6 +9,7 @@ import type { BoundCopilot, CopilotBackend, CopilotTarget } from "../../../src/c
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
 import { createGateway } from "../../../src/gateway/create_gateway.js";
+import { UpstreamBodyLimitError } from "../../../src/copilot/transport.js";
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
 import { embedMigration } from "../../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../../src/persistence/migrations/001_runtime_config.js";
@@ -23,17 +24,23 @@ class NonstreamBackend implements CopilotBackend {
   responseBody = new TextEncoder().encode(JSON.stringify({
     choices: [{ index: 0, message: { role: "assistant", content: "hello" } }],
   }));
+  responseError: unknown;
 
   async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
     const target: CopilotTarget = { endpoint: "https://api.githubcopilot.com", token: "t" };
     return {
       accountId: account.accountId,
       target,
-      completeChat: async (_request: Readonly<ChatRequest>): Promise<ChatResponse> => ({
-        status: this.responseStatus,
-        headers: new Headers(),
-        body: this.responseBody,
-      }),
+      completeChat: async (_request: Readonly<ChatRequest>): Promise<ChatResponse> => {
+        if (this.responseError !== undefined) {
+          throw this.responseError;
+        }
+        return {
+          status: this.responseStatus,
+          headers: new Headers(),
+          body: this.responseBody,
+        };
+      },
       openChatStream: async (_request: Readonly<ChatRequest>): Promise<UpstreamByteStream> => {
         throw new Error("stream must not be called");
       },
@@ -109,6 +116,13 @@ describe("RM-10 Ollama non-stream", () => {
     const backend = new NonstreamBackend();
     backend.responseBody = new TextEncoder().encode(JSON.stringify({
       id: "ignored",
+      remote_model: "ignored",
+      remote_host: "ignored",
+      _debug_info: { ignored: true },
+      total_duration: 1,
+      load_duration: 2,
+      prompt_eval_duration: 3,
+      eval_duration: 4,
       created: 1_700_000_000,
       choices: [{
         index: 0,
@@ -118,7 +132,7 @@ describe("RM-10 Ollama non-stream", () => {
             id: "call_1",
             index: 2,
             type: "function",
-            function: { name: "weather", arguments: "{\"city\":\"Tokyo\",\"unit\":\"c\"}" },
+            function: { name: "weather", arguments: "{\"10\":\"ten\",\"2\":\"two\",\"city\":\"Tōkyō\"}" },
           }],
         },
         finish_reason: "tool_calls",
@@ -142,7 +156,7 @@ describe("RM-10 Ollama non-stream", () => {
       }));
       expect(response.status).toBe(200);
       expect(await response.text()).toBe(
-        "{\"model\":\"gpt\",\"created_at\":\"2023-11-14T22:13:20Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\",\"thinking\":\"hidden\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"index\":2,\"name\":\"weather\",\"arguments\":{\"city\":\"Tokyo\",\"unit\":\"c\"}}}]},\"done\":true,\"done_reason\":\"stop\",\"logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118,105],\"top_logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118]}]}],\"prompt_eval_count\":12,\"eval_count\":6}",
+        "{\"model\":\"gpt\",\"created_at\":\"2023-11-14T22:13:20Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\",\"thinking\":\"hidden\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"index\":2,\"name\":\"weather\",\"arguments\":{\"10\":\"ten\",\"2\":\"two\",\"city\":\"Tōkyō\"}}}]},\"done\":true,\"done_reason\":\"stop\",\"logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118,105],\"top_logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118]}]}],\"prompt_eval_count\":12,\"eval_count\":6}",
       );
     } finally {
       await close();
@@ -186,9 +200,69 @@ describe("RM-10 Ollama non-stream", () => {
     }
   });
 
+  it("omits zero usage counts and preserves nonzero partial usage", async () => {
+    const backend = new NonstreamBackend();
+    backend.responseBody = new TextEncoder().encode(JSON.stringify({
+      choices: [{ index: 0, message: { content: "" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 0 },
+    }));
+    const { gw, close } = await ollamaGateway(backend, (input) => input.text === undefined ? 99 : 5);
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt", stream: false, messages: [{ role: "user", content: "hi" }] }),
+      }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(
+        "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"eval_count\":5}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("maps finish reason matrix", async () => {
+    const cases = [
+      { finish: "stop", expected: "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}" },
+      { finish: null, expected: "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}" },
+      { expected: "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}" },
+      { finish: "content_filter", expected: "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}" },
+      { finish: "length", expected: "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"length\"}" },
+    ];
+    for (const item of cases) {
+      const backend = new NonstreamBackend();
+      const choice = item.finish === undefined
+        ? { index: 0, message: { content: "" } }
+        : { index: 0, message: { content: "" }, finish_reason: item.finish };
+      backend.responseBody = new TextEncoder().encode(JSON.stringify({
+        choices: [choice],
+      }));
+      const { gw, close } = await ollamaGateway(backend);
+      try {
+        const response = await gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "gpt", stream: false, messages: [{ role: "user", content: "hi" }] }),
+        }));
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(item.expected);
+      } finally {
+        await close();
+      }
+    }
+  });
+
   it("rejects malformed upstream response, tool arguments, logprobs, and upstream http statuses", async () => {
     const cases = [
+      { body: "{", status: 502, text: "{\"error\":\"invalid upstream response\"}" },
+      { body: "[]", status: 502, text: "{\"error\":\"invalid upstream response\"}" },
       { body: "{}", status: 502, text: "{\"error\":\"invalid upstream response\"}" },
+      {
+        body: JSON.stringify({ created: "bad", choices: [{ index: 0, message: { content: "" }, finish_reason: "stop" }] }),
+        status: 502,
+        text: "{\"error\":\"invalid upstream response\"}",
+      },
       {
         body: JSON.stringify({ choices: [{ index: 0 }, { index: 0 }] }),
         status: 502,
@@ -203,6 +277,16 @@ describe("RM-10 Ollama non-stream", () => {
         body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "stop", logprobs: { content: [{ token: "x", logprob: "bad" }] } }] }),
         status: 502,
         text: "{\"error\":\"invalid logprobs\"}",
+      },
+      {
+        body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "surprise" }] }),
+        status: 502,
+        text: "{\"error\":\"invalid upstream response\"}",
+      },
+      {
+        body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "tool_calls" }] }),
+        status: 502,
+        text: "{\"error\":\"invalid upstream response\"}",
       },
     ];
     for (const item of cases) {
@@ -235,6 +319,21 @@ describe("RM-10 Ollama non-stream", () => {
       expect(await response.text()).toBe("{\"error\":\"upstream request failed\"}");
     } finally {
       await close();
+    }
+
+    const overLimitBackend = new NonstreamBackend();
+    overLimitBackend.responseError = new UpstreamBodyLimitError();
+    const limited = await ollamaGateway(overLimitBackend);
+    try {
+      const response = await limited.gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt", stream: false, messages: [{ role: "user", content: "hi" }] }),
+      }));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toBe("{\"error\":\"invalid upstream response\"}");
+    } finally {
+      await limited.close();
     }
   });
 });

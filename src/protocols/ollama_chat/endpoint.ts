@@ -20,14 +20,14 @@ import {
 } from "../../serialization/wire_json.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import { encodeNdjson, ollamaCreatedAt, ollamaErrorBody, ollamaJsonStringify } from "./wire.js";
-import { ollamaNonstreamResponse } from "./bridge.js";
+import { ollamaNonstreamResponse, type OllamaTokenCounter } from "./bridge.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 
 export interface OllamaRouteDependencies {
   readonly directory: AccountDirectory;
   readonly copilot: CopilotBackend;
   readonly now?: () => Date;
-  readonly tokenCounter?: (input: { readonly model: ""; readonly messages?: WireJsonArray; readonly text?: string }) => number;
+  readonly tokenCounter: OllamaTokenCounter;
 }
 
 const JSON_HEADERS = {
@@ -100,7 +100,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
             model,
             chatMessagesFromRequest(chatRequest),
             dependencies.now ?? (() => new Date()),
-            dependencies.tokenCounter ?? (() => 0),
+            dependencies.tokenCounter,
           )), { headers: JSON_HEADERS });
         }
         const writer = createStreamResponseWriter({

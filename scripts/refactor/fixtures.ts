@@ -221,6 +221,7 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
     directory: accounts,
     copilot: backend,
     now: () => new Date(0),
+    tokenCounter: (input) => input.text === undefined ? 1 : 0,
   }), {
     createRequestId: () => "req_fixture",
   });
