@@ -1,37 +1,62 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+export const RUNTIME_CONFIG_RANGES = {
+  "limits.requestBodyBytes": { min: 1_048_576, max: 67_108_864, unit: "bytes" },
+  "limits.sseEventBytes": { min: 65_536, max: 16_777_216, unit: "bytes" },
+  "limits.nonstreamBodyBytes": { min: 1_048_576, max: 134_217_728, unit: "bytes" },
+  "limits.accumulatorBytes": { min: 1_048_576, max: 134_217_728, unit: "bytes" },
+  "admission.activeMax": { min: 1, max: 16, unit: "count" },
+  "admission.queueMax": { min: 0, max: 64, unit: "count" },
+  "timeouts.queueMs": { min: 1_000, max: 300_000, unit: "ms" },
+  "timeouts.connectMs": { min: 1_000, max: 120_000, unit: "ms" },
+  "timeouts.firstByteMs": { min: 5_000, max: 600_000, unit: "ms" },
+  "timeouts.streamIdleMs": { min: 5_000, max: 600_000, unit: "ms" },
+  "timeouts.totalMs": { min: 60_000, max: 7_200_000, unit: "ms" },
+  "accounts.maxAuthenticated": { min: 1, max: 32, unit: "count" },
+  "history.ttlDays": { min: 1, max: 365, unit: "days" },
+  "usage.retentionDays": { min: 1, max: 365, unit: "days" },
+  "events.retentionDays": { min: 1, max: 30, unit: "days" },
+} as const;
+
+export type RuntimeConfigKey = keyof typeof RUNTIME_CONFIG_RANGES;
+
 export const RuntimeConfigSchema = Type.Object({
   limits: Type.Object({
-    requestBodyBytes: Type.Integer({ minimum: 1_048_576, maximum: 67_108_864 }),
-    sseEventBytes: Type.Integer({ minimum: 65_536, maximum: 16_777_216 }),
-    nonstreamBodyBytes: Type.Integer({ minimum: 1_048_576, maximum: 134_217_728 }),
-    accumulatorBytes: Type.Integer({ minimum: 1_048_576, maximum: 134_217_728 }),
+    requestBodyBytes: rangeInteger("limits.requestBodyBytes"),
+    sseEventBytes: rangeInteger("limits.sseEventBytes"),
+    nonstreamBodyBytes: rangeInteger("limits.nonstreamBodyBytes"),
+    accumulatorBytes: rangeInteger("limits.accumulatorBytes"),
   }, { additionalProperties: false }),
   admission: Type.Object({
-    activeMax: Type.Integer({ minimum: 1, maximum: 16 }),
-    queueMax: Type.Integer({ minimum: 0, maximum: 64 }),
+    activeMax: rangeInteger("admission.activeMax"),
+    queueMax: rangeInteger("admission.queueMax"),
   }, { additionalProperties: false }),
   timeouts: Type.Object({
-    queueMs: Type.Integer({ minimum: 1_000, maximum: 300_000 }),
-    connectMs: Type.Integer({ minimum: 1_000, maximum: 120_000 }),
-    firstByteMs: Type.Integer({ minimum: 5_000, maximum: 600_000 }),
-    streamIdleMs: Type.Integer({ minimum: 5_000, maximum: 600_000 }),
-    totalMs: Type.Integer({ minimum: 60_000, maximum: 7_200_000 }),
+    queueMs: rangeInteger("timeouts.queueMs"),
+    connectMs: rangeInteger("timeouts.connectMs"),
+    firstByteMs: rangeInteger("timeouts.firstByteMs"),
+    streamIdleMs: rangeInteger("timeouts.streamIdleMs"),
+    totalMs: rangeInteger("timeouts.totalMs"),
   }, { additionalProperties: false }),
   accounts: Type.Object({
-    maxAuthenticated: Type.Integer({ minimum: 1, maximum: 32 }),
+    maxAuthenticated: rangeInteger("accounts.maxAuthenticated"),
   }, { additionalProperties: false }),
   history: Type.Object({
-    ttlDays: Type.Integer({ minimum: 1, maximum: 365 }),
+    ttlDays: rangeInteger("history.ttlDays"),
   }, { additionalProperties: false }),
   usage: Type.Object({
-    retentionDays: Type.Integer({ minimum: 1, maximum: 365 }),
+    retentionDays: rangeInteger("usage.retentionDays"),
   }, { additionalProperties: false }),
   events: Type.Object({
-    retentionDays: Type.Integer({ minimum: 1, maximum: 30 }),
+    retentionDays: rangeInteger("events.retentionDays"),
   }, { additionalProperties: false }),
 }, { additionalProperties: false });
+
+function rangeInteger(key: RuntimeConfigKey) {
+  const range = RUNTIME_CONFIG_RANGES[key];
+  return Type.Integer({ minimum: range.min, maximum: range.max });
+}
 
 export type RuntimeConfigSnapshot = Static<typeof RuntimeConfigSchema>;
 

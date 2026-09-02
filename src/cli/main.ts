@@ -85,14 +85,19 @@ async function runInteractiveLogin(
   stdout: WritableCliStream,
   options: RunCliOptions,
 ): Promise<number> {
+  const localSignal = options.shutdownSignal === undefined
+    ? processSignal()
+    : { signal: options.shutdownSignal, dispose: () => undefined };
   const controlContext = {
     dataDir: context.dataDir,
-    ...(options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal }),
+    signal: localSignal.signal,
   };
-  const started = await client.request("auth.login.start", args, controlContext);
-  stdout.write(`Code: ${started.userCode}\n`);
-  stdout.write(`Open: ${started.verificationUri}\n`);
+  let startedFlowId: string | null = null;
   try {
+    const started = await client.request("auth.login.start", args, controlContext);
+    startedFlowId = started.flowId;
+    stdout.write(`Code: ${started.userCode}\n`);
+    stdout.write(`Open: ${started.verificationUri}\n`);
     for (;;) {
       const result = await client.request("auth.login.poll", { flowId: started.flowId }, controlContext);
       if (result.state === "complete") {
@@ -102,14 +107,32 @@ async function runInteractiveLogin(
       if (result.state !== "pending") {
         throw new CliError("remote_error");
       }
-      await sleep(options.pollDelayMs ?? started.pollIntervalSeconds * 1000, options.shutdownSignal);
+      await sleep(options.pollDelayMs ?? started.pollIntervalSeconds * 1000, localSignal.signal);
     }
   } catch (error: unknown) {
     if (error instanceof CliError && error.code === "interrupted") {
-      await client.cancelLogin?.(started.flowId, { dataDir: context.dataDir });
+      if (startedFlowId !== null) {
+        await client.cancelLogin?.(startedFlowId, { dataDir: context.dataDir });
+      }
     }
     throw error;
+  } finally {
+    localSignal.dispose();
   }
+}
+
+function processSignal(): { readonly signal: AbortSignal; readonly dispose: () => void } {
+  const controller = new AbortController();
+  const onSignal = (): void => controller.abort(new CliError("interrupted"));
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+    },
+  };
 }
 
 async function runServe(

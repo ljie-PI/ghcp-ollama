@@ -3,7 +3,7 @@ import { AccountDirectory } from "../../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
 import { DeviceFlowService, type DeviceOAuthClient } from "../../../src/accounts/device_flow.js";
 import { ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
-import { refreshCopilotToken } from "../../../src/copilot/credential_provider.js";
+import { createCopilotEndpointDiscovery, refreshCopilotToken } from "../../../src/copilot/credential_provider.js";
 import { CopilotModelCatalog } from "../../../src/copilot/model_catalog.js";
 import type { TokenRefreshError } from "../../../src/copilot/token_refresh.js";
 import { runCli } from "../../../src/cli/main.js";
@@ -359,6 +359,9 @@ describe("RM-18 CLI commands", () => {
   });
 
   it("classifies production Copilot token refresh failures without leaking response bodies", async () => {
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ token: "copilot-token", expires_in: 120 }), { status: 200 }));
+    await expect(refreshCopilotToken("gho_secret")).resolves.toMatchObject({ token: "copilot-token" });
+
     vi.stubGlobal("fetch", async () => new Response("secret upstream body", { status: 401 }));
     await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ code: "unauthorized" } satisfies Partial<TokenRefreshError>);
 
@@ -366,6 +369,41 @@ describe("RM-18 CLI commands", () => {
       throw new DOMException("aborted", "AbortError");
     });
     await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ code: "timeout" } satisfies Partial<TokenRefreshError>);
+  });
+
+  it("parses Copilot endpoint discovery success and falls back on malformed responses", async () => {
+    const store = new MemoryCredentialStore();
+    await store.putGeneration("github.com/42", 1, { generation: 1, githubToken: "gho_secret" });
+    const account = {
+      accountId: "github.com/42",
+      environment: {
+        kind: "github.com" as const,
+        host: "github.com" as const,
+        webBaseUrl: "https://github.com" as const,
+        apiBaseUrl: "https://api.github.com" as const,
+        clientId: "Iv1.b507a08c87ecfe98" as const,
+        deviceCodeUrl: "https://github.com/login/device/code" as const,
+        accessTokenUrl: "https://github.com/login/oauth/access_token" as const,
+      },
+      userId: "42",
+      login: null,
+      displayName: null,
+      credentialGeneration: 1,
+    };
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+      copilot_plan: "individual",
+      quota_reset_date: "2026-09-02",
+      quota_snapshots: {
+        chat: { entitlement: 1, remaining: 1, percent_remaining: 100, unlimited: false },
+        completions: { entitlement: 1, remaining: 1, percent_remaining: 100, unlimited: false },
+        premium_interactions: { entitlement: 1, remaining: 1, percent_remaining: 100, unlimited: false },
+      },
+      endpoints: { api: "https://api.githubcopilot.com/custom" },
+    }), { status: 200 }));
+    await expect(createCopilotEndpointDiscovery(store)(account)).resolves.toBe("https://api.githubcopilot.com/custom");
+
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ endpoints: {} }), { status: 200 }));
+    await expect(createCopilotEndpointDiscovery(store)(account)).resolves.toBeNull();
   });
 });
 

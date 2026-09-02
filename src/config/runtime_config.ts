@@ -2,6 +2,8 @@ import type Database from "better-sqlite3";
 import {
   defaultRuntimeConfigSnapshot,
   parseRuntimeConfigSnapshot,
+  RUNTIME_CONFIG_RANGES,
+  type RuntimeConfigKey,
   type RuntimeConfigSnapshot,
 } from "./schema.js";
 
@@ -101,25 +103,7 @@ export class RuntimeConfigStore {
   }
 }
 
-export const RUNTIME_CONFIG_RANGES = {
-  "limits.requestBodyBytes": { min: 1_048_576, max: 67_108_864, unit: "bytes" },
-  "limits.sseEventBytes": { min: 65_536, max: 16_777_216, unit: "bytes" },
-  "limits.nonstreamBodyBytes": { min: 1_048_576, max: 134_217_728, unit: "bytes" },
-  "limits.accumulatorBytes": { min: 1_048_576, max: 134_217_728, unit: "bytes" },
-  "admission.activeMax": { min: 1, max: 16, unit: "count" },
-  "admission.queueMax": { min: 0, max: 64, unit: "count" },
-  "timeouts.queueMs": { min: 1_000, max: 300_000, unit: "ms" },
-  "timeouts.connectMs": { min: 1_000, max: 120_000, unit: "ms" },
-  "timeouts.firstByteMs": { min: 5_000, max: 600_000, unit: "ms" },
-  "timeouts.streamIdleMs": { min: 5_000, max: 600_000, unit: "ms" },
-  "timeouts.totalMs": { min: 60_000, max: 7_200_000, unit: "ms" },
-  "accounts.maxAuthenticated": { min: 1, max: 32, unit: "count" },
-  "history.ttlDays": { min: 1, max: 365, unit: "days" },
-  "usage.retentionDays": { min: 1, max: 365, unit: "days" },
-  "events.retentionDays": { min: 1, max: 30, unit: "days" },
-} as const;
-
-export type RuntimeConfigKey = keyof typeof RUNTIME_CONFIG_RANGES;
+export { RUNTIME_CONFIG_RANGES, type RuntimeConfigKey };
 
 export function isRuntimeConfigKey(key: string): key is RuntimeConfigKey {
   return key in RUNTIME_CONFIG_RANGES;
