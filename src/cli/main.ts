@@ -155,7 +155,7 @@ async function runServe(
       port: startup.port,
       dataDir: startup.dataDir,
     };
-    writeSuccess(json ? stdout : stderr, json, result);
+    writeSuccess(stdout, json, result);
     await waitForShutdown(options.shutdownSignal);
     await gateway.close();
     return 0;

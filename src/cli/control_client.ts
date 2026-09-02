@@ -333,6 +333,17 @@ export class HttpControlClient implements ControlClient {
     return { opened: true };
   }
 
+  async cancelLogin(flowId: string, context: CliLifecycleContext): Promise<void> {
+    const endpoint = await this.locateEndpoint(context.dataDir);
+    if (endpoint === null) {
+      return;
+    }
+    await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/command", {
+      operation: "auth.login.cancel",
+      arguments: { flowId },
+    }, context).catch(() => undefined);
+  }
+
   private async requireEndpoint(dataDir: string): Promise<ControlEndpoint> {
     const endpoint = await this.locateEndpoint(dataDir);
     if (endpoint === null) {

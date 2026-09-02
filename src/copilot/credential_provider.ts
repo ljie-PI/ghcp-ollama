@@ -19,7 +19,10 @@ export async function refreshCopilotToken(
       ...(signal === undefined ? {} : { signal }),
     });
   } catch (error: unknown) {
-    throw new TokenRefreshError(isAbortError(error) ? "timeout" : "network", "copilot token refresh failed");
+    if (isAbortError(error)) {
+      throw error;
+    }
+    throw new TokenRefreshError("network", "copilot token refresh failed");
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -29,7 +32,10 @@ export async function refreshCopilotToken(
   try {
     body = await response.json() as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
   } catch (error: unknown) {
-    throw new TokenRefreshError(isAbortError(error) ? "timeout" : "network", "copilot token refresh failed");
+    if (isAbortError(error)) {
+      throw error;
+    }
+    throw new TokenRefreshError("network", "copilot token refresh failed");
   }
   if (typeof body.token !== "string") {
     throw new TokenRefreshError("network", "copilot token refresh failed");

@@ -302,8 +302,8 @@ describe("RM-18 CLI commands", () => {
     });
     await Promise.resolve();
     await eventually(() => listened);
-    expect(stdout.chunks).toBe("");
-    expect(JSON.parse(stderr.chunks)).toEqual({ state: "running", managed: false, pid: 123, startedAt: "2026-09-02T00:00:00.000Z", port: 31_403, dataDir: expect.any(String) });
+    expect(stderr.chunks).toBe("");
+    expect(JSON.parse(stdout.chunks)).toEqual({ state: "running", managed: false, pid: 123, startedAt: "2026-09-02T00:00:00.000Z", port: 31_403, dataDir: expect.any(String) });
     abort.abort();
     expect(await run).toBe(0);
     expect(closed).toBe(true);
@@ -369,7 +369,7 @@ describe("RM-18 CLI commands", () => {
     vi.stubGlobal("fetch", async () => {
       throw new DOMException("aborted", "AbortError");
     });
-    await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ code: "timeout" } satisfies Partial<TokenRefreshError>);
+    await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("parses Copilot endpoint discovery success and falls back on malformed responses", async () => {
