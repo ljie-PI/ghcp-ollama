@@ -289,10 +289,12 @@ src/
     usage.ts
     operational_events.ts
     performance.ts
+    admin.ts
   admin/
     auth.ts
     api.ts
     events.ts
+    routes.ts
     static.ts
 web/
   src/
@@ -323,6 +325,8 @@ dist/                          # final package output, never committed
 他人 owned path 前，先在 issue 中记录原因并由 owner/coordinator 确认；共享 composition files
 `src/main.ts` and `package.json` 的修改由依赖顺序串行完成。`createGateway` accepts route registrations，
 so later protocol slices do not edit `src/gateway/create_gateway.ts`。
+RM-20 is the explicit exception for the additive optional `AdminModule` mount；it does not change protocol
+`RouteRegistration` or existing protocol callers。
 
 ## 6. Key interfaces 与 state ownership
 
@@ -371,6 +375,45 @@ export interface RequestScope {
   readonly config: Readonly<RuntimeConfigSnapshot>;
 }
 ```
+
+`RouteRegistration` remains exclusively for public protocol routes and is not widened for Admin JSON. Management routes
+use an additive optional Gateway mount:
+
+```ts
+export interface AdminRequestContext {
+  readonly requestId: string;
+  readonly signal: AbortSignal;
+  readonly requestBodyBytes: number;
+  readonly listenerOrigin: string;
+  readonly activity: GatewayActivity;
+}
+
+export interface AdminModule {
+  handle(request: Request, context: Readonly<AdminRequestContext>): Promise<Response>;
+  mintBootstrap(): AdminBootstrapResult;
+  close(): void;
+}
+
+export type AdminBootstrapResult =
+  | { readonly kind: "issued"; readonly token: string; readonly expiresAt: string }
+  | { readonly kind: "capacity" }
+  | { readonly kind: "closed" };
+
+export interface AdminStaticModule {
+  handle(request: Request, signal: AbortSignal): Promise<Response>;
+}
+```
+
+`GatewayDependencies` adds optional `admin?: AdminModule` and `adminStatic?: AdminStaticModule`. Existing RM-01 through
+RM-18 callers that omit them preserve identical behavior. Gateway owns Admin request-ID creation, caller/shutdown abort,
+captured body limit and active listener Origin；`AdminModule` owns Admin parsing、validation、security、envelope and SSE
+lifecycle。Gateway also supplies `AdminRequestContext.activity` per request, avoiding an Admin/Gateway composition
+cycle。Exact Admin API paths are matched before RM-21 static handling；unmatched `/admin/api/v1/*` never becomes
+SPA HTML。
+
+This correction does not reopen observable behavior from RM-01 through RM-18：protocol `RouteRegistration`、Gateway
+public routes、admission、WireJson、timeouts and protocol presenters remain unchanged。Only RM-19、RM-20、RM-21 and
+their transitive RM-22 composition consume these optional interfaces。
 
 Gateway Foundation owns body read/WireJson parse/admission；each Protocol Endpoint Module owns one
 `FailurePresenter` adapter and endpoint。For `anthropic-version`, an exact single value is accepted；the comma-merged
@@ -517,6 +560,9 @@ export interface WireJsonObject {
 | daemon PID/start identity/nonce/control token | `DaemonIdentityFile` | protected atomic file | authenticated control before action |
 | credentials/admin long-term secret | `FileCredentialStore` | protected atomic file | never SQLite/log |
 | JSONL files/rotation | `JsonlLogger` | data directory | 10 MiB × 5、max age 7d |
+| Admin sessions/bootstrap/CSRF | `AdminModule` | process / bounded memory | RM-19 control and Admin HTTP share one instance |
+| Admin usage/event queries | `AdminTelemetry` | telemetry module / SQLite read adapter | read-only; reuses RM-05 retention/sanitizer |
+| Admin request/activity counters | `GatewayActivity` | process / read-only snapshot | no admission or stream mutation capability |
 
 ### 6.2 Model resolution
 
@@ -962,6 +1008,29 @@ capacity is 503 and internal failure is 500。All Admin JSON/SSE responses are `
 Canonical codes are respectively `validation_failed`、`unauthenticated`、`forbidden`、`not_found`、
 `revision_conflict`、`capacity_exceeded` and `internal_error`；the matching messages are fixed lower-case versions
 with spaces。HTTP 204 responses have no body。
+
+Admin HTTP behavior is owned by `AdminModule`, not by protocol `RouteRegistration` or Gateway HTTP protocol parsing：
+
+- exact Origin is `http://127.0.0.1:<active-port>` supplied by Gateway；
+- JSON mutations accept only `application/json` with optional UTF-8 charset and missing/single `identity` encoding；
+- empty、malformed、non-object、unknown-field、unsupported-media and over-limit bodies return `400 validation_failed`；
+- reads use captured `limits.requestBodyBytes` and cancel at the first excess byte；
+- no-body routes reject nonempty bodies and all routes reject unknown/duplicate query fields；
+- every Admin JSON/SSE response uses `Cache-Control: no-store` and gateway-generated `x-request-id`；JSON uses
+  `application/json; charset=utf-8`；
+- caller abort or Gateway close cancels body/use-case/SSE work and emits no additional bytes；
+- Admin never uses inference admission、WireJson or a protocol failure presenter。
+
+`AdminTelemetry` is a read-only adapter owned in `src/telemetry/admin.ts`。It owns Usage/Event SQLite queries、opaque
+cursors、filtered totals、event replay and sanitized DTO reads while reusing RM-05 schema/retention/sanitizer。RM-20 does
+not change RM-05 telemetry writes、batching、cleanup or performance transitions。`GatewayActivity` exposes read-only
+active request/stream/queue snapshots。
+
+`AdminTelemetry` also exposes `subscribe(listener): unsubscribe` for sanitized Operational Event and performance
+transitions。`AdminModule` owns browser subscriber caps、per-subscriber queues、replay/reset ordering、heartbeat and
+slow-consumer disconnect。`AdminModule.close()` is idempotent；closed `handle` fails closed and closed
+`mintBootstrap()` returns `kind:"closed"`。The ninth outstanding bootstrap returns `kind:"capacity"`。RM-19 maps both
+capacity and closed to control `503 not_ready` without exposing internal counts。
 
 Canonical Admin route matrix：
 
@@ -2190,6 +2259,9 @@ route。Examples fixed by `RM-09` and required for later slices：
 - **Deliverables/interface**：`DaemonController.start/stop/restart/status` and protected `DaemonIdentityFile`；
   foreground/managed identity publication；control operations `status`、`stop`、`admin-bootstrap`、`command`
   require token + PID/start/nonce verification。
+- **Admin seam**：Admin HTTP and local control receive the same running `AdminModule` instance；
+  `admin-bootstrap` calls only `AdminModule.mintBootstrap()` and never creates a second auth/session/token store；
+  `kind:"capacity"|"closed"` maps to control `503 not_ready`。
 - **Tests**：`npm run test:refactor -- tests/refactor/unit/daemon_identity.test.ts
   tests/refactor/integration/daemon_lifecycle.test.ts tests/refactor/integration/daemon_stale_pid.test.ts`；
   start readiness/failed start cleanup；idempotent status/stop；restart changes nonce/start identity；PID reuse/
@@ -2209,12 +2281,15 @@ route。Examples fixed by `RM-09` and required for later slices：
 - **Must read**：本文第 6.1、9.3 节、[Architecture](../architecture.md) Admin/security/routes sections、
   `docs/gateway_http_contracts.md` Admin isolation rules。
 - **Owned scope/files**：`src/admin/auth.ts`、`api.ts`、`events.ts`、`routes.ts`、
+  additive Admin mount wiring in `src/gateway/hono_app.ts` and `src/gateway/create_gateway.ts`、
+  read-only `src/telemetry/admin.ts`、serialized `src/main.ts` composition、
   `tests/refactor/contract/admin_auth.test.ts`、
   `tests/refactor/contract/admin_api.test.ts`、
   `tests/refactor/integration/admin_events.test.ts`。
 - **Deliverables/interface**：60s one-use bootstrap exchange、in-memory `AdminSession`、logout/session introspection；
-  `createAdminRoutes(dependencies): readonly RouteRegistration[]` covering all section 9.3
-  routes/DTOs/pagination/error envelope；control-facing bootstrap mint interface。
+  `createAdminModule(dependencies): AdminModule` covering all section 9.3 routes/DTOs/pagination/error envelope；
+  `AdminModule.mintBootstrap()` is the control-facing RM-19 seam；`AdminTelemetry` and `GatewayActivity` are read-only
+  module interfaces。Protocol `RouteRegistration` is unchanged。
 - **Tests**：`npm run test:refactor -- tests/refactor/contract/admin_auth.test.ts
   tests/refactor/contract/admin_api.test.ts tests/refactor/integration/admin_events.test.ts`；
   token expiry/reuse/race；bootstrap no-session/CSRF exception with exact Origin；cookie flags；30m idle/12h
@@ -2222,7 +2297,8 @@ route。Examples fixed by `RM-09` and required for later slices：
   every mutation；TypeBox no coercion/unknown handling；revision conflicts；no secret fields；history clear；degraded
   transitions；device-flow polling/cap/expiry；usage/event cursor bounds；8 sessions/tokens/subscribers；
   operational/performance/reset SSE exact bytes、Last-Event-ID replay/eviction/malformed、heartbeat；
-  active request versus active stream counters；bounded subscriber/slow disconnect；static catch-all isolation。
+  active request versus active stream counters；bounded subscriber/slow disconnect；Admin API unknown paths remain Admin
+  JSON 404 and never delegate to a fake static handler。Actual static serving belongs RM-21。
 - **Acceptance/done**：Admin can perform all six views' operations only through module interfaces；mutations fail closed；
   inference middleware/envelopes are not reused；state responses are no-store and sanitized。
 - **Non-goals/guardrails**：不 implement UI、WebSocket、persistent browser session、remote bind or expose long-term
@@ -2241,6 +2317,8 @@ route。Examples fixed by `RM-09` and required for later slices：
   `tests/refactor/e2e/admin.spec.ts`、`tests/refactor/e2e/fixtures/**`。
 - **Deliverables/interface**：`Overview`、`Accounts`、`Models`、`Configuration`、`ResponsesHistory`、`Events`；
   fragment bootstrap exchange、CSRF client、SSE reconnect with bounded UI state；no SvelteKit server。
+- **Static seam**：`src/admin/static.ts` implements `AdminStaticModule` and mounts after exact Admin API handling。Only
+  `GET /admin` and `GET /admin/*` may return assets/SPA fallback；`/admin/api/v1/*`、protocol routes and probes never do。
 - **Tests**：`npm run test:e2e:refactor -- tests/refactor/e2e/admin.spec.ts`，exact 7 flows：
   `bootstrap-and-session-expiry`、`github-and-ghes-account-lifecycle`、
   `model-refresh-invalidates-preference`、`config-revision-and-security-rejection`、
