@@ -23,6 +23,7 @@ import { AccountDirectory as SqliteAccountDirectory } from "./accounts/account_d
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { createModelCatalogRoutes } from "./protocols/model_catalog/routes.js";
 import type { OllamaTokenCounter } from "./protocols/ollama_chat/bridge.js";
+import { defaultOllamaTokenCounter } from "./protocols/ollama_chat/token_counter.js";
 import { createOpenAiChatRoute } from "./protocols/openai_chat/endpoint.js";
 import { createOllamaChatRoutes } from "./protocols/ollama_chat/endpoint.js";
 import { createAnthropicMessagesRoute } from "./protocols/anthropic_messages/endpoint.js";
@@ -161,15 +162,11 @@ export async function createProductionApplicationContext(
     telemetry,
     modelsSource,
     runtime,
-    tokenCounter: unavailableOllamaTokenCounter,
+    tokenCounter: defaultOllamaTokenCounter,
     async close() {
       await telemetry.flush();
       await catalog.close();
       closeDatabase(database);
     },
   };
-}
-
-function unavailableOllamaTokenCounter(): number {
-  throw new Error("Ollama non-stream token counter is not configured");
 }

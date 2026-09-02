@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import path from "node:path";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
@@ -420,8 +421,32 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-async function defaultOpenBrowser(_url: string): Promise<void> {
-  throw new CliError("unavailable");
+async function defaultOpenBrowser(url: string): Promise<void> {
+  const command = browserCommand(url);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command.file, command.args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  }).catch(() => {
+    throw new CliError("unavailable");
+  });
+}
+
+function browserCommand(url: string): { readonly file: string; readonly args: readonly string[] } {
+  if (process.platform === "win32") {
+    return { file: "cmd", args: ["/c", "start", "", url] };
+  }
+  if (process.platform === "darwin") {
+    return { file: "open", args: [url] };
+  }
+  return { file: "xdg-open", args: [url] };
 }
 
 export function stoppedLifecycle(dataDir: string): CliLifecycleResult {
