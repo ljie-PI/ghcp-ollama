@@ -57,7 +57,12 @@ export async function createOllamaStreamResponse(input: {
         }
       } catch (error: unknown) {
         await closeUpstream(input.upstream, frames);
-        controller.enqueue(streamErrorBytes(error));
+        const failure = streamGatewayFailure(error).failure;
+        if (failure.kind === "aborted") {
+          controller.close();
+          return;
+        }
+        controller.enqueue(streamErrorBytes(failure.kind));
         controller.close();
       }
     },
@@ -143,12 +148,22 @@ class OllamaStreamReducer {
     let emitted = false;
     if (reasoningContentValues.length > 0) {
       const thinking = optionalString(reasoningContentValues[0]);
+      const content = optionalString(contentValues[0]);
+      if (content.length > 0) {
+        message.content = content;
+        emitted = true;
+      }
       if (thinking.length > 0) {
         message.thinking = thinking;
         emitted = true;
       }
     } else if (reasoningValues.length > 0) {
       const thinking = optionalString(reasoningValues[0]);
+      const content = optionalString(contentValues[0]);
+      if (content.length > 0) {
+        message.content = content;
+        emitted = true;
+      }
       if (thinking.length > 0) {
         message.thinking = thinking;
         emitted = true;
@@ -338,16 +353,21 @@ function streamGatewayFailure(error: unknown): GatewayFailureError {
   return new GatewayFailureError({ kind: "upstream_stream_error", cause: error });
 }
 
-function streamErrorBytes(error: unknown): Uint8Array {
-  const failure = streamGatewayFailure(error).failure;
-  if (failure.kind === "upstream_stream_truncated") {
+function streamErrorBytes(kind: ReturnType<typeof streamGatewayFailure>["failure"]["kind"]): Uint8Array {
+  if (kind === "upstream_stream_truncated") {
     return encodeNdjson({ error: "upstream stream truncated" });
   }
-  if (failure.kind === "invalid_tool_arguments") {
+  if (kind === "invalid_upstream_response") {
+    return encodeNdjson({ error: "invalid upstream response" });
+  }
+  if (kind === "invalid_tool_arguments") {
     return encodeNdjson({ error: "invalid tool arguments" });
   }
-  if (failure.kind === "invalid_logprobs") {
+  if (kind === "invalid_logprobs") {
     return encodeNdjson({ error: "invalid logprobs" });
+  }
+  if (kind === "upstream_timeout") {
+    return encodeNdjson({ error: "upstream timeout" });
   }
   return encodeNdjson({ error: "upstream stream error" });
 }
@@ -382,7 +402,7 @@ async function* withBodyTimeouts(
       yield next.value;
     }
   } finally {
-    await iterator.return?.();
+    void iterator.return?.().catch(() => undefined);
   }
 }
 

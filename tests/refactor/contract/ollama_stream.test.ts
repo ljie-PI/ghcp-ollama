@@ -6,6 +6,7 @@ import { AccountDirectory, type BoundAccount } from "../../../src/accounts/accou
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
 import type { BoundCopilot, CopilotBackend, CopilotTarget } from "../../../src/copilot/backend.js";
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
+import type { RuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
 import { createGateway } from "../../../src/gateway/create_gateway.js";
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
@@ -46,7 +47,10 @@ class StreamBackend implements CopilotBackend {
   }
 }
 
-async function ollamaGateway(backend: CopilotBackend) {
+async function ollamaGateway(
+  backend: CopilotBackend,
+  configureRuntime: (runtime: RuntimeConfigSnapshot) => void = () => undefined,
+) {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-stream-"));
   const database = openDatabase({
     path: path.join(dir, "state.db"),
@@ -59,9 +63,11 @@ async function ollamaGateway(backend: CopilotBackend) {
     userId: "1",
     secret: { generation: 0, githubToken: "t" },
   });
+  const runtime = defaultRuntimeConfigSnapshot();
+  configureRuntime(runtime);
   const gw = await createGateway({
     startup: parseStartupConfig([], {}, { homedir: dir }),
-    runtime: defaultRuntimeConfigSnapshot(),
+    runtime,
   }, createOllamaChatRoutes({
     directory: accounts,
     copilot: backend,
@@ -92,6 +98,25 @@ describe("RM-10 Ollama stream", () => {
         + "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible \\u003c \\u0026\"},\"done\":false}\n"
         + "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"explicit\"},\"done\":false}\n"
         + "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"index\":1,\"name\":\"weather\",\"arguments\":{\"2\":\"two\",\"1\":\"one\"}}}]},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":12,\"eval_count\":6}\n",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps same-chunk explicit reasoning and visible content together", async () => {
+    const backend = new StreamBackend();
+    backend.chunks = [
+      sse({ choices: [{ index: 0, delta: { content: "visible", reasoning_content: "think" } }] }),
+      done(),
+    ];
+    const { gw, close } = await ollamaGateway(backend);
+    try {
+      const response = await gw.fetch(request({ model: "gpt", messages: [{ role: "user", content: "hi" }] }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(
+        "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\",\"thinking\":\"think\"},\"done\":false}\n"
+        + "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}\n",
       );
     } finally {
       await close();
@@ -167,6 +192,43 @@ describe("RM-10 Ollama stream", () => {
       );
     } finally {
       await close();
+    }
+  });
+
+  it("uses documented post-commit error text for invalid terminal state and idle timeout", async () => {
+    const invalidFinish = new StreamBackend();
+    invalidFinish.chunks = [
+      sse({ choices: [{ index: 0, delta: { content: "hello" } }] }),
+      sse({ choices: [{ index: 0, delta: {}, finish_reason: "weird" }] }),
+      done(),
+    ];
+    const invalid = await ollamaGateway(invalidFinish);
+    try {
+      const response = await invalid.gw.fetch(request({ model: "gpt", messages: [{ role: "user", content: "hi" }] }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(
+        "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"done\":false}\n"
+        + "{\"error\":\"invalid upstream response\"}\n",
+      );
+    } finally {
+      await invalid.close();
+    }
+
+    const timeout = new StreamBackend();
+    timeout.chunks = delayedStream(sse({ choices: [{ index: 0, delta: { content: "hello" } }] }), new Promise(() => undefined));
+    const timed = await ollamaGateway(timeout, (runtime) => {
+      runtime.timeouts.streamIdleMs = 1;
+    });
+    try {
+      const response = await timed.gw.fetch(request({ model: "gpt", messages: [{ role: "user", content: "hi" }] }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(
+        "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"done\":false}\n"
+        + "{\"error\":\"upstream timeout\"}\n",
+      );
+      expect(timeout.canceled).toBeGreaterThan(0);
+    } finally {
+      await timed.close();
     }
   });
 
