@@ -141,8 +141,22 @@ describe("RM-18 CLI commands", () => {
 
   it("uses the protected loopback control transport when an identity exists", async () => {
     const calls: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    const opened: string[] = [];
     const client = new HttpControlClient(async (url, init) => {
       calls.push({ url: String(url), ...(init === undefined ? {} : { init }) });
+      const body = init?.body;
+      if (typeof body === "string" && body.includes("\"operation\":\"config.set\"")) {
+        return new Response(JSON.stringify({ error: { code: "revision_conflict", message: "revision conflict" } }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (String(url).endsWith("/admin-bootstrap")) {
+        return new Response(JSON.stringify({ data: { token: "bootstrap-secret", expiresAt: "2026-09-02T00:01:00.000Z" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       return new Response(JSON.stringify({ data: { ok: true } }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -154,8 +168,9 @@ describe("RM-18 CLI commands", () => {
       instanceNonce: "nonce",
       controlToken: "control-token",
       port: 31_400,
-      createdAt: "2026-09-02T00:00:00.000Z",
-    }));
+    }), async (url) => {
+      opened.push(url);
+    });
     await client.request("config.get", {}, { dataDir: "selected" });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("http://127.0.0.1:31400/__ghcg/control/v1/command");
@@ -165,8 +180,20 @@ describe("RM-18 CLI commands", () => {
     });
     expect(calls[0]?.init?.body).toBe(JSON.stringify({ operation: "config.get", arguments: {} }));
 
+    await expect(client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "selected" })).rejects.toMatchObject({ code: "revision_conflict" });
+    expect(await client.adminOpen({ dataDir: "selected" })).toEqual({ opened: true });
+    expect(opened).toEqual(["http://127.0.0.1:31400/admin/#bootstrap_token=bootstrap-secret"]);
+
     const unavailable = new HttpControlClient(fetch, async () => null);
     await expect(unavailable.request("config.get", {}, { dataDir: "missing" })).rejects.toMatchObject({ code: "unavailable" });
+
+    const foreground = new HttpControlClient(fetch, async () => ({
+      managed: false,
+      controlToken: "control-token",
+      instanceNonce: "nonce",
+      port: 31_400,
+    }));
+    await expect(foreground.lifecycle("stop", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
   });
 
   it("foreground serve emits one running result and closes on shutdown", async () => {

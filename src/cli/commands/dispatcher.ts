@@ -100,6 +100,11 @@ export class CommandDispatcher {
       const input = args as ControlOperationMap["models.list"]["args"];
       const accountId = input.accountId ?? this.defaultAccount().accountId;
       const catalog = await this.dependencies.catalog.get(accountId, new AbortController().signal);
+      this.dependencies.directory.preferences.markInvalidIfMissing(
+        accountId,
+        new Set(catalog.models.map((model) => model.id)),
+        catalog.generation,
+      );
       return adminModelsFromCatalog(
         accountId,
         catalog,
@@ -133,8 +138,9 @@ export class CommandDispatcher {
     case "config.set": {
       const input = args as ControlOperationMap["config.set"]["args"];
       const current = this.dependencies.runtimeConfig.readSnapshot();
+      const revision = this.dependencies.runtimeConfig.readRevision();
       const next = setConfigValue(current, input.key, input.value);
-      this.dependencies.runtimeConfig.update(next, this.dependencies.runtimeConfig.readRevision());
+      this.dependencies.runtimeConfig.update(next, revision);
       return this.adminRuntimeConfig() as ControlOperationMap[Operation]["result"];
     }
     }

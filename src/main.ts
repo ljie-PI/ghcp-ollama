@@ -97,7 +97,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
     ...createOllamaChatRoutes({
       directory: context.directory,
       copilot: context.copilot,
-      tokenCounter: context.tokenCounter ?? countApproximateOllamaTokens,
+      tokenCounter: context.tokenCounter ?? missingOllamaUsageCount,
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
@@ -169,8 +169,6 @@ export async function createProductionApplicationContext(
   };
 }
 
-function countApproximateOllamaTokens(input: { readonly messages?: unknown; readonly text?: string }): number {
-  const text = input.text ?? JSON.stringify(input.messages ?? "");
-  const trimmed = text.trim();
-  return trimmed.length === 0 ? 0 : trimmed.split(/\s+/u).length;
+function missingOllamaUsageCount(): number {
+  return 0;
 }
