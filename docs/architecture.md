@@ -317,17 +317,52 @@ export type AdminBootstrapResult =
 export interface AdminStaticModule {
   handle(request: Request, signal: AbortSignal): Promise<Response>;
 }
+
+export interface LocalControlModule {
+  handle(
+    request: Request,
+    context: Readonly<{
+      requestId: string;
+      signal: AbortSignal;
+      listenerOrigin: LoopbackOrigin;
+    }>,
+  ): Promise<Response>;
+  close(): void;
+}
+
+export interface AdminRuntimeStatus {
+  snapshot(): Readonly<{
+    version: string;
+    uptimeMs: number;
+    daemon: { readonly managed: boolean; readonly pid?: number; readonly startedAt?: string };
+  }>;
+}
 ```
 
-`GatewayDependencies` 可选接受 `admin?: AdminModule` 与 `adminStatic?: AdminStaticModule`。现有 callers 省略
-它们时行为不变；`RouteRegistration.body` 仍只有 `"none" | "wire-json-object"`，已实现 protocol factories
+`GatewayDependencies` 可选接受 `admin?: AdminModule`、`control?: LocalControlModule` 与
+`adminStatic?: AdminStaticModule`。现有 callers 省略它们时行为不变；`RouteRegistration.body` 仍只有
+`"none" | "wire-json-object"`，已实现 protocol factories
 与 wire behavior 不变。
 
-Host 在 protocol route matching 前把 exact `/admin/api/v1` 与 `/admin/api/v1/*` 交给
+Host 在 protocol route matching 前把 exact `/__ghcg/control/v1/*` 交给 RM-19 `LocalControlModule`，并把
+exact `/admin/api/v1` 与 `/admin/api/v1/*` 交给
 `AdminModule.handle`。RM-21 的 `adminStatic` 只在 Admin API matching 后处理 `GET /admin/*`；未匹配的
 `/admin/api/v1/*` 永远不能变成 SPA HTML。Host 拥有 Admin request ID、caller/shutdown abort 和 active
 listener Origin；Admin module 从 `RuntimeConfigStore` 捕获当前 body limit，并拥有管理 JSON parsing、TypeBox
 validation、authentication、error envelope 与 SSE lifecycle。
+
+`LocalControlModule` 独占 control authentication、identity handshake、command JSON validation 与 control error
+envelope。它不使用 protocol `RouteRegistration`、inference admission 或 Admin browser authentication。RM-19
+把同一个 `AdminModule` instance 注入 LocalControlModule，`admin-bootstrap` 只调用其 `mintBootstrap()`。
+Control request body 使用固定 1 MiB hard cap；status/stop/bootstrap 拒绝 nonempty body，command body 读到第一个
+超限 byte 时取消 reader 并返回 control `400 invalid_command`。Client abort 取消 body/use case 且不追加 bytes。
+
+`createAdminModule` 接收 `AdminRuntimeStatus`。RM-19 production adapter 组合 build version、process uptime 与
+verified daemon identity；RM-20 tests 使用 scripted adapter。Admin 不读取 process globals 或 daemon file。
+
+Gateway close 顺序固定为：停止 mounted admission → abort mounted in-flight requests →
+`LocalControlModule.close()` → `AdminModule.close()` → existing `onClose` persistence/transport cleanup。两个
+`close()` 都幂等；control 先关闭，保证它不能在 Admin teardown 后继续 mint bootstrap 或 dispatch command。
 
 ### 7.2 Protocol endpoint modules
 
@@ -982,9 +1017,9 @@ Semantic Checkpoint 同步等待 transaction commit。Usage Buckets 和 Operatio
 CSRF/Origin、Admin envelope 和 monitoring SSE。Admin 不 import inference `WireJson`、protocol presenters、
 protocol converters 或 `better-sqlite3`。
 
-管理 use cases 只调用 Accounts、PreferredModelManager、RuntimeConfigStore、ResponsesHistoryAdmin 与
-AdminTelemetry 的窄 interface。Gateway 通过每次 `AdminRequestContext.activity` 提供 GatewayActivity，避免
-Admin/Gateway composition cycle：
+管理 use cases 只调用 Accounts、PreferredModelManager、RuntimeConfigStore、ResponsesHistoryAdmin、
+AdminTelemetry 与 AdminRuntimeStatus 的窄 interface。Gateway 通过每次 `AdminRequestContext.activity` 提供
+GatewayActivity，避免 Admin/Gateway composition cycle：
 
 ```ts
 export interface AdminTelemetry {
@@ -1000,6 +1035,14 @@ export interface GatewayActivity {
     activeRequests: number;
     activeStreams: number;
     queuedRequests: number;
+  }>;
+}
+
+export interface AdminRuntimeStatus {
+  snapshot(): Readonly<{
+    version: string;
+    uptimeMs: number;
+    daemon: { readonly managed: boolean; readonly pid?: number; readonly startedAt?: string };
   }>;
 }
 ```

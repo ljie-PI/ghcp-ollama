@@ -403,11 +403,32 @@ export type AdminBootstrapResult =
 export interface AdminStaticModule {
   handle(request: Request, signal: AbortSignal): Promise<Response>;
 }
+
+export interface LocalControlModule {
+  handle(
+    request: Request,
+    context: Readonly<{
+      requestId: string;
+      signal: AbortSignal;
+      listenerOrigin: LoopbackOrigin;
+    }>,
+  ): Promise<Response>;
+  close(): void;
+}
+
+export interface AdminRuntimeStatus {
+  snapshot(): Readonly<{
+    version: string;
+    uptimeMs: number;
+    daemon: { readonly managed: boolean; readonly pid?: number; readonly startedAt?: string };
+  }>;
+}
 ```
 
-`GatewayDependencies` adds optional `admin?: AdminModule` and `adminStatic?: AdminStaticModule`. Existing RM-01 through
-RM-18 callers that omit them preserve identical behavior. Gateway owns Admin request-ID creation, caller/shutdown abort,
-active listener Origin and activity snapshot；`AdminModule` captures the current body limit from `RuntimeConfigStore`
+`GatewayDependencies` adds optional `admin?: AdminModule`、`control?: LocalControlModule` and
+`adminStatic?: AdminStaticModule`. Existing RM-01 through RM-18 callers that omit them preserve identical behavior。
+Gateway owns mounted request-ID creation、caller/shutdown abort、active listener Origin and activity snapshot；
+`AdminModule` captures the current body limit from `RuntimeConfigStore`
 and owns Admin parsing、validation、security、envelope and SSE lifecycle。Gateway supplies
 `AdminRequestContext.activity` per request, avoiding an Admin/Gateway composition
 cycle。Exact Admin API paths are matched before RM-21 static handling；unmatched `/admin/api/v1/*` never becomes
@@ -416,6 +437,23 @@ SPA HTML。
 This correction does not reopen observable behavior from RM-01 through RM-18：protocol `RouteRegistration`、Gateway
 public routes、admission、WireJson、timeouts and protocol presenters remain unchanged。Only RM-19、RM-20、RM-21 and
 their transitive RM-22 composition consume these optional interfaces。
+
+Exact `/__ghcg/control/v1/*` requests are matched before protocol routes and delegated to RM-19
+`LocalControlModule`。That module owns control-token/nonce/identity validation、command body validation、control envelope
+and `AdminModule.mintBootstrap()` invocation。It does not use protocol `RouteRegistration`、inference admission or
+Admin browser authentication。
+
+Control HTTP uses a fixed 1 MiB hard body cap。Status/stop/admin-bootstrap reject a nonempty body；command body read
+cancels at the first excess byte and returns control `400 invalid_command`。Caller abort cancels body/use-case work and
+emits no additional bytes。
+
+`createAdminModule` requires an `AdminRuntimeStatus` dependency。RM-19 production composition supplies build version、
+process uptime and verified daemon metadata；RM-20 contract tests use a scripted adapter。Admin never reads process
+globals or the daemon identity file。
+
+Gateway close ordering for optional mounts is exact：stop accepting mounted requests → abort mounted in-flight work →
+`LocalControlModule.close()` → `AdminModule.close()` → existing `onClose` persistence/transport cleanup。Both close
+methods are idempotent；control closes first so it cannot mint or dispatch after Admin teardown begins。
 
 Gateway Foundation owns body read/WireJson parse/admission；each Protocol Endpoint Module owns one
 `FailurePresenter` adapter and endpoint。For `anthropic-version`, an exact single value is accepted；the comma-merged
@@ -564,6 +602,7 @@ export interface WireJsonObject {
 | JSONL files/rotation | `JsonlLogger` | data directory | 10 MiB × 5、max age 7d |
 | Admin usage/event queries | `AdminTelemetry` | telemetry module / SQLite read adapter | read-only; reuses RM-05 retention/sanitizer |
 | Admin request/activity counters | `GatewayActivity` | process / read-only snapshot | no admission or stream mutation capability |
+| Admin version/uptime/daemon status | `AdminRuntimeStatus` | process / read-only snapshot | RM-19 production adapter; no file access from Admin |
 
 ### 6.2 Model resolution
 
@@ -2261,16 +2300,19 @@ route。Examples fixed by `RM-09` and required for later slices：
 - **Must read**：本文第 9 节、[Architecture](../architecture.md) CLI/security sections、
   [ADR-0004](../adr/0004-self-managed-daemon.md)。
 - **Owned scope/files**：`src/daemon/**`、daemon CLI command files、
+  additive control mount wiring in `src/gateway/hono_app.ts` and `src/gateway/create_gateway.ts`、
   serialized non-default composition update in `src/main.ts`、
   `tests/refactor/unit/daemon_identity.test.ts`、
   `tests/refactor/integration/daemon_lifecycle.test.ts`、
   `tests/refactor/integration/daemon_stale_pid.test.ts`。
 - **Deliverables/interface**：`DaemonController.start/stop/restart/status` and protected `DaemonIdentityFile`；
   foreground/managed identity publication；control operations `status`、`stop`、`admin-bootstrap`、`command`
-  require token + PID/start/nonce verification。
+  require token + PID/start/nonce verification；`createLocalControlModule(...): LocalControlModule` owns exact control
+  HTTP routes without widening protocol `RouteRegistration`。
 - **Admin seam**：Admin HTTP and local control receive the same running `AdminModule` instance；
   `admin-bootstrap` calls only `AdminModule.mintBootstrap()` and never creates a second auth/session/token store；
-  `kind:"capacity"|"closed"` maps to control `503 not_ready`。
+  `kind:"capacity"|"closed"` maps to control `503 not_ready`；production composition supplies
+  `AdminRuntimeStatus` from version、uptime and verified daemon state。
 - **Tests**：`npm run test:refactor -- tests/refactor/unit/daemon_identity.test.ts
   tests/refactor/integration/daemon_lifecycle.test.ts tests/refactor/integration/daemon_stale_pid.test.ts`；
   start readiness/failed start cleanup；idempotent status/stop；restart changes nonce/start identity；PID reuse/
@@ -2292,14 +2334,14 @@ route。Examples fixed by `RM-09` and required for later slices：
 - **Owned scope/files**：`src/admin/auth.ts`、`api.ts`、`events.ts`、`routes.ts`、
   additive Admin mount wiring in `src/gateway/hono_app.ts` and `src/gateway/create_gateway.ts`、
   read-only `src/telemetry/admin.ts`、optional observer hooks in `src/telemetry/recorder.ts` and
-  `src/telemetry/performance.ts`、serialized `src/main.ts` composition、
+  `src/telemetry/performance.ts`、
   `tests/refactor/contract/admin_auth.test.ts`、
   `tests/refactor/contract/admin_api.test.ts`、
   `tests/refactor/integration/admin_events.test.ts`。
 - **Deliverables/interface**：60s one-use bootstrap exchange、in-memory `AdminSession`、logout/session introspection；
   `createAdminModule(dependencies): AdminModule` covering all section 9.3 routes/DTOs/pagination/error envelope；
-  `AdminModule.mintBootstrap()` is the control-facing RM-19 seam；`AdminTelemetry` and `GatewayActivity` are read-only
-  module interfaces。Protocol `RouteRegistration` is unchanged。
+  `AdminModule.mintBootstrap()` is the control-facing RM-19 seam；`AdminTelemetry`、`GatewayActivity` and
+  `AdminRuntimeStatus` are read-only module interfaces。Protocol `RouteRegistration` is unchanged。
 - **Tests**：`npm run test:refactor -- tests/refactor/contract/admin_auth.test.ts
   tests/refactor/contract/admin_api.test.ts tests/refactor/integration/admin_events.test.ts`；
   token expiry/reuse/race；bootstrap no-session/CSRF exception with exact Origin；cookie flags；30m idle/12h
@@ -2311,6 +2353,9 @@ route。Examples fixed by `RM-09` and required for later slices：
   JSON 404 and never delegate to a fake static handler。Actual static serving belongs RM-21。
 - **Acceptance/done**：Admin can perform all six views' operations only through module interfaces；mutations fail closed；
   inference middleware/envelopes are not reused；state responses are no-store and sanitized。
+- **Composition handoff**：RM-20 exports the complete `AdminModule` factory and Gateway mount but does not edit production
+  `src/main.ts`。RM-19, which depends on RM-18 and RM-20, performs the single serialized production composition update
+  and injects the same Admin instance into Admin HTTP and local control。
 - **Non-goals/guardrails**：不 implement UI、WebSocket、persistent browser session、remote bind or expose long-term
   admin/control secret。
 - **PR handoff**：提供 route/DTO fixture index、cookie/CSRF bootstrap flow、scripted Admin backend and
