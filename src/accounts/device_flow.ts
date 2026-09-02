@@ -50,6 +50,8 @@ interface PendingFlow extends DeviceFlowSnapshot {
 
 export class DeviceFlowService {
   private readonly flows = new Map<string, PendingFlow>();
+  private readonly pollingFlows = new Set<string>();
+  private startingFlows = 0;
 
   constructor(
     private readonly directory: AccountDirectory,
@@ -60,11 +62,17 @@ export class DeviceFlowService {
   async start(host: string, signal?: AbortSignal): Promise<DeviceFlowSnapshot> {
     throwIfAborted(signal);
     this.gc();
-    if (this.flows.size >= MAX_DEVICE_FLOWS) {
+    if (this.flows.size + this.startingFlows >= MAX_DEVICE_FLOWS) {
       throw new DeviceFlowError("capacity", "too many active device flows");
     }
     const environment = resolveGitHubEnvironment(host);
-    const requested = await this.oauth.requestDeviceCode(environment, signal);
+    this.startingFlows += 1;
+    let requested: Awaited<ReturnType<DeviceOAuthClient["requestDeviceCode"]>>;
+    try {
+      requested = await this.oauth.requestDeviceCode(environment, signal);
+    } finally {
+      this.startingFlows -= 1;
+    }
     throwIfAborted(signal);
     const flowId = randomUUID();
     const snapshot: PendingFlow = {
@@ -74,7 +82,7 @@ export class DeviceFlowService {
       userCode: requested.userCode,
       verificationUri: requested.verificationUri,
       expiresAtMs: this.nowMs() + Math.min(requested.expiresInSec * 1000, DEVICE_FLOW_TTL_MS),
-      pollIntervalSeconds: requested.intervalSec,
+      pollIntervalSeconds: Math.max(1, requested.intervalSec),
     };
     this.flows.set(flowId, snapshot);
     return {
@@ -101,25 +109,33 @@ export class DeviceFlowService {
       this.flows.delete(flowId);
       return { status: "expired" };
     }
-    const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode, signal);
-    throwIfAborted(signal);
-    if (result.status === "pending") {
+    if (this.pollingFlows.has(flowId)) {
       return { status: "pending" };
     }
-    if (result.status === "failed") {
+    this.pollingFlows.add(flowId);
+    try {
+      const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode, signal);
+      throwIfAborted(signal);
+      if (result.status === "pending") {
+        return { status: "pending" };
+      }
+      if (result.status === "failed") {
+        this.flows.delete(flowId);
+        return { status: "failed" };
+      }
+      const secret: SecretCredential = { generation: 0, githubToken: result.accessToken };
+      const bound = await this.directory.upsertAuthenticated({
+        host: flow.environment.host,
+        userId: result.user.id,
+        login: result.user.login,
+        ...(result.user.name === undefined ? {} : { displayName: result.user.name }),
+        secret,
+      }, signal);
       this.flows.delete(flowId);
-      return { status: "failed" };
+      return { status: "complete", accountId: bound.accountId };
+    } finally {
+      this.pollingFlows.delete(flowId);
     }
-    const secret: SecretCredential = { generation: 0, githubToken: result.accessToken };
-    const bound = await this.directory.upsertAuthenticated({
-      host: flow.environment.host,
-      userId: result.user.id,
-      login: result.user.login,
-      ...(result.user.name === undefined ? {} : { displayName: result.user.name }),
-      secret,
-    });
-    this.flows.delete(flowId);
-    return { status: "complete", accountId: bound.accountId };
   }
 
   cancel(flowId: string): void {

@@ -23,12 +23,60 @@ export interface GatewayConfig {
   readonly runtime: RuntimeConfigSnapshot;
 }
 
+export type LoopbackOrigin = `http://127.0.0.1:${number}`;
+
+export interface GatewayActivity {
+  snapshot(): Readonly<{
+    activeRequests: number;
+    activeStreams: number;
+    queuedRequests: number;
+  }>;
+}
+
+export interface AdminRequestContext {
+  readonly requestId: string;
+  readonly signal: AbortSignal;
+  readonly listenerOrigin: LoopbackOrigin;
+  readonly activity: GatewayActivity;
+}
+
+export type AdminBootstrapResult =
+  | { readonly kind: "issued"; readonly token: string; readonly expiresAt: string }
+  | { readonly kind: "capacity" }
+  | { readonly kind: "closed" };
+
+export interface AdminModule {
+  handle(request: Request, context: Readonly<AdminRequestContext>): Promise<Response>;
+  mintBootstrap(): AdminBootstrapResult;
+  close(): void;
+}
+
+export interface AdminStaticModule {
+  handle(request: Request, signal: AbortSignal): Promise<Response>;
+}
+
+export interface LocalControlModule {
+  handle(
+    request: Request,
+    context: Readonly<{
+      requestId: string;
+      signal: AbortSignal;
+      listenerOrigin: LoopbackOrigin;
+    }>,
+  ): Promise<Response>;
+  close(): void;
+}
+
 export interface GatewayDependencies {
   readonly nowMs?: () => number;
   readonly delay?: DelayFn;
   readonly createRequestId?: () => string;
   readonly isReady?: () => boolean;
   readonly onClose?: () => Promise<void> | void;
+  readonly admin?: AdminModule;
+  readonly control?: LocalControlModule;
+  readonly adminStatic?: AdminStaticModule;
+  readonly readRuntimeConfig?: () => RuntimeConfigSnapshot;
 }
 
 export type { RouteRegistration };
@@ -45,16 +93,44 @@ export async function createGateway(
   const scheduler: TimeoutScheduler = { nowMs, delay };
   const admission = new AdmissionController(delay, nowMs);
   const inflight = new Set<AbortController>();
+  const mountedInflight = new Set<AbortController>();
+  let activeStreams = 0;
   let closed = false;
-  const app = createHonoApp(routes, {
-    runtime: config.runtime,
+  const activity: GatewayActivity | undefined = dependencies.admin === undefined
+    ? undefined
+    : {
+      snapshot: () => ({
+        activeRequests: admission.activeCount,
+        activeStreams,
+        queuedRequests: admission.queuedCount,
+      }),
+    };
+  const appDependencies = {
+    readRuntimeConfig: dependencies.readRuntimeConfig ?? (() => config.runtime),
     admission,
     scheduler,
     createRequestId: dependencies.createRequestId ?? defaultRequestId,
     isReady: dependencies.isReady ?? (() => true),
     isClosed: () => closed,
     inflight,
-  });
+    mountedInflight,
+    listenerOrigin: `http://${LOOPBACK_HOST}:${config.startup.port}` as LoopbackOrigin,
+    ...(dependencies.admin === undefined ? {} : { admin: dependencies.admin }),
+    ...(dependencies.control === undefined ? {} : { control: dependencies.control }),
+    ...(dependencies.adminStatic === undefined ? {} : { adminStatic: dependencies.adminStatic }),
+    ...(activity === undefined
+      ? {}
+      : {
+        activity,
+        streamStarted: () => {
+          activeStreams += 1;
+        },
+        streamFinished: () => {
+          activeStreams = Math.max(0, activeStreams - 1);
+        },
+      }),
+  };
+  const app = createHonoApp(routes, appDependencies);
 
   let listener: ReturnType<typeof serve> | undefined;
 
@@ -82,14 +158,28 @@ export async function createGateway(
         return;
       }
       closed = true;
+      for (const controller of mountedInflight) {
+        controller.abort();
+      }
+      mountedInflight.clear();
+      admission.close();
+      let closeError: unknown;
+      try {
+        dependencies.control?.close();
+      } catch (error: unknown) {
+        closeError ??= error;
+      }
+      try {
+        dependencies.admin?.close();
+      } catch (error: unknown) {
+        closeError ??= error;
+      }
       for (const controller of inflight) {
         controller.abort();
       }
       inflight.clear();
-      admission.close();
       const current = listener;
       listener = undefined;
-      let listenerCloseError: unknown;
       if (current !== undefined) {
         try {
           await new Promise<void>((resolve, reject) => {
@@ -102,12 +192,16 @@ export async function createGateway(
             });
           });
         } catch (error: unknown) {
-          listenerCloseError = error;
+          closeError ??= error;
         }
       }
-      await dependencies.onClose?.();
-      if (listenerCloseError !== undefined) {
-        throw listenerCloseError;
+      try {
+        await dependencies.onClose?.();
+      } catch (error: unknown) {
+        closeError ??= error;
+      }
+      if (closeError !== undefined) {
+        throw closeError;
       }
     },
   };

@@ -52,6 +52,7 @@ describe("RM-05 performance windows", () => {
     windows.observeBuffered(50);
     const result = windows.evaluateWindow();
     expect(result.snapshot.metrics.bufferedMs.status).toBe("insufficient_data");
+    expect(result.snapshot.metrics.bufferedMs.samples).toBeUndefined();
     expect(result.transition).toBeNull();
     expect(result.snapshot.status).toBe("healthy");
   });

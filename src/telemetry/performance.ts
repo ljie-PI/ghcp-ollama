@@ -14,12 +14,25 @@ export interface PerformanceSnapshot {
   readonly status: PerformanceStatus;
   readonly startedAtMs: number | null;
   readonly metrics: {
-    readonly bufferedMs: { readonly p95: number | null; readonly status: MetricStatus };
-    readonly eventMs: { readonly p95: number | null; readonly status: MetricStatus };
-    readonly checkpointMs: { readonly p95: number | null; readonly status: MetricStatus };
-    readonly eventLoopMs: { readonly p95: number | null; readonly status: MetricStatus };
+    readonly bufferedMs: PerformanceMetricSnapshot;
+    readonly eventMs: PerformanceMetricSnapshot;
+    readonly checkpointMs: PerformanceMetricSnapshot;
+    readonly eventLoopMs: PerformanceMetricSnapshot;
   };
 }
+
+export interface PerformanceMetricSnapshot {
+  readonly p95: number | null;
+  readonly status: MetricStatus;
+  readonly samples?: number;
+}
+
+export interface PerformanceEvaluation {
+  readonly snapshot: PerformanceSnapshot;
+  readonly transition: "enter" | "clear" | null;
+}
+
+export type PerformanceObserver = (evaluation: Readonly<PerformanceEvaluation>) => void;
 
 export class PerformanceWindows {
   private readonly buffered: number[] = [];
@@ -31,7 +44,10 @@ export class PerformanceWindows {
   private status: PerformanceStatus = "healthy";
   private degradedSinceMs: number | null = null;
 
-  constructor(private readonly nowMs: () => number = Date.now) {}
+  constructor(
+    private readonly nowMs: () => number = Date.now,
+    private readonly observer?: PerformanceObserver,
+  ) {}
 
   observeBuffered(ms: number): void {
     this.buffered.push(ms);
@@ -49,7 +65,7 @@ export class PerformanceWindows {
     this.eventLoop.push(ms);
   }
 
-  evaluateWindow(): { readonly snapshot: PerformanceSnapshot; readonly transition: "enter" | "clear" | null } {
+  evaluateWindow(): PerformanceEvaluation {
     const buffered = summarize(this.buffered, THRESHOLDS.bufferedMs);
     const event = summarize(this.event, THRESHOLDS.eventMs);
     const checkpoint = summarize(this.checkpoint, THRESHOLDS.checkpointMs);
@@ -84,19 +100,31 @@ export class PerformanceWindows {
       }
     }
 
-    return {
+    const evaluation: PerformanceEvaluation = {
       snapshot: {
         status: this.status,
         startedAtMs: this.degradedSinceMs,
         metrics: {
-          bufferedMs: buffered,
-          eventMs: event,
-          checkpointMs: checkpoint,
-          eventLoopMs: eventLoop,
+          bufferedMs: withoutSamples(buffered),
+          eventMs: withoutSamples(event),
+          checkpointMs: withoutSamples(checkpoint),
+          eventLoopMs: withoutSamples(eventLoop),
         },
       },
       transition,
     };
+    try {
+      this.observer?.({
+        ...evaluation,
+        snapshot: {
+          ...evaluation.snapshot,
+          metrics: { bufferedMs: buffered, eventMs: event, checkpointMs: checkpoint, eventLoopMs: eventLoop },
+        },
+      });
+    } catch {
+      // Monitoring observers cannot change performance state transitions.
+    }
+    return evaluation;
   }
 }
 
@@ -109,13 +137,17 @@ export function nearestRankP95(samples: readonly number[]): number | null {
   return sorted[Math.max(0, index)] ?? null;
 }
 
-function summarize(samples: readonly number[], threshold: number): { readonly p95: number | null; readonly status: MetricStatus } {
+function summarize(samples: readonly number[], threshold: number): PerformanceMetricSnapshot {
   if (samples.length < MIN_OBSERVATIONS) {
-    return { p95: nearestRankP95(samples), status: "insufficient_data" };
+    return { p95: nearestRankP95(samples), status: "insufficient_data", samples: samples.length };
   }
   const p95 = nearestRankP95(samples);
   if (p95 === null) {
-    return { p95: null, status: "insufficient_data" };
+    return { p95: null, status: "insufficient_data", samples: samples.length };
   }
-  return { p95, status: p95 > threshold ? "over" : "healthy" };
+  return { p95, status: p95 > threshold ? "over" : "healthy", samples: samples.length };
+}
+
+function withoutSamples(metric: PerformanceMetricSnapshot): PerformanceMetricSnapshot {
+  return { p95: metric.p95, status: metric.status };
 }

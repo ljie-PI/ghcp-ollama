@@ -65,6 +65,11 @@ export class AccountDirectory {
     ).all() as AccountRow[]).map(toSummary);
   }
 
+  defaultState(): { readonly defaultRevision: number; readonly defaultAccountId: AccountId | null } {
+    const prefs = this.readPrefs();
+    return { defaultRevision: prefs.revision, defaultAccountId: prefs.default_account_id };
+  }
+
   async bindDefault(_signal?: AbortSignal): Promise<BoundAccount> {
     const preferred = this.database.prepare(
       "SELECT default_account_id FROM gateway_preferences WHERE singleton_id = 1",
@@ -78,11 +83,6 @@ export class AccountDirectory {
 
   async bindAccount(accountId: AccountId, _signal?: AbortSignal): Promise<BoundAccount> {
     return this.bind(accountId);
-  }
-
-  defaultState(): { readonly defaultRevision: number; readonly defaultAccountId: AccountId | null } {
-    const prefs = this.readPrefs();
-    return { defaultRevision: prefs.revision, defaultAccountId: prefs.default_account_id };
   }
 
   defaultPreference(): { readonly revision: number; readonly defaultAccountId: string | null } {
@@ -108,11 +108,13 @@ export class AccountDirectory {
     readonly login?: string;
     readonly displayName?: string;
     readonly secret: SecretCredential;
-  }): Promise<BoundAccount> {
+  }, signal?: AbortSignal): Promise<BoundAccount> {
+    throwIfAborted(signal);
     const environment = resolveGitHubEnvironment(input.host);
     const userId = canonicalUserId(input.userId);
     const accountId = formatAccountId(environment.host, userId);
     return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, async () => {
+      throwIfAborted(signal);
       const existing = this.readAccount(accountId);
       if (existing?.credential_state === "removing") {
         throw new AccountDirectoryError("revision_conflict", "account removal is in progress");
@@ -124,6 +126,10 @@ export class AccountDirectory {
       const generation = (existing?.credential_generation ?? 0) + 1;
       const secret = { ...input.secret, generation };
       await this.credentials.putGeneration(accountId, generation, secret);
+      if (signal?.aborted === true) {
+        await this.credentials.prune(this.activeCredentialReferences());
+        throw new DOMException("aborted", "AbortError");
+      }
 
       const now = this.nowMs();
       try {
@@ -174,14 +180,33 @@ export class AccountDirectory {
 
       await this.credentials.prune(this.activeCredentialReferences());
       return this.bind(accountId);
-    }));
+    }, signal), signal);
   }
 
-  async remove(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
-    return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, () => this.removeUnlocked(accountId, expectedRevision)));
+  async remove(
+    accountId: AccountId,
+    expectedRevision: number,
+    signal?: AbortSignal,
+    onRemoving?: () => void,
+  ): Promise<AccountSummary> {
+    throwIfAborted(signal);
+    return await withAccountLifecycleLock(
+      () => withCredentialGenerationLock(
+        accountId,
+        () => this.removeUnlocked(accountId, expectedRevision, signal, onRemoving),
+        signal,
+      ),
+      signal,
+    );
   }
 
-  private async removeUnlocked(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
+  private async removeUnlocked(
+    accountId: AccountId,
+    expectedRevision: number,
+    signal?: AbortSignal,
+    onRemoving?: () => void,
+  ): Promise<AccountSummary> {
+    throwIfAborted(signal);
     const row = this.readAccount(accountId);
     if (row === undefined) {
       throw new AccountDirectoryError("not_found", "account not found");
@@ -190,6 +215,7 @@ export class AccountDirectory {
       throw new AccountDirectoryError("revision_conflict", "account revision conflict");
     }
     if (row.credential_state === "removed") {
+      onRemoving?.();
       return toSummary(row);
     }
 
@@ -205,7 +231,9 @@ export class AccountDirectory {
       })();
     }
 
+    onRemoving?.();
     await this.credentials.removeAccount(accountId);
+    throwIfAborted(signal);
     this.database.prepare(
       "UPDATE accounts SET credential_state = 'removed', credential_generation = NULL, revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
     ).run(this.nowMs(), accountId);
@@ -285,7 +313,7 @@ export class AccountDirectory {
   }
 }
 
-async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
+async function withAccountLifecycleLock<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const previous = accountLifecycleLock;
   let release: () => void = () => undefined;
   const current = new Promise<void>((resolve) => {
@@ -293,7 +321,17 @@ async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
   });
   const queued = previous.then(() => current);
   accountLifecycleLock = queued;
-  await previous;
+  try {
+    await waitForPrevious(previous, signal);
+  } catch (error: unknown) {
+    release();
+    void queued.finally(() => {
+      if (accountLifecycleLock === queued) {
+        accountLifecycleLock = Promise.resolve();
+      }
+    });
+    throw error;
+  }
   try {
     return await work();
   } finally {
@@ -301,6 +339,29 @@ async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
     if (accountLifecycleLock === queued) {
       accountLifecycleLock = Promise.resolve();
     }
+  }
+}
+
+async function waitForPrevious(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  if (signal === undefined) {
+    await previous;
+    return;
+  }
+  let removeAbortListener = (): void => undefined;
+  await Promise.race([
+    previous,
+    new Promise<void>((_resolve, reject) => {
+      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }),
+  ]).finally(removeAbortListener);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
   }
 }
 

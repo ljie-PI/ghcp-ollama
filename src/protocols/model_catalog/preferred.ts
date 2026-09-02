@@ -18,4 +18,17 @@ export class PreferredModelManager {
       catalogGeneration: catalog.generation,
     }, expectedRevision);
   }
+
+  markInvalidIfMissing(
+    accountId: string,
+    catalog: CatalogSnapshot,
+    expectedRevision: number | null,
+  ): ModelPreference | null {
+    return this.preferences.markInvalidIfMissing(
+      accountId,
+      new Set(catalog.models.map((model) => model.id)),
+      catalog.generation,
+      expectedRevision,
+    );
+  }
 }

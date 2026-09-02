@@ -107,7 +107,7 @@ describe("RM-05 usage and events", () => {
       });
       tel.recordEvent({
         occurredAtMs: now(),
-        kind: "config_updated",
+        kind: "runtime_config_changed",
         severity: "warning",
         metadata: { protocol: "x".repeat(20_000) },
       });
@@ -150,7 +150,7 @@ describe("RM-05 usage and events", () => {
       tel.recordUsage(usage({ occurredAtMs: now - 91 * 24 * 60 * 60 * 1000, accountId: "github.com/1" }));
       tel.recordUsage(usage({ occurredAtMs: now, accountId: "github.com/1", resolvedModel: "fresh" }));
       tel.recordEvent({ occurredAtMs: now - 8 * 24 * 60 * 60 * 1000, kind: "gateway_started", severity: "info" });
-      tel.recordEvent({ occurredAtMs: now, kind: "config_updated", severity: "info" });
+      tel.recordEvent({ occurredAtMs: now, kind: "runtime_config_changed", severity: "info" });
       await tel.flush();
       expect((database.prepare("SELECT COUNT(*) AS count FROM usage_buckets").get() as { count: number }).count).toBe(1);
       expect((database.prepare("SELECT COUNT(*) AS count FROM operational_events").get() as { count: number }).count).toBe(1);
