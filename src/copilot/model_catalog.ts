@@ -98,14 +98,44 @@ export function parseCapiModels(raw: CapiModelsResponse | unknown): CopilotCatal
     if (record.model_picker_enabled !== true) {
       continue;
     }
-    models.push({
+    const routing = routingFromRecord(record).routing;
+    const model = {
       id: record.id,
       name: record.name,
       vendor: record.vendor,
       modelPickerEnabled: true,
-    });
+    };
+    models.push(routing === undefined ? model : { ...model, routing });
   }
   return models;
+}
+
+function routingFromRecord(record: Record<string, unknown>): { readonly routing?: CopilotCatalogModel["routing"] } {
+  const raw = modelInfoRecord(record);
+  const mode = typeof raw?.mode === "string" ? raw.mode : undefined;
+  const supportedEndpoints = Array.isArray(raw?.supported_endpoints)
+    ? raw.supported_endpoints.filter((item): item is string => typeof item === "string")
+    : undefined;
+  if (mode !== undefined && supportedEndpoints !== undefined) {
+    return { routing: { mode, supportedEndpoints } };
+  }
+  if (mode !== undefined) {
+    return { routing: { mode } };
+  }
+  if (supportedEndpoints !== undefined) {
+    return { routing: { supportedEndpoints } };
+  }
+  return {};
+}
+
+function modelInfoRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  for (const key of ["model_info", "capabilities"]) {
+    const value = record[key];
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  }
+  return undefined;
 }
 
 export function toRfc3339Nano(date: Date): string {
