@@ -14,6 +14,7 @@ export const ADMIN_EVENT_HEARTBEAT_MS = 15_000;
 const encoder = new TextEncoder();
 
 interface Subscriber {
+  readonly replay: Uint8Array[];
   readonly queue: Array<{ readonly bytes: Uint8Array; readonly counted: boolean }>;
   readonly signal: AbortSignal;
   readonly activity: GatewayActivity;
@@ -82,10 +83,7 @@ export class AdminEventStreamHub {
     const pendingFrames = opening.operational
       .filter((pending) => initial.latestEventId === null || pending.eventId > initial.latestEventId)
       .map((pending) => pending.frame);
-    const frames = [...initial.frames, ...pendingFrames];
-    if (frames.length > ADMIN_EVENT_QUEUE_CAP || totalBytes(frames) > ADMIN_EVENT_QUEUE_BYTES) {
-      throw new AdminApiError("capacity_exceeded");
-    }
+    const frames = [...initial.frames];
     const latestEventId = opening.operational.at(-1)?.eventId ?? initial.latestEventId;
 
     let subscriber: Subscriber | undefined;
@@ -101,6 +99,7 @@ export class AdminEventStreamHub {
         const onAbort = (): void => this.closeSubscriber(subscriber);
         subscriber = {
           queue: [],
+          replay: frames,
           signal,
           activity,
           onAbort,
@@ -114,7 +113,7 @@ export class AdminEventStreamHub {
         };
         signal.addEventListener("abort", onAbort, { once: true });
         this.subscribers.add(subscriber);
-        for (const frame of frames) {
+        for (const frame of pendingFrames) {
           this.enqueue(subscriber, frame, true);
         }
         if (subscriber.closed) {
@@ -125,6 +124,11 @@ export class AdminEventStreamHub {
         const current = subscriber;
         if (current === undefined || current.closed) {
           controller.close();
+          return;
+        }
+        const replayFrame = current.replay.shift();
+        if (replayFrame !== undefined) {
+          controller.enqueue(replayFrame);
           return;
         }
         if (current.queue.length === 0) {
@@ -184,9 +188,6 @@ export class AdminEventStreamHub {
       latestEventId = replay.latestEventId === null ? BigInt(lastEventId) : BigInt(replay.latestEventId);
     }
     frames.push(performanceFrame(this.api.status(activity)));
-    if (frames.length > ADMIN_EVENT_QUEUE_CAP || totalBytes(frames) > ADMIN_EVENT_QUEUE_BYTES) {
-      throw new AdminApiError("capacity_exceeded");
-    }
     return { frames, latestEventId };
   }
 
@@ -248,6 +249,7 @@ export class AdminEventStreamHub {
     this.clearTimer(subscriber.heartbeat);
     subscriber.signal.removeEventListener("abort", subscriber.onAbort);
     subscriber.queue.length = 0;
+    subscriber.replay.length = 0;
     subscriber.queuedBytes = 0;
     subscriber.queuedEvents = 0;
     this.subscribers.delete(subscriber);
@@ -265,8 +267,4 @@ function performanceFrame(status: ReturnType<AdminManagementApi["status"]>): Uin
 
 function resetFrame(latestEventId: string | null): Uint8Array {
   return encoder.encode(`event: reset\ndata: ${JSON.stringify({ kind: "reset", reason: "history_unavailable", latestEventId })}\n\n`);
-}
-
-function totalBytes(frames: readonly Uint8Array[]): number {
-  return frames.reduce((total, frame) => total + frame.byteLength, 0);
 }

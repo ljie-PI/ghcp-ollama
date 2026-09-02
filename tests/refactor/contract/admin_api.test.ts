@@ -27,6 +27,7 @@ describe("RM-20 Admin API", () => {
       expect((await read(harness.gateway, "/admin/api/v1/models", session.cookie)).data).toMatchObject({
         accountId: "github.com:42", catalogGeneration: 7, items: [{ id: "gpt-test", maxInputTokens: null, maxOutputTokens: null }],
       });
+      expect(harness.dependencies.calls).not.toContain("preference-invalidated");
       expect((await read(harness.gateway, "/admin/api/v1/config", session.cookie)).data).toMatchObject({
         revision: 1, ranges: { "limits.requestBodyBytes": { min: 1_048_576, max: 67_108_864, unit: "bytes" } },
       });
@@ -110,6 +111,7 @@ describe("RM-20 Admin API", () => {
 async function createHarness(dependencies = adminDependencies()): Promise<{
   readonly gateway: Gateway;
   readonly admin: AdminModule;
+  readonly dependencies: ReturnType<typeof adminDependencies>;
   readonly close: () => Promise<void>;
 }> {
   let token = 0;
@@ -117,7 +119,7 @@ async function createHarness(dependencies = adminDependencies()): Promise<{
   const gateway = await createGateway({
     startup: parseStartupConfig([], {}, { homedir: "Q:/tmp/rm20-api" }), runtime: defaultRuntimeConfigSnapshot(),
   }, [], { admin, createRequestId: () => "req_admin_api" });
-  return { gateway, admin, close: async () => gateway.close() };
+  return { gateway, admin, dependencies, close: async () => gateway.close() };
 }
 
 async function read(gateway: Gateway, path: string, cookie: string): Promise<{ data: unknown }> {

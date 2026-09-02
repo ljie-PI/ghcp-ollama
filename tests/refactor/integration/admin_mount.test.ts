@@ -201,4 +201,64 @@ describe("RM-20 additive Gateway mount", () => {
     await gateway.close();
     expect(order).toEqual(["control", "admin", "onClose"]);
   });
+
+  it("captures the current runtime config for each later protocol request", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    let current = runtime;
+    const observed: number[] = [];
+    const route: RouteRegistration = {
+      method: "GET",
+      path: "/v1/runtime",
+      admission: "none",
+      body: "none",
+      presentFailure: () => new Response(null, { status: 500 }),
+      endpoint: async (_request, scope) => {
+        observed.push(scope.config.limits.requestBodyBytes);
+        return new Response(null, { status: 204 });
+      },
+    };
+    const gateway = await createGateway({ startup: startup(), runtime }, [route], {
+      readRuntimeConfig: () => current,
+    });
+
+    await gateway.fetch(new Request("http://127.0.0.1:31400/v1/runtime"));
+    current = structuredClone(runtime);
+    current.limits.requestBodyBytes = 1_048_576;
+    await gateway.fetch(new Request("http://127.0.0.1:31400/v1/runtime"));
+
+    expect(observed).toEqual([33_554_432, 1_048_576]);
+    await gateway.close();
+  });
+
+  it("closes admission before teardown can release a queued request", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 1;
+    let starts = 0;
+    let releaseFirst = (): void => undefined;
+    const route: RouteRegistration = {
+      method: "GET",
+      path: "/v1/blocked",
+      admission: "inference",
+      body: "none",
+      presentFailure: () => new Response(null, { status: 503 }),
+      endpoint: async () => {
+        starts += 1;
+        if (starts === 1) {
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        }
+        return new Response(null, { status: 204 });
+      },
+    };
+    const gateway = await createGateway({ startup: startup(), runtime }, [route]);
+    const first = gateway.fetch(new Request("http://127.0.0.1:31400/v1/blocked"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const queued = gateway.fetch(new Request("http://127.0.0.1:31400/v1/blocked"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const closing = gateway.close();
+    releaseFirst();
+    await Promise.all([first, queued, closing]);
+    expect(starts).toBe(1);
+  });
 });

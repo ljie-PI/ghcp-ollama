@@ -43,7 +43,7 @@ export interface RouteRegistration {
 }
 
 export interface HonoAppDependencies {
-  readonly runtime: RuntimeConfigSnapshot;
+  readonly readRuntimeConfig: () => RuntimeConfigSnapshot;
   readonly admission: AdmissionController;
   readonly scheduler: TimeoutScheduler;
   readonly createRequestId: () => string;
@@ -138,7 +138,7 @@ async function handleRoute(
     return new Response(null, { status: 503 });
   }
   const requestId = dependencies.createRequestId();
-  const snapshot = structuredClone(dependencies.runtime);
+  const snapshot = structuredClone(dependencies.readRuntimeConfig());
   const controller = new AbortController();
   dependencies.inflight.add(controller);
   const onAbort = (): void => controller.abort();

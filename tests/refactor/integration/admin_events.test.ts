@@ -81,6 +81,35 @@ describe("RM-20 Admin event stream", () => {
       await harness.close();
     }
   });
+
+  it("pulls every retained replay event beyond the live queue cap", async () => {
+    const dependencies = adminDependencies();
+    dependencies.telemetry.replayEvents = async (_after, signal) => {
+      signal.throwIfAborted();
+      return {
+        found: true,
+        latestEventId: "130",
+        items: Array.from({ length: 129 }, (_, index) => operationalEvent(String(index + 2))),
+      };
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = await open(harness.gateway, session.cookie, "1");
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      let text = "";
+      for (let index = 0; index < 130; index += 1) {
+        text += decode((await reader.read()).value);
+      }
+      expect(text).toContain("id: 2\n");
+      expect(text).toContain("id: 130\n");
+      expect(text).toContain("event: performance\n");
+      await reader.cancel();
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 async function createHarness(dependencies = adminDependencies()): Promise<{

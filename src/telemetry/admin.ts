@@ -593,10 +593,10 @@ function emptyPerformanceSnapshot(): PerformanceSnapshot {
     status: "healthy",
     startedAtMs: null,
     metrics: {
-      bufferedMs: { p95: null, status: "insufficient_data" },
-      eventMs: { p95: null, status: "insufficient_data" },
-      checkpointMs: { p95: null, status: "insufficient_data" },
-      eventLoopMs: { p95: null, status: "insufficient_data" },
+      bufferedMs: { p95: null, status: "insufficient_data", samples: 0 },
+      eventMs: { p95: null, status: "insufficient_data", samples: 0 },
+      checkpointMs: { p95: null, status: "insufficient_data", samples: 0 },
+      eventLoopMs: { p95: null, status: "insufficient_data", samples: 0 },
     },
   };
 }

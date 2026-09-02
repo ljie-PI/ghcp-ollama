@@ -14,11 +14,17 @@ export interface PerformanceSnapshot {
   readonly status: PerformanceStatus;
   readonly startedAtMs: number | null;
   readonly metrics: {
-    readonly bufferedMs: { readonly p95: number | null; readonly status: MetricStatus };
-    readonly eventMs: { readonly p95: number | null; readonly status: MetricStatus };
-    readonly checkpointMs: { readonly p95: number | null; readonly status: MetricStatus };
-    readonly eventLoopMs: { readonly p95: number | null; readonly status: MetricStatus };
+    readonly bufferedMs: PerformanceMetricSnapshot;
+    readonly eventMs: PerformanceMetricSnapshot;
+    readonly checkpointMs: PerformanceMetricSnapshot;
+    readonly eventLoopMs: PerformanceMetricSnapshot;
   };
+}
+
+export interface PerformanceMetricSnapshot {
+  readonly p95: number | null;
+  readonly status: MetricStatus;
+  readonly samples: number;
 }
 
 export interface PerformanceEvaluation {
@@ -125,13 +131,13 @@ export function nearestRankP95(samples: readonly number[]): number | null {
   return sorted[Math.max(0, index)] ?? null;
 }
 
-function summarize(samples: readonly number[], threshold: number): { readonly p95: number | null; readonly status: MetricStatus } {
+function summarize(samples: readonly number[], threshold: number): PerformanceMetricSnapshot {
   if (samples.length < MIN_OBSERVATIONS) {
-    return { p95: nearestRankP95(samples), status: "insufficient_data" };
+    return { p95: nearestRankP95(samples), status: "insufficient_data", samples: samples.length };
   }
   const p95 = nearestRankP95(samples);
   if (p95 === null) {
-    return { p95: null, status: "insufficient_data" };
+    return { p95: null, status: "insufficient_data", samples: samples.length };
   }
-  return { p95, status: p95 > threshold ? "over" : "healthy" };
+  return { p95, status: p95 > threshold ? "over" : "healthy", samples: samples.length };
 }

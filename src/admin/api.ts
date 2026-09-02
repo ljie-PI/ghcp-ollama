@@ -163,6 +163,10 @@ export interface AdminCatalog {
   invalidate(accountId: string): void;
 }
 
+export interface AdminAccountCaches {
+  invalidate(accountId: string): void;
+}
+
 export interface AdminPreferences {
   get(accountId: string): AdminStoredPreference | null;
   set(
@@ -200,7 +204,7 @@ export interface AdminHistory {
     readonly ttlDays: number;
     readonly maxResponses: number;
   };
-  clear(expectedRevision: number, signal?: AbortSignal): unknown;
+  clear(expectedRevision: number, signal?: AbortSignal): void;
 }
 
 export interface AdminApiDependencies {
@@ -212,6 +216,7 @@ export interface AdminApiDependencies {
   readonly history: AdminHistory;
   readonly telemetry: AdminTelemetry;
   readonly runtimeStatus: AdminRuntimeStatus;
+  readonly accountCaches: AdminAccountCaches;
 }
 
 export class AdminManagementApi {
@@ -288,7 +293,7 @@ export class AdminManagementApi {
 
   async removeAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<AdminAccount> {
     const removed = await this.dependencies.accounts.remove(accountId, expectedRevision, signal);
-    this.dependencies.catalog.invalidate(accountId);
+    this.dependencies.accountCaches.invalidate(accountId);
     signal.throwIfAborted();
     return this.account(removed);
   }
@@ -304,23 +309,25 @@ export class AdminManagementApi {
     if (resolved === null || this.requireAccount(resolved).state !== "active") {
       throw new AdminApiError("not_found");
     }
-    const before = this.dependencies.preferences.get(resolved);
     const catalog = await this.dependencies.catalog.get(resolved, signal);
     signal.throwIfAborted();
+    return this.modelsDto(catalog);
+  }
+
+  async refreshModels(accountId: string, signal: AbortSignal): Promise<AdminModels> {
+    this.requireAccount(accountId);
+    const before = this.dependencies.preferences.get(accountId);
+    this.dependencies.catalog.invalidate(accountId);
+    const catalog = await this.dependencies.catalog.get(accountId, signal);
+    signal.throwIfAborted();
     this.dependencies.preferences.markInvalidIfMissing(
-      resolved,
+      accountId,
       new Set(catalog.models.map((model) => model.id)),
       catalog.generation,
       before?.revision ?? null,
       signal,
     );
     return this.modelsDto(catalog);
-  }
-
-  async refreshModels(accountId: string, signal: AbortSignal): Promise<AdminModels> {
-    this.requireAccount(accountId);
-    this.dependencies.catalog.invalidate(accountId);
-    return await this.models(accountId, signal);
   }
 
   async setPreferredModel(
@@ -497,7 +504,7 @@ function performanceMetric(
     state: input.status === "over" ? "degraded" : input.status,
     actual: input.p95,
     threshold,
-    samples: input.p95 === null ? 0 : 1,
-    startedAt,
+    samples: input.samples,
+    startedAt: input.status === "over" ? startedAt : null,
   };
 }

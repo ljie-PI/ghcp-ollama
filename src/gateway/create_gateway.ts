@@ -76,6 +76,7 @@ export interface GatewayDependencies {
   readonly admin?: AdminModule;
   readonly control?: LocalControlModule;
   readonly adminStatic?: AdminStaticModule;
+  readonly readRuntimeConfig?: () => RuntimeConfigSnapshot;
 }
 
 export type { RouteRegistration };
@@ -105,7 +106,7 @@ export async function createGateway(
       }),
     };
   const appDependencies = {
-    runtime: config.runtime,
+    readRuntimeConfig: dependencies.readRuntimeConfig ?? (() => config.runtime),
     admission,
     scheduler,
     createRequestId: dependencies.createRequestId ?? defaultRequestId,
@@ -161,6 +162,7 @@ export async function createGateway(
         controller.abort();
       }
       mountedInflight.clear();
+      admission.close();
       let closeError: unknown;
       try {
         dependencies.control?.close();
@@ -176,7 +178,6 @@ export async function createGateway(
         controller.abort();
       }
       inflight.clear();
-      admission.close();
       const current = listener;
       listener = undefined;
       if (current !== undefined) {

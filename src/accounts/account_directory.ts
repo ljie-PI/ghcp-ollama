@@ -177,11 +177,16 @@ export class AccountDirectory {
     }));
   }
 
-  async remove(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
-    return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, () => this.removeUnlocked(accountId, expectedRevision)));
+  async remove(accountId: AccountId, expectedRevision: number, signal?: AbortSignal): Promise<AccountSummary> {
+    throwIfAborted(signal);
+    return await withAccountLifecycleLock(
+      () => withCredentialGenerationLock(accountId, () => this.removeUnlocked(accountId, expectedRevision, signal), signal),
+      signal,
+    );
   }
 
-  private async removeUnlocked(accountId: AccountId, expectedRevision: number): Promise<AccountSummary> {
+  private async removeUnlocked(accountId: AccountId, expectedRevision: number, signal?: AbortSignal): Promise<AccountSummary> {
+    throwIfAborted(signal);
     const row = this.readAccount(accountId);
     if (row === undefined) {
       throw new AccountDirectoryError("not_found", "account not found");
@@ -206,6 +211,7 @@ export class AccountDirectory {
     }
 
     await this.credentials.removeAccount(accountId);
+    throwIfAborted(signal);
     this.database.prepare(
       "UPDATE accounts SET credential_state = 'removed', credential_generation = NULL, revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
     ).run(this.nowMs(), accountId);
@@ -285,7 +291,7 @@ export class AccountDirectory {
   }
 }
 
-async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
+async function withAccountLifecycleLock<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const previous = accountLifecycleLock;
   let release: () => void = () => undefined;
   const current = new Promise<void>((resolve) => {
@@ -293,7 +299,17 @@ async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
   });
   const queued = previous.then(() => current);
   accountLifecycleLock = queued;
-  await previous;
+  try {
+    await waitForPrevious(previous, signal);
+  } catch (error: unknown) {
+    release();
+    void queued.finally(() => {
+      if (accountLifecycleLock === queued) {
+        accountLifecycleLock = Promise.resolve();
+      }
+    });
+    throw error;
+  }
   try {
     return await work();
   } finally {
@@ -301,6 +317,29 @@ async function withAccountLifecycleLock<T>(work: () => Promise<T>): Promise<T> {
     if (accountLifecycleLock === queued) {
       accountLifecycleLock = Promise.resolve();
     }
+  }
+}
+
+async function waitForPrevious(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  if (signal === undefined) {
+    await previous;
+    return;
+  }
+  let removeAbortListener = (): void => undefined;
+  await Promise.race([
+    previous,
+    new Promise<void>((_resolve, reject) => {
+      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }),
+  ]).finally(removeAbortListener);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
   }
 }
 

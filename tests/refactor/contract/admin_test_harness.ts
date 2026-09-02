@@ -65,10 +65,10 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         performance: {
           status: "healthy", startedAtMs: null,
           metrics: {
-            bufferedMs: { p95: null, status: "insufficient_data" },
-            eventMs: { p95: null, status: "insufficient_data" },
-            checkpointMs: { p95: null, status: "insufficient_data" },
-            eventLoopMs: { p95: null, status: "insufficient_data" },
+            bufferedMs: { p95: null, status: "insufficient_data", samples: 0 },
+            eventMs: { p95: null, status: "insufficient_data", samples: 0 },
+            checkpointMs: { p95: null, status: "insufficient_data", samples: 0 },
+            eventLoopMs: { p95: null, status: "insufficient_data", samples: 0 },
           },
         },
       };
@@ -127,7 +127,10 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         preference = { accountId, revision: expectedRevision + 1, modelId: candidate.modelId, validity: "valid", catalogGeneration: candidate.catalogGeneration };
         return preference;
       },
-      markInvalidIfMissing: () => preference,
+      markInvalidIfMissing: () => {
+        calls.push("preference-invalidated");
+        return preference;
+      },
     },
     runtimeConfig: {
       readSnapshot: () => config,
@@ -149,6 +152,9 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     telemetry,
     runtimeStatus: {
       snapshot: () => ({ version: "test", uptimeMs: 1234, daemon: { managed: true, pid: 123, startedAt: "2027-01-15T07:00:00.000Z" } }),
+    },
+    accountCaches: {
+      invalidate: (accountId) => calls.push(`invalidate-account:${accountId}`),
     },
     nowMs: () => now.value,
   };
