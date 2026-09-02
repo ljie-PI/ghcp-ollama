@@ -70,7 +70,7 @@ describe("RM-20 Admin API", () => {
 
   it("owns strict media, bounded body, no-body, query, unknown route, and signal handling", async () => {
     const dependencies = adminDependencies();
-    dependencies.runtimeConfig.readSnapshot().limits.requestBodyBytes = 64;
+    dependencies.runtimeConfig.read().config.limits.requestBodyBytes = 64;
     const harness = await createHarness(dependencies);
     try {
       const session = await login(harness.gateway, harness.admin);
@@ -83,7 +83,7 @@ describe("RM-20 Admin API", () => {
       expect((await rawMutation(harness.gateway, "/admin/api/v1/device-flows", session, JSON.stringify({ host: "x".repeat(100) }), "application/json")).status).toBe(400);
       expect((await rawMutation(harness.gateway, "/admin/api/v1/auth/bootstrap", session, JSON.stringify({ token: "x".repeat(129) }), "application/json")).status).toBe(400);
 
-      dependencies.runtimeConfig.readSnapshot().limits.requestBodyBytes = 256;
+      dependencies.runtimeConfig.read().config.limits.requestBodyBytes = 256;
       expect((await rawMutation(harness.gateway, "/admin/api/v1/device-flows", session, JSON.stringify({ host: "x".repeat(100) }), "application/json")).status).toBe(201);
 
       expect((await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/logout`, {

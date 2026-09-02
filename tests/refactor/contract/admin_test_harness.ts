@@ -1,4 +1,4 @@
-import { defaultRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "../../../src/config/schema.js";
+import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import type { AdminModuleDependencies } from "../../../src/admin/routes.js";
 import type { AdminMonitorEvent, AdminTelemetry } from "../../../src/telemetry/admin.js";
 import type { AdminModule, Gateway } from "../../../src/gateway/create_gateway.js";
@@ -140,13 +140,14 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       get: (modelId) => modelId === "gpt-test" ? { maxInputTokens: 200_000, maxOutputTokens: 8_192 } : null,
     },
     runtimeConfig: {
-      readSnapshot: () => config,
-      readRevision: () => configRevision,
-      update: (candidate, expectedRevision) => {
+      read: () => ({ revision: configRevision, config }),
+      updateAndApply: (candidate, expectedRevision, signal) => {
+        signal.throwIfAborted();
         if (expectedRevision !== configRevision) throw coded("revision_conflict");
-        config = structuredClone(candidate) as RuntimeConfigSnapshot;
+        config = structuredClone(candidate);
         configRevision += 1;
-        return config;
+        calls.push(`config-applied:${configRevision}`);
+        return { revision: configRevision, config };
       },
     },
     history: {

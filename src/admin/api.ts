@@ -202,10 +202,13 @@ export interface AdminStoredPreference extends AdminPreference {
   readonly catalogGeneration: number;
 }
 
-export interface AdminRuntimeConfigStore {
-  readSnapshot(): RuntimeConfigSnapshot;
-  readRevision(): number;
-  update(candidate: unknown, expectedRevision: number, signal?: AbortSignal): RuntimeConfigSnapshot;
+export interface AdminRuntimeConfigManager {
+  read(): Readonly<{ revision: number; config: RuntimeConfigSnapshot }>;
+  updateAndApply(
+    candidate: RuntimeConfigSnapshot,
+    expectedRevision: number,
+    signal: AbortSignal,
+  ): Readonly<{ revision: number; config: RuntimeConfigSnapshot }>;
 }
 
 export interface AdminHistory {
@@ -227,7 +230,7 @@ export interface AdminApiDependencies {
   readonly preferences: AdminPreferences;
   readonly preferredModels: AdminPreferredModels;
   readonly modelMetadata: AdminModelMetadata;
-  readonly runtimeConfig: AdminRuntimeConfigStore;
+  readonly runtimeConfig: AdminRuntimeConfigManager;
   readonly history: AdminHistory;
   readonly telemetry: AdminTelemetry;
   readonly runtimeStatus: AdminRuntimeStatus;
@@ -241,7 +244,7 @@ export class AdminManagementApi {
 
   status(activity: GatewayActivity): AdminStatus {
     const runtime = this.dependencies.runtimeStatus.snapshot();
-    const config = this.dependencies.runtimeConfig.readSnapshot();
+    const config = this.dependencies.runtimeConfig.read().config;
     const telemetry = this.dependencies.telemetry.snapshot();
     const history = this.dependencies.history.inspect();
     const active = activity.snapshot();
@@ -387,18 +390,14 @@ export class AdminManagementApi {
   }
 
   runtimeConfig(): AdminRuntimeConfig {
-    return {
-      revision: this.dependencies.runtimeConfig.readRevision(),
-      config: this.dependencies.runtimeConfig.readSnapshot(),
-      ranges: RUNTIME_CONFIG_RANGES,
-    };
+    return this.runtimeConfigDto(this.dependencies.runtimeConfig.read());
   }
 
   updateRuntimeConfig(config: RuntimeConfigSnapshot, expectedRevision: number, signal: AbortSignal): AdminRuntimeConfig {
     signal.throwIfAborted();
-    this.dependencies.runtimeConfig.update(config, expectedRevision, signal);
+    const updated = this.dependencies.runtimeConfig.updateAndApply(config, expectedRevision, signal);
     signal.throwIfAborted();
-    return this.runtimeConfig();
+    return this.runtimeConfigDto(updated);
   }
 
   history(): AdminHistorySummary {
@@ -475,6 +474,12 @@ export class AdminManagementApi {
       throw new AdminApiError("not_found");
     }
     return account;
+  }
+
+  private runtimeConfigDto(
+    state: Readonly<{ revision: number; config: RuntimeConfigSnapshot }>,
+  ): AdminRuntimeConfig {
+    return { ...state, ranges: RUNTIME_CONFIG_RANGES };
   }
 
   private async withModelMutation<T>(
