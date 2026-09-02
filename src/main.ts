@@ -1,7 +1,8 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import type { AccountDirectory, BoundAccount } from "./accounts/account_directory.js";
+import type { AccountDirectory } from "./accounts/account_directory.js";
 import { FileCredentialStore, type CredentialStore } from "./accounts/credential_store.js";
+import { createCopilotEndpointDiscovery, refreshCopilotToken } from "./copilot/credential_provider.js";
 import { HttpCopilotModelsSource } from "./copilot/models_source.js";
 import { CopilotModelCatalog, type CopilotModelsSource } from "./copilot/model_catalog.js";
 import { HttpCopilotBackend } from "./copilot/transport.js";
@@ -21,6 +22,7 @@ import { migration as responsesHistoryMigration } from "./persistence/migrations
 import { AccountDirectory as SqliteAccountDirectory } from "./accounts/account_directory.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { createModelCatalogRoutes } from "./protocols/model_catalog/routes.js";
+import type { OllamaTokenCounter } from "./protocols/ollama_chat/bridge.js";
 import { createOpenAiChatRoute } from "./protocols/openai_chat/endpoint.js";
 import { createOllamaChatRoutes } from "./protocols/ollama_chat/endpoint.js";
 import { createAnthropicMessagesRoute } from "./protocols/anthropic_messages/endpoint.js";
@@ -48,6 +50,7 @@ export interface ApplicationContext {
   readonly telemetry?: TelemetryRecorder;
   readonly modelsSource?: CopilotModelsSource;
   readonly runtime?: RuntimeConfigStore;
+  readonly tokenCounter?: OllamaTokenCounter;
   close?(): Promise<void> | void;
 }
 
@@ -94,7 +97,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
     ...createOllamaChatRoutes({
       directory: context.directory,
       copilot: context.copilot,
-      tokenCounter: () => 0,
+      tokenCounter: context.tokenCounter ?? countApproximateOllamaTokens,
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
@@ -131,7 +134,7 @@ export async function createProductionApplicationContext(
   const credentials = new FileCredentialStore(path.join(startup.dataDir, "credentials.json"));
   const directory = new SqliteAccountDirectory(database, credentials, Date.now, snapshot.accounts.maxAuthenticated);
   await directory.reconcile();
-  const fetchDiscovery = async (account: BoundAccount, signal?: AbortSignal): Promise<string | null> => await fetchCopilotDiscovery(credentials, account, signal);
+  const fetchDiscovery = createCopilotEndpointDiscovery(credentials);
   const modelsSource = new HttpCopilotModelsSource(async (accountId, signal) => {
     const account = await directory.bindAccount(accountId, signal);
     const token = await getValidToken(credentials, account, Date.now(), refreshCopilotToken, signal);
@@ -166,93 +169,8 @@ export async function createProductionApplicationContext(
   };
 }
 
-async function refreshCopilotToken(githubToken: string, signal?: AbortSignal): Promise<{ token: string; expiresAtMs: number }> {
-  const response = await fetch("https://api.github.com/copilot_internal/v2/token", {
-    method: "GET",
-    headers: {
-      authorization: `Bearer ${githubToken}`,
-      accept: "application/json",
-    },
-    ...(signal === undefined ? {} : { signal }),
-  });
-  if (!response.ok) {
-    throw new Error("copilot token refresh failed");
-  }
-  const body = await response.json() as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
-  if (typeof body.token !== "string") {
-    throw new Error("copilot token refresh failed");
-  }
-  return {
-    token: body.token,
-    expiresAtMs: tokenExpiry(body),
-  };
-}
-
-async function fetchCopilotDiscovery(credentials: CredentialStore, account: BoundAccount, signal?: AbortSignal): Promise<string | null> {
-  const credential = await credentials.readGeneration(account.accountId, account.credentialGeneration);
-  if (credential === null) {
-    return null;
-  }
-  const base = account.environment.apiBaseUrl;
-  const url = new URL("copilot_internal/user", `${base.replace(/\/+$/u, "")}/`);
-  try {
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        authorization: `Bearer ${credential.githubToken}`,
-        accept: "application/json",
-      },
-      ...(signal === undefined ? {} : { signal }),
-    });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      return null;
-    }
-    const endpoint = endpointFromCopilotUser(await response.json() as unknown);
-    return endpoint;
-  } catch (_error: unknown) {
-    return null;
-  }
-}
-
-function endpointFromCopilotUser(value: unknown): string | null {
-  if (!isObject(value) || typeof value.copilot_plan !== "string" || typeof value.quota_reset_date !== "string" || !isQuotaSnapshots(value.quota_snapshots)) {
-    return null;
-  }
-  if (value.endpoints === undefined || value.endpoints === null) {
-    return null;
-  }
-  if (!isObject(value.endpoints) || typeof value.endpoints.api !== "string") {
-    return null;
-  }
-  return value.endpoints.api;
-}
-
-function isQuotaSnapshots(value: unknown): boolean {
-  if (!isObject(value)) {
-    return false;
-  }
-  return isQuotaDetail(value.chat) && isQuotaDetail(value.completions) && isQuotaDetail(value.premium_interactions);
-}
-
-function isQuotaDetail(value: unknown): boolean {
-  return isObject(value)
-    && Number.isInteger(value.entitlement)
-    && Number.isInteger(value.remaining)
-    && typeof value.percent_remaining === "number"
-    && typeof value.unlimited === "boolean";
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function tokenExpiry(body: { readonly expires_at?: unknown; readonly expires_in?: unknown }): number {
-  if (typeof body.expires_at === "number") {
-    return body.expires_at * 1000;
-  }
-  if (typeof body.expires_in === "number") {
-    return Date.now() + body.expires_in * 1000;
-  }
-  return Date.now() + 30 * 60 * 1000;
+function countApproximateOllamaTokens(input: { readonly messages?: unknown; readonly text?: string }): number {
+  const text = input.text ?? JSON.stringify(input.messages ?? "");
+  const trimmed = text.trim();
+  return trimmed.length === 0 ? 0 : trimmed.split(/\s+/u).length;
 }

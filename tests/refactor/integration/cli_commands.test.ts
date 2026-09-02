@@ -5,7 +5,7 @@ import { DeviceFlowService, type DeviceOAuthClient } from "../../../src/accounts
 import { ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
 import { CopilotModelCatalog } from "../../../src/copilot/model_catalog.js";
 import { runCli } from "../../../src/cli/main.js";
-import { CliError, ScriptedControlClient } from "../../../src/cli/control_client.js";
+import { CliError, HttpControlClient, ScriptedControlClient } from "../../../src/cli/control_client.js";
 import { CommandDispatcher, DispatcherControlClient } from "../../../src/cli/commands/dispatcher.js";
 import { RuntimeConfigStore } from "../../../src/config/runtime_config.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
@@ -106,12 +106,67 @@ describe("RM-18 CLI commands", () => {
       expect(await client.request("config.get", { key: "admission.activeMax" }, { dataDir: "unused" })).toMatchObject({ key: "admission.activeMax", value: 4 });
       expect(await client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "unused" })).toMatchObject({ config: { admission: { activeMax: 2, queueMax: 16 } } });
       await expect(client.request("config.set", { key: "port", value: "31401" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "validation_error" });
-      await expect(client.request("models.set", { modelId: "missing" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "internal_error" });
+      await expect(client.request("models.set", { modelId: "missing" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
+      expect(await client.request("auth.status", {}, { dataDir: "unused" })).toMatchObject({ defaultAccountId: "github.com/42", accounts: [{ accountId: "github.com/42" }] });
       const removed = await client.request("accounts.remove", { accountId: "github.com/42" }, { dataDir: "unused" });
       expect(removed.state).toBe("removed");
     } finally {
       harness.close();
     }
+  });
+
+  it("returns device-flow expired and failed terminal states once", async () => {
+    let nowValue = 1_800_000_000_000;
+    const expiredHarness = await dispatcherHarness({ device: expiringDeviceClient(), now: () => nowValue });
+    try {
+      const client = new DispatcherControlClient(expiredHarness.dispatcher);
+      const started = await client.request("auth.login.start", {}, { dataDir: "unused" });
+      nowValue += 2_000;
+      expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "expired" });
+      await expect(client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
+    } finally {
+      expiredHarness.close();
+    }
+
+    const failedHarness = await dispatcherHarness({ device: failedDeviceClient() });
+    try {
+      const client = new DispatcherControlClient(failedHarness.dispatcher);
+      const started = await client.request("auth.login.start", {}, { dataDir: "unused" });
+      expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "failed" });
+      await expect(client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
+    } finally {
+      failedHarness.close();
+    }
+  });
+
+  it("uses the protected loopback control transport when an identity exists", async () => {
+    const calls: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
+    const client = new HttpControlClient(async (url, init) => {
+      calls.push({ url: String(url), ...(init === undefined ? {} : { init }) });
+      return new Response(JSON.stringify({ data: { ok: true } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }, async () => ({
+      managed: false,
+      pid: 123,
+      processStartIdentity: "start",
+      instanceNonce: "nonce",
+      controlToken: "control-token",
+      port: 31_400,
+      createdAt: "2026-09-02T00:00:00.000Z",
+    }));
+    await client.request("config.get", {}, { dataDir: "selected" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://127.0.0.1:31400/__ghcg/control/v1/command");
+    expect(calls[0]?.init?.headers).toMatchObject({
+      "x-ghcg-control-token": "control-token",
+      "x-ghcg-instance-nonce": "nonce",
+    });
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ operation: "config.get", arguments: {} }));
+
+    const unavailable = new HttpControlClient(fetch, async () => null);
+    await expect(unavailable.request("config.get", {}, { dataDir: "missing" })).rejects.toMatchObject({ code: "unavailable" });
   });
 
   it("foreground serve emits one running result and closes on shutdown", async () => {
@@ -184,7 +239,10 @@ describe("RM-18 CLI commands", () => {
   });
 });
 
-async function dispatcherHarness(): Promise<{
+async function dispatcherHarness(options: {
+  readonly device?: DeviceOAuthClient;
+  readonly now?: () => number;
+} = {}): Promise<{
   readonly dispatcher: CommandDispatcher;
   readonly directory: AccountDirectory;
   readonly catalog: CopilotModelCatalog;
@@ -192,6 +250,7 @@ async function dispatcherHarness(): Promise<{
   readonly history: SqliteResponsesHistory;
   readonly close: () => void;
 }> {
+  const now = options.now ?? (() => 1_800_000_000_000);
   const database = openDatabase({
     path: ":memory:",
     migrations: [
@@ -200,24 +259,24 @@ async function dispatcherHarness(): Promise<{
       embedMigration(telemetryMigration),
       embedMigration(historyMigration),
     ],
-    nowMs: () => 1_800_000_000_000,
+    nowMs: now,
   });
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), () => 1_800_000_000_000);
+  const directory = new AccountDirectory(database, new MemoryCredentialStore(), now);
   const catalog = new CopilotModelCatalog({
     async fetch() {
       return { data: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }] };
     },
   });
-  const runtimeConfig = new RuntimeConfigStore(database, () => 1_800_000_000_000);
+  const runtimeConfig = new RuntimeConfigStore(database, now);
   runtimeConfig.seedIfEmpty({});
-  const history = new SqliteResponsesHistory(database, { nowMs: () => 1_800_000_000_000 });
+  const history = new SqliteResponsesHistory(database, { nowMs: now });
   const backend = new ScriptedCopilotBackend({
     chat: { status: 200, headers: new Headers(), body: encoder.encode("{\"choices\":[]}") },
     responses: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
   });
   const dispatcher = new CommandDispatcher({
     directory,
-    deviceFlows: new DeviceFlowService(directory, deviceClient(), () => 1_800_000_000_000),
+    deviceFlows: new DeviceFlowService(directory, options.device ?? deviceClient(), now),
     catalog,
     runtimeConfig,
   });
@@ -228,6 +287,40 @@ async function dispatcherHarness(): Promise<{
     backend,
     history,
     close: () => closeDatabase(database),
+  };
+}
+
+function expiringDeviceClient(): DeviceOAuthClient {
+  return {
+    async requestDeviceCode() {
+      return {
+        deviceCode: "device",
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+        intervalSec: 5,
+        expiresInSec: 1,
+      };
+    },
+    async exchangeDeviceCode() {
+      return { status: "pending" };
+    },
+  };
+}
+
+function failedDeviceClient(): DeviceOAuthClient {
+  return {
+    async requestDeviceCode() {
+      return {
+        deviceCode: "device",
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+        intervalSec: 5,
+        expiresInSec: 900,
+      };
+    },
+    async exchangeDeviceCode() {
+      return { status: "failed" };
+    },
   };
 }
 

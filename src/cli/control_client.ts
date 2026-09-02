@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
@@ -104,6 +105,11 @@ export interface AdminAccounts {
   readonly items: readonly AdminAccount[];
 }
 
+export interface AuthStatus {
+  readonly defaultAccountId: string | null;
+  readonly accounts: readonly AdminAccount[];
+}
+
 export interface AdminModels {
   readonly accountId: string;
   readonly catalogGeneration: number;
@@ -157,7 +163,7 @@ export interface ControlOperationMap {
   };
   readonly "auth.status": {
     readonly args: Record<string, never>;
-    readonly result: AdminAccounts;
+    readonly result: AuthStatus;
   };
   readonly "accounts.list": {
     readonly args: Record<string, never>;
@@ -261,24 +267,180 @@ export class ScriptedControlClient implements ControlClient {
 }
 
 export class HttpControlClient implements ControlClient {
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly readIdentity: (dataDir: string) => Promise<ControlIdentity | null> = readControlIdentity,
+  ) {}
+
   async lifecycle(action: LifecycleAction, context: CliLifecycleContext): Promise<CliLifecycleResult> {
-    if (action === "status" || action === "stop") {
+    if (action === "start" || action === "restart") {
+      throw new CliError("unavailable");
+    }
+    const identity = await this.readIdentity(context.dataDir);
+    if (identity === null) {
       return stoppedLifecycle(context.dataDir);
     }
-    throw new CliError("unavailable");
+    if (action === "status") {
+      const data = await this.controlRequest(identity, "GET", "/__ghcg/control/v1/status");
+      return lifecycleFromControlStatus(data, context.dataDir);
+    }
+    const data = await this.controlRequest(identity, "POST", "/__ghcg/control/v1/stop");
+    return lifecycleFromControlStatus(data, context.dataDir, "stopped");
   }
 
   async request<Operation extends ControlOperation>(
-    _operation: Operation,
-    _args: ControlOperationMap[Operation]["args"],
-    _context: CliLifecycleContext,
+    operation: Operation,
+    args: ControlOperationMap[Operation]["args"],
+    context: CliLifecycleContext,
   ): Promise<ControlOperationMap[Operation]["result"]> {
-    throw new CliError("unavailable");
+    const identity = await this.requireIdentity(context.dataDir);
+    const data = await this.controlRequest(identity, "POST", "/__ghcg/control/v1/command", {
+      operation,
+      arguments: args,
+    });
+    return data as ControlOperationMap[Operation]["result"];
   }
 
-  async adminOpen(_context: CliLifecycleContext): Promise<CliAdminOpenResult> {
-    throw new CliError("unavailable");
+  async adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult> {
+    const identity = await this.requireIdentity(context.dataDir);
+    await this.controlRequest(identity, "POST", "/__ghcg/control/v1/admin-bootstrap");
+    return { opened: true };
   }
+
+  private async requireIdentity(dataDir: string): Promise<ControlIdentity> {
+    const identity = await this.readIdentity(dataDir);
+    if (identity === null) {
+      throw new CliError("unavailable");
+    }
+    return identity;
+  }
+
+  private async controlRequest(
+    identity: ControlIdentity,
+    method: "GET" | "POST",
+    pathPart: string,
+    body?: unknown,
+  ): Promise<unknown> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`http://127.0.0.1:${identity.port}${pathPart}`, {
+        method,
+        headers: {
+          "content-type": "application/json",
+          "x-ghcg-control-token": identity.controlToken,
+          "x-ghcg-instance-nonce": identity.instanceNonce,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (_error: unknown) {
+      throw new CliError("daemon_unreachable");
+    }
+    const payload = await response.json().catch(() => null) as unknown;
+    if (response.ok && isObject(payload) && "data" in payload) {
+      return payload.data;
+    }
+    throw cliErrorFromControlResponse(response.status, payload);
+  }
+}
+
+interface ControlIdentity {
+  readonly managed: boolean;
+  readonly pid: number;
+  readonly processStartIdentity: string;
+  readonly instanceNonce: string;
+  readonly controlToken: string;
+  readonly port: number;
+  readonly createdAt: string;
+}
+
+async function readControlIdentity(dataDir: string): Promise<ControlIdentity | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(dataDir, "daemon.json"), "utf8")) as unknown;
+    if (!isObject(parsed)
+      || typeof parsed.managed !== "boolean"
+      || !Number.isInteger(parsed.pid)
+      || typeof parsed.processStartIdentity !== "string"
+      || typeof parsed.instanceNonce !== "string"
+      || typeof parsed.controlToken !== "string"
+      || !Number.isInteger(parsed.port)
+      || typeof parsed.createdAt !== "string") {
+      throw new CliError("security_error");
+    }
+    return {
+      managed: parsed.managed,
+      pid: numberValue(parsed.pid),
+      processStartIdentity: parsed.processStartIdentity,
+      instanceNonce: parsed.instanceNonce,
+      controlToken: parsed.controlToken,
+      port: numberValue(parsed.port),
+      createdAt: parsed.createdAt,
+    };
+  } catch (error: unknown) {
+    if (error instanceof CliError) {
+      throw error;
+    }
+    if (isNodeNotFound(error)) {
+      return null;
+    }
+    throw new CliError("security_error");
+  }
+}
+
+function lifecycleFromControlStatus(data: unknown, dataDir: string, fallbackState: CliLifecycleResult["state"] = "running"): CliLifecycleResult {
+  if (!isObject(data)) {
+    throw new CliError("remote_error");
+  }
+  const state = typeof data.state === "string" ? data.state : fallbackState;
+  const instance = isObject(data.instance) ? data.instance : data;
+  return {
+    state: isLifecycleState(state) ? state : fallbackState,
+    managed: typeof instance.managed === "boolean" ? instance.managed : null,
+    pid: Number.isInteger(instance.pid) ? numberValue(instance.pid) : null,
+    startedAt: typeof instance.createdAt === "string" ? instance.createdAt : null,
+    port: Number.isInteger(instance.port) ? numberValue(instance.port) : null,
+    dataDir: path.resolve(dataDir),
+  };
+}
+
+function numberValue(value: unknown): number {
+  if (!Number.isInteger(value)) {
+    throw new CliError("remote_error");
+  }
+  return value as number;
+}
+
+function cliErrorFromControlResponse(status: number, payload: unknown): CliError {
+  const code = isObject(payload) && isObject(payload.error) && typeof payload.error.code === "string"
+    ? payload.error.code
+    : undefined;
+  if (status === 401 || code === "unauthorized") {
+    return new CliError("security_error");
+  }
+  if (status === 409 || code === "instance_mismatch") {
+    return new CliError("daemon_conflict");
+  }
+  if (status === 503 || code === "not_ready") {
+    return new CliError("unavailable");
+  }
+  if (status === 404) {
+    return new CliError("not_found");
+  }
+  if (status === 400) {
+    return new CliError("validation_error");
+  }
+  return new CliError("remote_error");
+}
+
+function isLifecycleState(value: string): value is CliLifecycleResult["state"] {
+  return value === "running" || value === "stopped" || value === "stale" || value === "conflict" || value === "unreachable";
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNodeNotFound(error: unknown): boolean {
+  return isObject(error) && error.code === "ENOENT";
 }
 
 export function stoppedLifecycle(dataDir: string): CliLifecycleResult {

@@ -16,6 +16,7 @@ export interface DeviceOAuthClient {
   }>;
   exchangeDeviceCode(environment: GitHubEnvironment, deviceCode: string): Promise<
     | { readonly status: "pending" }
+    | { readonly status: "failed" }
     | {
         readonly status: "complete";
         readonly accessToken: string;
@@ -47,8 +48,13 @@ interface PendingFlow extends DeviceFlowSnapshot {
   readonly deviceCode: string;
 }
 
+type TerminalFlow =
+  | { readonly status: "expired" }
+  | { readonly status: "failed" };
+
 export class DeviceFlowService {
   private readonly flows = new Map<string, PendingFlow>();
+  private readonly terminalFlows = new Map<string, TerminalFlow>();
 
   constructor(
     private readonly directory: AccountDirectory,
@@ -83,19 +89,32 @@ export class DeviceFlowService {
     };
   }
 
-  async poll(flowId: string): Promise<{ readonly status: "pending" } | { readonly status: "complete"; readonly accountId: string }> {
-    this.gc();
+  async poll(flowId: string): Promise<
+    | { readonly status: "pending" }
+    | { readonly status: "expired" }
+    | { readonly status: "failed" }
+    | { readonly status: "complete"; readonly accountId: string }
+  > {
+    const terminal = this.terminalFlows.get(flowId);
+    if (terminal !== undefined) {
+      this.terminalFlows.delete(flowId);
+      return terminal;
+    }
     const flow = this.flows.get(flowId);
     if (flow === undefined) {
       throw new DeviceFlowError("not_found", "device flow not found");
     }
     if (flow.expiresAtMs <= this.nowMs()) {
       this.flows.delete(flowId);
-      throw new DeviceFlowError("expired", "device flow expired");
+      return { status: "expired" };
     }
     const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode);
     if (result.status === "pending") {
       return { status: "pending" };
+    }
+    if (result.status === "failed") {
+      this.flows.delete(flowId);
+      return { status: "failed" };
     }
     const secret: SecretCredential = { generation: 0, githubToken: result.accessToken };
     const bound = await this.directory.upsertAuthenticated({
@@ -118,6 +137,7 @@ export class DeviceFlowService {
     for (const [flowId, flow] of this.flows) {
       if (flow.expiresAtMs <= now) {
         this.flows.delete(flowId);
+        this.terminalFlows.set(flowId, { status: "expired" });
       }
     }
   }

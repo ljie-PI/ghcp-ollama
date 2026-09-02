@@ -61,6 +61,12 @@ export class CommandDispatcher {
       if (result.status === "pending") {
         return { state: "pending" } as ControlOperationMap[Operation]["result"];
       }
+      if (result.status === "expired") {
+        return { state: "expired" } as ControlOperationMap[Operation]["result"];
+      }
+      if (result.status === "failed") {
+        return { state: "failed" } as ControlOperationMap[Operation]["result"];
+      }
       const account = this.requireAccount(result.accountId);
       return { state: "complete", account: this.adminAccount(account) } as ControlOperationMap[Operation]["result"];
     }
@@ -70,7 +76,13 @@ export class CommandDispatcher {
       const removed = await this.dependencies.directory.remove(account.accountId, account.revision);
       return this.adminAccount(removed) as ControlOperationMap[Operation]["result"];
     }
-    case "auth.status":
+    case "auth.status": {
+      const accounts = this.adminAccounts();
+      return {
+        defaultAccountId: accounts.defaultAccountId,
+        accounts: accounts.items,
+      } as ControlOperationMap[Operation]["result"];
+    }
     case "accounts.list":
       return this.adminAccounts() as ControlOperationMap[Operation]["result"];
     case "accounts.use": {
@@ -289,6 +301,9 @@ function mapDispatcherError(error: unknown): CliError {
   }
   if (error instanceof PreferenceRevisionError) {
     return new CliError("revision_conflict");
+  }
+  if (error instanceof Error && error.message === "model not in catalog") {
+    return new CliError("not_found");
   }
   if (error instanceof RuntimeConfigError) {
     return new CliError(error.code === "revision_conflict" ? "revision_conflict" : "validation_error");
