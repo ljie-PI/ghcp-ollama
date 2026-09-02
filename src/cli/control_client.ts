@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
@@ -211,7 +212,6 @@ export interface ControlClient {
     context: CliLifecycleContext,
   ): Promise<ControlOperationMap[Operation]["result"]>;
   adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult>;
-  cancelLogin?(flowId: string, context: CliLifecycleContext): Promise<void> | void;
   close?(): Promise<void> | void;
 }
 
@@ -224,7 +224,7 @@ export interface ControlEndpoint {
 
 export class ScriptedControlClient implements ControlClient {
   readonly calls: Array<{
-    readonly kind: "lifecycle" | "control" | "admin.open" | "auth.login.cancel";
+    readonly kind: "lifecycle" | "control" | "admin.open";
     readonly operation: string;
     readonly args: unknown;
     readonly dataDir?: string;
@@ -263,10 +263,6 @@ export class ScriptedControlClient implements ControlClient {
     return this.pop("admin.open") as CliAdminOpenResult;
   }
 
-  async cancelLogin(flowId: string, context: CliLifecycleContext): Promise<void> {
-    this.calls.push({ kind: "auth.login.cancel", operation: "auth.login.cancel", args: { flowId }, dataDir: context.dataDir });
-  }
-
   private pop(key: string): unknown {
     const values = this.script.get(key);
     if (values === undefined || values.length === 0) {
@@ -283,7 +279,7 @@ export class ScriptedControlClient implements ControlClient {
 export class HttpControlClient implements ControlClient {
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
-    private readonly locateEndpoint: (dataDir: string) => Promise<ControlEndpoint | null> = async () => null,
+    private readonly locateEndpoint: (dataDir: string) => Promise<ControlEndpoint | null> = readControlEndpoint,
     private readonly openBrowser: (url: string) => Promise<void> | void = defaultOpenBrowser,
   ) {}
 
@@ -390,6 +386,31 @@ export class HttpControlClient implements ControlClient {
   }
 }
 
+async function readControlEndpoint(dataDir: string): Promise<ControlEndpoint | null> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path.join(dataDir, "daemon.json"), "utf8")) as unknown;
+  } catch (error: unknown) {
+    if (isNodeNotFound(error)) {
+      return null;
+    }
+    throw new CliError("security_error");
+  }
+  if (!isObject(parsed)
+    || typeof parsed.managed !== "boolean"
+    || typeof parsed.controlToken !== "string"
+    || typeof parsed.instanceNonce !== "string"
+    || !Number.isInteger(parsed.port)) {
+    throw new CliError("security_error");
+  }
+  return {
+    managed: parsed.managed,
+    controlToken: parsed.controlToken,
+    instanceNonce: parsed.instanceNonce,
+    port: numberValue(parsed.port),
+  };
+}
+
 function controlTimeout(parent: AbortSignal | undefined, ms: number): {
   readonly signal: AbortSignal;
   readonly promise: Promise<never>;
@@ -478,6 +499,10 @@ function isLifecycleState(value: string): value is CliLifecycleResult["state"] {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNodeNotFound(error: unknown): boolean {
+  return isObject(error) && error.code === "ENOENT";
 }
 
 async function defaultOpenBrowser(url: string): Promise<void> {

@@ -92,10 +92,8 @@ async function runInteractiveLogin(
     dataDir: context.dataDir,
     signal: localSignal.signal,
   };
-  let startedFlowId: string | null = null;
   try {
     const started = await client.request("auth.login.start", args, controlContext);
-    startedFlowId = started.flowId;
     stdout.write(`Code: ${started.userCode}\n`);
     stdout.write(`Open: ${started.verificationUri}\n`);
     for (;;) {
@@ -109,13 +107,6 @@ async function runInteractiveLogin(
       }
       await sleep(options.pollDelayMs ?? started.pollIntervalSeconds * 1000, localSignal.signal);
     }
-  } catch (error: unknown) {
-    if (error instanceof CliError && error.code === "interrupted") {
-      if (startedFlowId !== null) {
-        await client.cancelLogin?.(startedFlowId, { dataDir: context.dataDir });
-      }
-    }
-    throw error;
   } finally {
     localSignal.dispose();
   }

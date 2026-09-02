@@ -28,10 +28,6 @@ export interface CommandDispatcherDependencies {
 export class CommandDispatcher {
   constructor(private readonly dependencies: CommandDispatcherDependencies) {}
 
-  cancelLogin(flowId: string): void {
-    this.dependencies.deviceFlows.cancel(flowId);
-  }
-
   async dispatch<Operation extends ControlOperation>(
     operation: Operation,
     args: ControlOperationMap[Operation]["args"],

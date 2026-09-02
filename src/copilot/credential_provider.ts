@@ -3,6 +3,8 @@ import type { CredentialStore } from "../accounts/credential_store.js";
 import { copilotHeaders } from "./identity.js";
 import { TokenRefreshError } from "./token_refresh.js";
 
+const CREDENTIAL_PROVIDER_JSON_BYTES = 1_048_576;
+
 export async function refreshCopilotToken(
   githubToken: string,
   signal?: AbortSignal,
@@ -30,7 +32,7 @@ export async function refreshCopilotToken(
   }
   let body: { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
   try {
-    body = await response.json() as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
+    body = await readJsonObject(response, signal) as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
   } catch (error: unknown) {
     if (isAbortError(error)) {
       throw error;
@@ -77,7 +79,7 @@ async function fetchCopilotDiscovery(
       await response.body?.cancel().catch(() => undefined);
       return null;
     }
-    return endpointFromCopilotUser(await response.json() as unknown);
+    return endpointFromCopilotUser(await readJsonObject(response, signal));
   } catch (error: unknown) {
     if (isAbortError(error)) {
       throw error;
@@ -126,6 +128,44 @@ function tokenExpiry(body: { readonly expires_at?: unknown; readonly expires_in?
     return Date.now() + body.expires_in * 1000;
   }
   return Date.now() + 30 * 60 * 1000;
+}
+
+async function readJsonObject(response: Response, signal: AbortSignal | undefined): Promise<unknown> {
+  const reader = response.body?.getReader();
+  if (reader === undefined) {
+    return {};
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      throwIfAborted(signal);
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+      total += next.value.byteLength;
+      if (total > CREDENTIAL_PROVIDER_JSON_BYTES) {
+        throw new Error("credential provider response too large");
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
+  }
 }
 
 function isAbortError(error: unknown): boolean {

@@ -102,7 +102,6 @@ describe("RM-18 CLI commands", () => {
     abort.abort();
     expect(await runCli({ argv: ["auth", "login"], homedir: "Q:/tmp/home", stdout: new CaptureStream(), stderr: interruptedErr, controlClient: interrupted, shutdownSignal: abort.signal })).toBe(130);
     expect(interruptedErr.chunks).toBe("error: interrupted\n");
-    expect(interrupted.calls.at(-1)).toEqual({ kind: "auth.login.cancel", operation: "auth.login.cancel", args: { flowId: "flow" }, dataDir: expect.any(String) });
   });
 
   it("dispatches management commands through application modules with one CAS attempt", async () => {
