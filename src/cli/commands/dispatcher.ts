@@ -20,7 +20,7 @@ import {
 
 export interface CommandDispatcherDependencies {
   readonly directory: AccountDirectory;
-  readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll" | "cancel">;
+  readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll">;
   readonly catalog: CopilotModelCatalog;
   readonly runtimeConfig: RuntimeConfigStore;
 }

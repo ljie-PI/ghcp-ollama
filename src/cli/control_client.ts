@@ -289,6 +289,9 @@ export class HttpControlClient implements ControlClient {
     }
     const endpoint = await this.locateEndpoint(context.dataDir);
     if (endpoint === null) {
+      if (action === "restart") {
+        throw new CliError("unavailable");
+      }
       return stoppedLifecycle(context.dataDir);
     }
     if ((action === "stop" || action === "restart") && !endpoint.managed) {

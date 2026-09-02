@@ -11,3 +11,5 @@ RM-18 integrates the non-default foreground runtime and CLI against modules deli
 - `src/protocols/ollama_chat/token_counter.ts`: keeps Ollama token-count fallback logic inside the Ollama module while RM-18 only wires it into foreground composition.
 
 These changes do not add legacy aliases, do not alter default published entrypoints, and are covered by RM-18 targeted CLI/foreground integration tests plus existing refactor gates.
+
+RM-19 remains responsible for protected identity-file ACL/reparse-point validation, process-start identity verification, detached lifecycle (`start`/`restart`), and any additional authenticated control operations. RM-18's default HTTP control client only consumes an already-published endpoint enough to exercise the CLI transport seam and fails closed when it cannot locate one.

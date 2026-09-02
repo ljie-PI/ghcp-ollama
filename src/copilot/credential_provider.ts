@@ -137,20 +137,26 @@ async function readJsonObject(response: Response, signal: AbortSignal | undefine
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let completed = false;
   try {
     for (;;) {
       throwIfAborted(signal);
       const next = await reader.read();
       if (next.done) {
+        completed = true;
         break;
       }
       total += next.value.byteLength;
       if (total > CREDENTIAL_PROVIDER_JSON_BYTES) {
+        await reader.cancel().catch(() => undefined);
         throw new Error("credential provider response too large");
       }
       chunks.push(next.value);
     }
   } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => undefined);
+    }
     reader.releaseLock();
   }
   const bytes = new Uint8Array(total);
