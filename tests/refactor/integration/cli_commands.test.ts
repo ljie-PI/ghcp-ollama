@@ -1,0 +1,277 @@
+import { describe, expect, it } from "vitest";
+import { AccountDirectory } from "../../../src/accounts/account_directory.js";
+import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
+import { DeviceFlowService, type DeviceOAuthClient } from "../../../src/accounts/device_flow.js";
+import { ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
+import { CopilotModelCatalog } from "../../../src/copilot/model_catalog.js";
+import { runCli } from "../../../src/cli/main.js";
+import { CliError, ScriptedControlClient } from "../../../src/cli/control_client.js";
+import { CommandDispatcher, DispatcherControlClient } from "../../../src/cli/commands/dispatcher.js";
+import { RuntimeConfigStore } from "../../../src/config/runtime_config.js";
+import { parseStartupConfig } from "../../../src/config/startup_config.js";
+import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
+import { embedMigration } from "../../../src/persistence/migrations.js";
+import { migration as runtimeConfigMigration } from "../../../src/persistence/migrations/001_runtime_config.js";
+import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
+import { migration as telemetryMigration } from "../../../src/persistence/migrations/020_telemetry.js";
+import { migration as historyMigration } from "../../../src/persistence/migrations/030_responses_history.js";
+import { bootstrapGateway, createPublicRouteRegistrations } from "../../../src/main.js";
+import { SqliteResponsesHistory } from "../../../src/protocols/responses/history.js";
+
+const encoder = new TextEncoder();
+
+class CaptureStream {
+  chunks = "";
+  write(chunk: string): void {
+    this.chunks += chunk;
+  }
+}
+
+describe("RM-18 CLI commands", () => {
+  it("separates human stdout/stderr, JSON envelopes, and exit codes", async () => {
+    const client = new ScriptedControlClient({
+      "accounts.list": [{ defaultRevision: 1, defaultAccountId: null, items: [] }],
+      "lifecycle.status": [{ state: "stopped", managed: null, pid: null, startedAt: null, port: null, dataDir: "wrong" }],
+      "models.current": [new CliError("revision_conflict")],
+    });
+    const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
+    expect(await runCli({ argv: ["accounts", "list"], homedir: "Q:/tmp/home", stdout, stderr, controlClient: client })).toBe(0);
+    expect(stdout.chunks).toBe(`${JSON.stringify({ defaultRevision: 1, defaultAccountId: null, items: [] }, null, 2)}\n`);
+    expect(stderr.chunks).toBe("");
+
+    const statusOut = new CaptureStream();
+    expect(await runCli({ argv: ["--json", "status"], homedir: "Q:/tmp/home", stdout: statusOut, stderr, controlClient: client })).toBe(3);
+    expect(statusOut.chunks).toBe(`${JSON.stringify({ ok: true, data: { state: "stopped", managed: null, pid: null, startedAt: null, port: null, dataDir: "wrong" } })}\n`);
+
+    const errorOut = new CaptureStream();
+    const errorErr = new CaptureStream();
+    expect(await runCli({ argv: ["--json", "models", "current"], homedir: "Q:/tmp/home", stdout: errorOut, stderr: errorErr, controlClient: client })).toBe(3);
+    expect(errorOut.chunks).toBe("");
+    expect(errorErr.chunks).toBe(`${JSON.stringify({ ok: false, error: { code: "revision_conflict", message: "revision conflict" } })}\n`);
+  });
+
+  it("sends exact control operations to the selected data directory", async () => {
+    const client = new ScriptedControlClient({
+      "auth.login.start": [{ flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5 }],
+      "admin.open": [{ opened: true }],
+    });
+    const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
+    expect(await runCli({ argv: ["--json", "--data-dir", "selected", "auth", "login", "--host", "ghe.example.com"], homedir: "Q:/tmp/home", stdout, stderr, controlClient: client })).toBe(0);
+    expect(JSON.parse(stdout.chunks)).toEqual({ ok: true, data: { flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5 } });
+    expect(stderr.chunks).toBe("");
+    expect(client.calls[0]).toEqual({ kind: "control", operation: "auth.login.start", args: { host: "ghe.example.com" }, dataDir: expect.stringContaining("selected") });
+
+    const adminOut = new CaptureStream();
+    expect(await runCli({ argv: ["--data-dir", "selected", "admin", "open"], homedir: "Q:/tmp/home", stdout: adminOut, stderr, controlClient: client })).toBe(0);
+    expect(adminOut.chunks).toBe(`${JSON.stringify({ opened: true }, null, 2)}\n`);
+    expect(client.calls[1]).toEqual({ kind: "admin.open", operation: "admin.open", args: {}, dataDir: expect.stringContaining("selected") });
+  });
+
+  it("polls interactive login until terminal and handles interruption without leaking tokens", async () => {
+    const client = new ScriptedControlClient({
+      "auth.login.start": [{ flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 1 }],
+      "auth.login.poll": [{ state: "pending" }, { state: "complete", account: accountDto("github.com/42") }],
+    });
+    const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
+    expect(await runCli({ argv: ["auth", "login"], homedir: "Q:/tmp/home", stdout, stderr, controlClient: client, pollDelayMs: 0 })).toBe(0);
+    expect(stdout.chunks).toBe("Code: ABCD-1234\nOpen: https://github.com/login/device\nAuthenticated: github.com/42\n");
+    expect(stdout.chunks).not.toContain("token");
+    expect(stderr.chunks).toBe("");
+
+    const abort = new AbortController();
+    const interrupted = new ScriptedControlClient({
+      "auth.login.start": [{ flowId: "flow", userCode: "WXYZ-9999", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 30 }],
+      "auth.login.poll": [{ state: "pending" }],
+    });
+    const interruptedErr = new CaptureStream();
+    abort.abort();
+    expect(await runCli({ argv: ["auth", "login"], homedir: "Q:/tmp/home", stdout: new CaptureStream(), stderr: interruptedErr, controlClient: interrupted, shutdownSignal: abort.signal })).toBe(130);
+    expect(interruptedErr.chunks).toBe("error: interrupted\n");
+  });
+
+  it("dispatches management commands through application modules with one CAS attempt", async () => {
+    const harness = await dispatcherHarness();
+    try {
+      const client = new DispatcherControlClient(harness.dispatcher);
+      const login = await client.request("auth.login.start", { host: "github.com" }, { dataDir: "unused" });
+      expect(login.pollIntervalSeconds).toBe(5);
+      const poll = await client.request("auth.login.poll", { flowId: login.flowId }, { dataDir: "unused" });
+      expect(poll).toMatchObject({ state: "complete", account: { accountId: "github.com/42" } });
+      expect(await client.request("accounts.list", {}, { dataDir: "unused" })).toMatchObject({ defaultAccountId: "github.com/42", defaultRevision: 1 });
+      expect(await client.request("models.list", {}, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", items: [{ id: "gpt" }] });
+      expect(await client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "gpt", validity: "valid" });
+      expect(await client.request("config.get", { key: "admission.activeMax" }, { dataDir: "unused" })).toMatchObject({ key: "admission.activeMax", value: 4 });
+      expect(await client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "unused" })).toMatchObject({ config: { admission: { activeMax: 2, queueMax: 16 } } });
+      await expect(client.request("config.set", { key: "port", value: "31401" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "validation_error" });
+      await expect(client.request("models.set", { modelId: "missing" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "internal_error" });
+      const removed = await client.request("accounts.remove", { accountId: "github.com/42" }, { dataDir: "unused" });
+      expect(removed.state).toBe("removed");
+    } finally {
+      harness.close();
+    }
+  });
+
+  it("foreground serve emits one running result and closes on shutdown", async () => {
+    const abort = new AbortController();
+    let listened = false;
+    let closed = false;
+    const stdout = new CaptureStream();
+    const run = runCli({
+      argv: ["--json", "serve", "--port", "31403"],
+      homedir: "Q:/tmp/home",
+      stdout,
+      stderr: new CaptureStream(),
+      pid: 123,
+      now: () => new Date("2026-09-02T00:00:00.000Z"),
+      shutdownSignal: abort.signal,
+      createGateway: async (startup) => ({
+        fetch: async () => new Response(null, { status: 404 }),
+        listen: async () => {
+          listened = true;
+          return { host: "127.0.0.1", port: startup.port };
+        },
+        close: async () => {
+          closed = true;
+        },
+      }),
+    });
+    await Promise.resolve();
+    await eventually(() => listened);
+    expect(JSON.parse(stdout.chunks)).toEqual({ ok: true, data: { state: "running", managed: false, pid: 123, startedAt: "2026-09-02T00:00:00.000Z", port: 31_403, dataDir: expect.any(String) } });
+    abort.abort();
+    expect(await run).toBe(0);
+    expect(closed).toBe(true);
+  });
+
+  it("foreground composition registers all completed public routes without legacy fallback", async () => {
+    const harness = await dispatcherHarness();
+    try {
+      const routes = createPublicRouteRegistrations({
+        directory: harness.directory,
+        catalog: harness.catalog,
+        copilot: harness.backend,
+        history: harness.history,
+      });
+      expect(routes.map((route) => `${route.method} ${route.path}`)).toEqual([
+        "GET /v1/models",
+        "GET /api/tags",
+        "POST /v1/chat/completions",
+        "GET /api/version",
+        "POST /api/chat",
+        "POST /v1/messages",
+        "POST /v1/responses",
+      ]);
+      const gateway = await bootstrapGateway({
+        startup: parseStartupConfig([], {}, { homedir: "Q:/tmp/home" }),
+        routes,
+        dependencies: { createRequestId: () => "req_cli_routes" },
+      });
+      try {
+        const version = await gateway.fetch(new Request("http://127.0.0.1:31400/api/version"));
+        expect(version.status).toBe(200);
+        expect(await version.text()).toBe("{\"version\":\"0.1.0\"}");
+        const legacy = await gateway.fetch(new Request("http://127.0.0.1:31400/models"));
+        expect(legacy.status).toBe(404);
+      } finally {
+        await gateway.close();
+      }
+    } finally {
+      harness.close();
+    }
+  });
+});
+
+async function dispatcherHarness(): Promise<{
+  readonly dispatcher: CommandDispatcher;
+  readonly directory: AccountDirectory;
+  readonly catalog: CopilotModelCatalog;
+  readonly backend: ScriptedCopilotBackend;
+  readonly history: SqliteResponsesHistory;
+  readonly close: () => void;
+}> {
+  const database = openDatabase({
+    path: ":memory:",
+    migrations: [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(accountsMigration),
+      embedMigration(telemetryMigration),
+      embedMigration(historyMigration),
+    ],
+    nowMs: () => 1_800_000_000_000,
+  });
+  const directory = new AccountDirectory(database, new MemoryCredentialStore(), () => 1_800_000_000_000);
+  const catalog = new CopilotModelCatalog({
+    async fetch() {
+      return { data: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }] };
+    },
+  });
+  const runtimeConfig = new RuntimeConfigStore(database, () => 1_800_000_000_000);
+  runtimeConfig.seedIfEmpty({});
+  const history = new SqliteResponsesHistory(database, { nowMs: () => 1_800_000_000_000 });
+  const backend = new ScriptedCopilotBackend({
+    chat: { status: 200, headers: new Headers(), body: encoder.encode("{\"choices\":[]}") },
+    responses: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+  });
+  const dispatcher = new CommandDispatcher({
+    directory,
+    deviceFlows: new DeviceFlowService(directory, deviceClient(), () => 1_800_000_000_000),
+    catalog,
+    runtimeConfig,
+  });
+  return {
+    dispatcher,
+    directory,
+    catalog,
+    backend,
+    history,
+    close: () => closeDatabase(database),
+  };
+}
+
+function deviceClient(): DeviceOAuthClient {
+  return {
+    async requestDeviceCode() {
+      return {
+        deviceCode: "device",
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+        intervalSec: 5,
+        expiresInSec: 900,
+      };
+    },
+    async exchangeDeviceCode() {
+      return {
+        status: "complete",
+        accessToken: "gho_scripted",
+        user: { id: "42", login: "octo", name: "Octo" },
+      };
+    },
+  };
+}
+
+function accountDto(accountId: string) {
+  return {
+    accountId,
+    host: "github.com",
+    numericUserId: "42",
+    login: "octo",
+    displayName: "Octo",
+    state: "active" as const,
+    revision: 1,
+    authenticatedAt: "2026-09-02T00:00:00.000Z",
+    preferredModel: null,
+  };
+}
+
+async function eventually(check: () => boolean): Promise<void> {
+  for (let index = 0; index < 20; index += 1) {
+    if (check()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("condition not met");
+}

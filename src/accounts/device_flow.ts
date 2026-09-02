@@ -29,6 +29,7 @@ export interface DeviceFlowSnapshot {
   readonly userCode: string;
   readonly verificationUri: string;
   readonly expiresAtMs: number;
+  readonly pollIntervalSeconds: number;
 }
 
 export class DeviceFlowError extends Error {
@@ -70,6 +71,7 @@ export class DeviceFlowService {
       userCode: requested.userCode,
       verificationUri: requested.verificationUri,
       expiresAtMs: this.nowMs() + Math.min(requested.expiresInSec * 1000, DEVICE_FLOW_TTL_MS),
+      pollIntervalSeconds: requested.intervalSec,
     };
     this.flows.set(flowId, snapshot);
     return {
@@ -77,6 +79,7 @@ export class DeviceFlowService {
       userCode: snapshot.userCode,
       verificationUri: snapshot.verificationUri,
       expiresAtMs: snapshot.expiresAtMs,
+      pollIntervalSeconds: snapshot.pollIntervalSeconds,
     };
   }
 
