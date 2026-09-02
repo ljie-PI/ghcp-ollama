@@ -33,7 +33,11 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
     json = parsed.json;
     const command = parsed.command;
     if (command.kind === "help") {
-      stdout.write(command.text);
+      if (parsed.json) {
+        writeSuccess(stdout, true, { help: command.text });
+      } else {
+        stdout.write(command.text);
+      }
       return 0;
     }
     client = options.controlClient ?? new HttpControlClient();

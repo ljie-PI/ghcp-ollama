@@ -101,17 +101,12 @@ export class CommandDispatcher {
       const accountId = input.accountId ?? this.defaultAccount().accountId;
       const beforePreference = this.dependencies.directory.preferences.get(accountId);
       const catalog = await this.dependencies.catalog.get(accountId, new AbortController().signal);
-      const afterPreference = this.dependencies.directory.preferences.markInvalidIfMissing(
+      this.dependencies.directory.preferences.markInvalidIfMissing(
         accountId,
         new Set(catalog.models.map((model) => model.id)),
         catalog.generation,
+        beforePreference?.revision,
       );
-      if (beforePreference !== null
-        && afterPreference !== null
-        && afterPreference.revision !== beforePreference.revision
-        && afterPreference.revision !== beforePreference.revision + 1) {
-        throw new PreferenceRevisionError();
-      }
       return adminModelsFromCatalog(
         accountId,
         catalog,

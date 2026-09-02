@@ -97,6 +97,14 @@ describe("RM-18 CLI parser", () => {
     expect(parseCli(["models", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
     expect(parseCli(["config", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
     expect(parseCli(["admin", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
+    expect(parseCli(["auth", "login", "--help"], { homedir: home }).command).toEqual({
+      kind: "help",
+      text: "Usage: ghcg [--data-dir <path>] [--json] auth login [--host <domain>]\n",
+    });
+    expect(parseCli(["models", "set", "--help"], { homedir: home }).command).toEqual({
+      kind: "help",
+      text: "Usage: ghcg [--data-dir <path>] [--json] models set <model-id>\n",
+    });
   });
 
   it("parses every management command to a control operation", () => {

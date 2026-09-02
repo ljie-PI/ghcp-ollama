@@ -50,6 +50,10 @@ describe("RM-18 CLI commands", () => {
     expect(await runCli({ argv: ["--json", "models", "current"], homedir: "Q:/tmp/home", stdout: errorOut, stderr: errorErr, controlClient: client })).toBe(3);
     expect(errorOut.chunks).toBe("");
     expect(errorErr.chunks).toBe(`${JSON.stringify({ ok: false, error: { code: "revision_conflict", message: "revision conflict" } })}\n`);
+
+    const helpOut = new CaptureStream();
+    expect(await runCli({ argv: ["--json", "auth", "--help"], homedir: "Q:/tmp/home", stdout: helpOut, stderr: new CaptureStream(), controlClient: client })).toBe(0);
+    expect(JSON.parse(helpOut.chunks)).toMatchObject({ ok: true, data: { help: expect.stringContaining("Usage: ghcg") } });
   });
 
   it("sends exact control operations to the selected data directory", async () => {
@@ -113,6 +117,19 @@ describe("RM-18 CLI commands", () => {
       harness.catalog.invalidate("github.com/42");
       harness.capiModels = [{ id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true }];
       expect(await client.request("models.set", { modelId: "claude" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "claude", validity: "valid" });
+      harness.catalog.invalidate("github.com/42");
+      harness.capiModels = [];
+      const getPreference = harness.directory.preferences.get.bind(harness.directory.preferences);
+      let forcePreferenceConflict = true;
+      harness.directory.preferences.get = (accountId: string) => {
+        const current = getPreference(accountId);
+        if (accountId === "github.com/42" && forcePreferenceConflict && current !== null) {
+          forcePreferenceConflict = false;
+          harness.directory.preferences.set(accountId, { modelId: "gpt", catalogGeneration: 99 }, current.revision);
+        }
+        return current;
+      };
+      await expect(client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "revision_conflict" });
       expect(await client.request("config.get", { key: "admission.activeMax" }, { dataDir: "unused" })).toMatchObject({ key: "admission.activeMax", value: 4 });
       expect(await client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "unused" })).toMatchObject({ config: { admission: { activeMax: 2, queueMax: 16 } } });
       const readSnapshot = harness.runtimeConfig.readSnapshot.bind(harness.runtimeConfig);

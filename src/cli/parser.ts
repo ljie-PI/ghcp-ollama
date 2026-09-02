@@ -140,7 +140,13 @@ function parseCommand(
       return { kind: "help", text: groupHelp("auth") };
     }
     if (groupAction === "login") {
+      if (third === "--help") {
+        return { kind: "help", text: commandHelp("auth login [--host <domain>]") };
+      }
       if (third === "poll") {
+        if (fourth === "--help") {
+          return { kind: "help", text: commandHelp("auth login poll <flow-id>") };
+        }
         if (fourth === undefined || extra.length !== 0) {
           throw new CliError("usage_error");
         }
@@ -158,6 +164,9 @@ function parseCommand(
       return { kind: "control", operation: "auth.login.start", args: {} };
     }
     if (groupAction === "logout") {
+      if (third === "--help") {
+        return { kind: "help", text: commandHelp("auth logout [--account <account-id>]") };
+      }
       if (third === "--account") {
         if (fourth === undefined || extra.length !== 0) {
           throw new CliError("usage_error");
@@ -172,6 +181,9 @@ function parseCommand(
     if (groupAction === "status" && third === undefined) {
       return { kind: "control", operation: "auth.status", args: {} };
     }
+    if (groupAction === "status" && third === "--help") {
+      return { kind: "help", text: commandHelp("auth status") };
+    }
     throw new CliError("usage_error");
   }
   if (command === "accounts") {
@@ -181,8 +193,17 @@ function parseCommand(
     if (groupAction === "list" && third === undefined) {
       return { kind: "control", operation: "accounts.list", args: {} };
     }
+    if (groupAction === "list" && third === "--help") {
+      return { kind: "help", text: commandHelp("accounts list") };
+    }
+    if (groupAction === "use" && third === "--help") {
+      return { kind: "help", text: commandHelp("accounts use <account-id>") };
+    }
     if (groupAction === "use" && third !== undefined && fourth === undefined) {
       return { kind: "control", operation: "accounts.use", args: { accountId: third } };
+    }
+    if (groupAction === "remove" && third === "--help") {
+      return { kind: "help", text: commandHelp("accounts remove <account-id>") };
     }
     if (groupAction === "remove" && third !== undefined && fourth === undefined) {
       return { kind: "control", operation: "accounts.remove", args: { accountId: third } };
@@ -194,6 +215,9 @@ function parseCommand(
       return { kind: "help", text: groupHelp("models") };
     }
     if (groupAction === "list") {
+      if (third === "--help") {
+        return { kind: "help", text: commandHelp("models list [--account <account-id>]") };
+      }
       if (third === "--account") {
         if (fourth === undefined || extra.length !== 0) {
           throw new CliError("usage_error");
@@ -208,6 +232,12 @@ function parseCommand(
     if (groupAction === "current" && third === undefined) {
       return { kind: "control", operation: "models.current", args: {} };
     }
+    if (groupAction === "current" && third === "--help") {
+      return { kind: "help", text: commandHelp("models current") };
+    }
+    if (groupAction === "set" && third === "--help") {
+      return { kind: "help", text: commandHelp("models set <model-id>") };
+    }
     if (groupAction === "set" && third !== undefined && fourth === undefined) {
       return { kind: "control", operation: "models.set", args: { modelId: third } };
     }
@@ -218,6 +248,9 @@ function parseCommand(
       return { kind: "help", text: groupHelp("config") };
     }
     if (groupAction === "get") {
+      if (third === "--help") {
+        return { kind: "help", text: commandHelp("config get [key]") };
+      }
       if (fourth !== undefined) {
         throw new CliError("usage_error");
       }
@@ -225,6 +258,9 @@ function parseCommand(
     }
     if (groupAction === "set" && third !== undefined && fourth !== undefined && extra.length === 0) {
       return { kind: "control", operation: "config.set", args: { key: third, value: fourth } };
+    }
+    if (groupAction === "set" && third === "--help") {
+      return { kind: "help", text: commandHelp("config set <key> <value>") };
     }
     throw new CliError("usage_error");
   }
@@ -234,6 +270,9 @@ function parseCommand(
     }
     if (groupAction === "open" && third === undefined) {
       return { kind: "admin.open" };
+    }
+    if (groupAction === "open" && third === "--help") {
+      return { kind: "help", text: commandHelp("admin open") };
     }
     throw new CliError("usage_error");
   }

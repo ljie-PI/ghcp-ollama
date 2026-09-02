@@ -73,10 +73,14 @@ export class AccountModelPreferences {
     accountId: string,
     visibleModelIds: ReadonlySet<string>,
     catalogGeneration: number,
+    expectedRevision?: number,
   ): ModelPreference | null {
     const current = this.get(accountId);
     if (current === null) {
       return null;
+    }
+    if (expectedRevision !== undefined && current.revision !== expectedRevision) {
+      throw new PreferenceRevisionError();
     }
     if (visibleModelIds.has(current.modelId)) {
       return current;
