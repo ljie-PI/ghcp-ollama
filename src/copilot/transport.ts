@@ -45,8 +45,8 @@ export class HttpCopilotBackend implements CopilotBackend {
       target,
       completeChat: (request) => this.completeJson(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, request.nonstreamBodyBytes, request.connectTimeoutMs, request.firstByteTimeoutMs, chatExtraHeaders(request.hasVisionInput)),
       openChatStream: (request) => this.openStream(`${target.endpoint}/chat/completions`, target.token, request.body, request.signal, fetchImpl, request.connectTimeoutMs, request.firstByteTimeoutMs, chatExtraHeaders(request.hasVisionInput)),
-      completeResponses: (request) => this.completeJson(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl, undefined, undefined, undefined),
-      openResponsesStream: (request) => this.openStream(`${target.endpoint}/responses`, target.token, request.body, request.signal, fetchImpl, undefined, undefined),
+      completeResponses: (request) => this.completeJson(responsesUrl(target.endpoint), target.token, request.body, request.signal, fetchImpl, request.nonstreamBodyBytes, request.connectTimeoutMs, request.firstByteTimeoutMs, responsesExtraHeaders(request)),
+      openResponsesStream: (request) => this.openStream(responsesUrl(target.endpoint), target.token, request.body, request.signal, fetchImpl, request.connectTimeoutMs, request.firstByteTimeoutMs, responsesExtraHeaders(request)),
     };
   }
 
@@ -287,6 +287,28 @@ function chatExtraHeaders(hasVisionInput: boolean): Headers {
     headers.set("copilot-vision-request", "true");
   }
   return headers;
+}
+
+function responsesExtraHeaders(request: {
+  readonly hasVisionInput: boolean;
+  readonly initiator: "user" | "agent";
+  readonly requestId: string;
+}): Headers {
+  const headers = new Headers({
+    "content-type": "application/json",
+    "openai-intent": "conversation-panel",
+    "x-request-id": request.requestId,
+    "x-vscode-user-agent-library-version": "electron-fetch",
+    "x-initiator": request.initiator,
+  });
+  if (request.hasVisionInput) {
+    headers.set("copilot-vision-request", "true");
+  }
+  return headers;
+}
+
+function responsesUrl(endpoint: string): string {
+  return `${endpoint.replace(/\/+$/u, "")}/responses`;
 }
 
 async function* empty(): AsyncIterable<Uint8Array> {}

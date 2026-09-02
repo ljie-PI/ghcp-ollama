@@ -30,6 +30,10 @@ export interface NativeResponsesUpstreamRequest {
   readonly body: Uint8Array;
   readonly hasVisionInput: boolean;
   readonly initiator: "user" | "agent";
+  readonly requestId: string;
+  readonly nonstreamBodyBytes: number;
+  readonly connectTimeoutMs: number;
+  readonly firstByteTimeoutMs: number;
   readonly signal: AbortSignal;
 }
 
