@@ -80,7 +80,6 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
         const account = await dependencies.directory.bindDefault(scope.signal);
         const copilot = await dependencies.copilot.bind(account, scope.signal);
         const chatBody = serializeWireJson(chatRequest);
-        const createdAt = ollamaCreatedAt((dependencies.now ?? (() => new Date()))());
         if (!stream) {
           const response = await completeChat(copilot, {
             model,
@@ -104,6 +103,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
             dependencies.tokenCounter,
           )), { headers: JSON_HEADERS });
         }
+        const createdAt = ollamaCreatedAt((dependencies.now ?? (() => new Date()))());
         const writer = createStreamResponseWriter({
           signal: scope.signal,
           headers: { "Content-Type": "application/x-ndjson" },

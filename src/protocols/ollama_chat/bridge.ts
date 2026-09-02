@@ -250,12 +250,24 @@ function usageCounts(
   if (usage !== undefined && usage !== null && !isWireJsonObject(usage)) {
     throw new GatewayFailureError({ kind: "invalid_upstream_response" });
   }
-  const promptTokens = isWireJsonObject(usage) ? nonnegativeInteger(memberValues(usage, "prompt_tokens")[0]) : undefined;
-  const completionTokens = isWireJsonObject(usage) ? nonnegativeInteger(memberValues(usage, "completion_tokens")[0]) : undefined;
+  const promptTokens = isWireJsonObject(usage) ? usageCount(usage, "prompt_tokens") : undefined;
+  const completionTokens = isWireJsonObject(usage) ? usageCount(usage, "completion_tokens") : undefined;
   return {
     promptEvalCount: promptTokens ?? tokenCounter({ model: "", messages: requestMessages }),
     evalCount: completionTokens ?? tokenCounter({ model: "", text: responseContent }),
   };
+}
+
+function usageCount(usage: WireJsonObject, key: string): number | undefined {
+  const values = memberValues(usage, key);
+  if (values.length === 0) {
+    return undefined;
+  }
+  const count = nonnegativeInteger(values[0]);
+  if (count === undefined) {
+    throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+  }
+  return count;
 }
 
 function createdAtFromUpstream(root: WireJsonObject, now: () => Date): string {

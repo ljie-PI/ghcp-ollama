@@ -57,6 +57,7 @@ class NonstreamBackend implements CopilotBackend {
 async function ollamaGateway(
   backend: CopilotBackend,
   tokenCounter: (input: { readonly model: ""; readonly messages?: unknown; readonly text?: string }) => number = () => 0,
+  now: () => Date = () => new Date("2026-01-02T03:04:05.000Z"),
 ) {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-"));
   const database = openDatabase({
@@ -76,7 +77,7 @@ async function ollamaGateway(
   }, createOllamaChatRoutes({
     directory: accounts,
     copilot: backend,
-    now: () => new Date("2026-01-02T03:04:05.000Z"),
+    now,
     tokenCounter,
   }));
   return { gw, close: async () => { await gw.close(); closeDatabase(database); } };
@@ -147,7 +148,9 @@ describe("RM-10 Ollama non-stream", () => {
       }],
       usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 999 },
     }));
-    const { gw, close } = await ollamaGateway(backend);
+    const { gw, close } = await ollamaGateway(backend, undefined, () => {
+      throw new Error("created upstream responses must not read the injected clock");
+    });
     try {
       const response = await gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
         method: "POST",
@@ -174,9 +177,13 @@ describe("RM-10 Ollama non-stream", () => {
       usage: { total_tokens: 999 },
     }));
     const calls: Array<{ readonly model: ""; readonly messages?: unknown; readonly text?: string }> = [];
+    let clockCalls = 0;
     const { gw, close } = await ollamaGateway(backend, (input) => {
       calls.push(input);
       return input.text === undefined ? 7 : 3;
+    }, () => {
+      clockCalls += 1;
+      return new Date("2026-01-02T03:04:05.123Z");
     });
     try {
       const response = await gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
@@ -186,9 +193,10 @@ describe("RM-10 Ollama non-stream", () => {
       }));
       expect(response.status).toBe(200);
       expect(await response.text()).toBe(
-        "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\\u003cfinal\\u003e\\u0026\",\"thinking\":\"think\"},\"done\":true,\"done_reason\":\"length\",\"prompt_eval_count\":7,\"eval_count\":3}",
+        "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.123Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\\u003cfinal\\u003e\\u0026\",\"thinking\":\"think\"},\"done\":true,\"done_reason\":\"length\",\"prompt_eval_count\":7,\"eval_count\":3}",
       );
       expect(calls).toHaveLength(2);
+      expect(clockCalls).toBe(1);
       expect(calls[0]?.model).toBe("");
       expect(calls[0]?.messages).toEqual({
         kind: "array",
@@ -333,6 +341,16 @@ describe("RM-10 Ollama non-stream", () => {
         body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "stop", logprobs: { content: null } }] }),
         status: 502,
         text: "{\"error\":\"invalid logprobs\"}",
+      },
+      {
+        body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "stop" }], usage: { prompt_tokens: "bad" } }),
+        status: 502,
+        text: "{\"error\":\"invalid upstream response\"}",
+      },
+      {
+        body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "stop" }], usage: { completion_tokens: -1 } }),
+        status: 502,
+        text: "{\"error\":\"invalid upstream response\"}",
       },
       {
         body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "surprise" }] }),
