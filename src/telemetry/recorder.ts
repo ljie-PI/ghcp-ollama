@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { metadataJsonOrRejected, sanitizeMetadata } from "./sanitize.js";
+import { metadataJsonOrRejected, sanitizeMetadata, sanitizeOperationalEventMetadata } from "./sanitize.js";
 
 export const TELEMETRY_QUEUE_CAP = 1024;
 export const USAGE_ROW_CAP = 100_000;
@@ -138,11 +138,15 @@ export class TelemetryRecorder {
   }
 
   recordEvent(input: OperationalEventInput): void {
-    const sanitized = sanitizeMetadata(input.metadata);
-    const encoded = metadataJsonOrRejected(sanitized);
+    const requestedKind = input.kind === "config_updated" ? "runtime_config_changed" : input.kind;
+    const sanitized = sanitizeOperationalEventMetadata(requestedKind, input.metadata);
+    const capacityChecked = metadataJsonOrRejected(sanitizeMetadata(input.metadata));
+    const encoded = capacityChecked.kind === "metadata_rejected"
+      ? capacityChecked
+      : metadataJsonOrRejected(sanitized);
     const kind: OperationalEventKind = encoded.kind === "metadata_rejected"
       ? "metadata_rejected"
-      : input.kind === "config_updated" ? "runtime_config_changed" : input.kind;
+      : requestedKind;
     const event: OperationalEventInput = {
       occurredAtMs: input.occurredAtMs,
       kind,

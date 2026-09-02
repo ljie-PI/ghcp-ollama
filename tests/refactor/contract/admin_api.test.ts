@@ -106,6 +106,25 @@ describe("RM-20 Admin API", () => {
       await harness.close();
     }
   });
+
+  it("invalidates account caches before credential cleanup and before returning failures", async () => {
+    const dependencies = adminDependencies();
+    dependencies.accounts.remove = async () => {
+      dependencies.calls.push("remove-started");
+      throw new Error("cleanup failed");
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = await mutate(harness.gateway, "DELETE", "/admin/api/v1/accounts/github.com%3A42", session, {
+        expectedRevision: 3,
+      });
+      expect(response.status).toBe(500);
+      expect(dependencies.calls.slice(-2)).toEqual(["invalidate-account:github.com:42", "remove-started"]);
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 async function createHarness(dependencies = adminDependencies()): Promise<{

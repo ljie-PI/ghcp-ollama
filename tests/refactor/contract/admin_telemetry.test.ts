@@ -132,6 +132,12 @@ describe("RM-20 AdminTelemetry", () => {
     expect(replay.items).toHaveLength(1);
     expect(replay.items[0]?.metadata).toEqual({ accountId: "github.com/1" });
     await expect(telemetry.replayEvents("01", signal)).rejects.toBeInstanceOf(AdminTelemetryError);
+
+    db.prepare(
+      "INSERT INTO operational_events (occurred_at_ms, kind, severity, metadata_json) VALUES (?, ?, ?, ?)",
+    ).run(NOW, "request_failed", "error", JSON.stringify({ protocol: "gho_secret", status: 999, category: "private" }));
+    const unsafe = await telemetry.queryEvents({ fromMs: NOW, toMs: NOW + 1, limit: 1, cursor: null }, signal);
+    expect(unsafe.items[0]?.metadata).toEqual({});
   });
 
   it("reports storage, drops, pending work, performance, and sanitized live transitions", async () => {

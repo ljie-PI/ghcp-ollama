@@ -292,13 +292,15 @@ export class AdminManagementApi {
   }
 
   async removeAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<AdminAccount> {
-    const removed = await this.dependencies.accounts.remove(accountId, expectedRevision, signal);
+    signal.throwIfAborted();
     this.dependencies.accountCaches.invalidate(accountId);
+    const removed = await this.dependencies.accounts.remove(accountId, expectedRevision, signal);
     signal.throwIfAborted();
     return this.account(removed);
   }
 
   async useDefaultAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<AdminAccounts> {
+    signal.throwIfAborted();
     await this.dependencies.accounts.use(accountId, expectedRevision, signal);
     signal.throwIfAborted();
     return this.accounts();

@@ -88,6 +88,9 @@ export class AccountModelPreferences {
     if (visibleModelIds.has(current.modelId)) {
       return current;
     }
+    if (current.validity === "invalid") {
+      return current;
+    }
     this.database.prepare(
       "UPDATE account_model_preferences SET validity = 'invalid', catalog_generation = ?, revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
     ).run(catalogGeneration, this.nowMs(), accountId);

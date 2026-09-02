@@ -108,11 +108,13 @@ export class AccountDirectory {
     readonly login?: string;
     readonly displayName?: string;
     readonly secret: SecretCredential;
-  }): Promise<BoundAccount> {
+  }, signal?: AbortSignal): Promise<BoundAccount> {
+    throwIfAborted(signal);
     const environment = resolveGitHubEnvironment(input.host);
     const userId = canonicalUserId(input.userId);
     const accountId = formatAccountId(environment.host, userId);
     return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, async () => {
+      throwIfAborted(signal);
       const existing = this.readAccount(accountId);
       if (existing?.credential_state === "removing") {
         throw new AccountDirectoryError("revision_conflict", "account removal is in progress");
@@ -174,7 +176,7 @@ export class AccountDirectory {
 
       await this.credentials.prune(this.activeCredentialReferences());
       return this.bind(accountId);
-    }));
+    }, signal), signal);
   }
 
   async remove(accountId: AccountId, expectedRevision: number, signal?: AbortSignal): Promise<AccountSummary> {
@@ -211,7 +213,6 @@ export class AccountDirectory {
     }
 
     await this.credentials.removeAccount(accountId);
-    throwIfAborted(signal);
     this.database.prepare(
       "UPDATE accounts SET credential_state = 'removed', credential_generation = NULL, revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
     ).run(this.nowMs(), accountId);

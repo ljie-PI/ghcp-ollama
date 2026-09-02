@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { PerformanceEvaluation, PerformanceSnapshot } from "./performance.js";
 import { EVENT_ROW_CAP, type RecordedOperationalEvent, type TelemetryOutcome, type TelemetryProtocol } from "./recorder.js";
 import type { TelemetryRecorder } from "./recorder.js";
+import { sanitizeOperationalEventMetadata } from "./sanitize.js";
 
 const PROTOCOLS: ReadonlySet<string> = new Set([
   "openai_chat",
@@ -471,23 +472,6 @@ function recordedEventDto(event: Readonly<RecordedOperationalEvent>): AdminOpera
   };
 }
 
-const EVENT_METADATA_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
-  gateway_started: new Set(["status"]),
-  gateway_stopped: new Set(),
-  request_failed: new Set(["requestId", "protocol", "status", "category", "outcome"]),
-  account_authenticated: new Set(["accountId"]),
-  account_removed: new Set(["accountId"]),
-  default_account_changed: new Set(["accountId", "revision"]),
-  preferred_model_changed: new Set(["accountId", "revision"]),
-  runtime_config_changed: new Set(["revision"]),
-  catalog_refreshed: new Set(["accountId", "count"]),
-  performance_degraded: new Set(["metric", "status", "actualMs", "thresholdMs"]),
-  performance_recovered: new Set(["metric", "status", "actualMs", "thresholdMs"]),
-  telemetry_dropped: new Set(["droppedUsageUpdates", "droppedOperationalEvents"]),
-  metadata_rejected: new Set(["reason"]),
-  daemon_start_failed: new Set(["category"]),
-};
-
 function parseMetadata(json: string): Readonly<Record<string, unknown>> {
   try {
     const parsed = JSON.parse(json) as unknown;
@@ -503,19 +487,7 @@ function sanitizeEventMetadata(
   kind: string,
   metadata: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, string | number | boolean | null>> {
-  const allowed = EVENT_METADATA_KEYS[kind];
-  if (allowed === undefined) {
-    return {};
-  }
-  const result: Record<string, string | number | boolean | null> = {};
-  for (const key of allowed) {
-    const value = metadata[key];
-    if (typeof value === "string" || typeof value === "boolean" || value === null
-      || (typeof value === "number" && Number.isFinite(value))) {
-      result[key] = value;
-    }
-  }
-  return result;
+  return sanitizeOperationalEventMetadata(kind, metadata);
 }
 
 function encodeUsageCursor(row: UsageRow): string {

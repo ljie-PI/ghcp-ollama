@@ -50,6 +50,7 @@ interface PendingFlow extends DeviceFlowSnapshot {
 
 export class DeviceFlowService {
   private readonly flows = new Map<string, PendingFlow>();
+  private startingFlows = 0;
 
   constructor(
     private readonly directory: AccountDirectory,
@@ -60,11 +61,17 @@ export class DeviceFlowService {
   async start(host: string, signal?: AbortSignal): Promise<DeviceFlowSnapshot> {
     throwIfAborted(signal);
     this.gc();
-    if (this.flows.size >= MAX_DEVICE_FLOWS) {
+    if (this.flows.size + this.startingFlows >= MAX_DEVICE_FLOWS) {
       throw new DeviceFlowError("capacity", "too many active device flows");
     }
     const environment = resolveGitHubEnvironment(host);
-    const requested = await this.oauth.requestDeviceCode(environment, signal);
+    this.startingFlows += 1;
+    let requested: Awaited<ReturnType<DeviceOAuthClient["requestDeviceCode"]>>;
+    try {
+      requested = await this.oauth.requestDeviceCode(environment, signal);
+    } finally {
+      this.startingFlows -= 1;
+    }
     throwIfAborted(signal);
     const flowId = randomUUID();
     const snapshot: PendingFlow = {
@@ -117,7 +124,7 @@ export class DeviceFlowService {
       login: result.user.login,
       ...(result.user.name === undefined ? {} : { displayName: result.user.name }),
       secret,
-    });
+    }, signal);
     this.flows.delete(flowId);
     return { status: "complete", accountId: bound.accountId };
   }
