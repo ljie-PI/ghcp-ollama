@@ -109,7 +109,8 @@ describe("RM-20 Admin API", () => {
 
   it("invalidates account caches before credential cleanup and before returning failures", async () => {
     const dependencies = adminDependencies();
-    dependencies.accounts.remove = async () => {
+    dependencies.accounts.remove = async (_accountId, _revision, _signal, onRemoving) => {
+      onRemoving?.();
       dependencies.calls.push("remove-started");
       throw new Error("cleanup failed");
     };

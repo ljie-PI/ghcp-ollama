@@ -128,6 +128,40 @@ describe("RM-06 device flow", () => {
     }
   });
 
+  it("allows only one concurrent poll to consume a terminal result", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-flow-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    try {
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+      let exchanges = 0;
+      let release = (): void => undefined;
+      const flows = new DeviceFlowService(accounts, {
+        async requestDeviceCode() {
+          return { deviceCode: "device", userCode: "CODE", verificationUri: "https://github.com/login/device", intervalSec: 5, expiresInSec: 900 };
+        },
+        async exchangeDeviceCode() {
+          exchanges += 1;
+          await new Promise<void>((resolve) => { release = resolve; });
+          return { status: "complete", accessToken: "token", user: { id: "42", login: "octo" } };
+        },
+      }, nowMs);
+      const started = await flows.start("github.com");
+      const first = flows.poll(started.flowId);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await expect(flows.poll(started.flowId)).resolves.toEqual({ status: "pending" });
+      release();
+      await expect(first).resolves.toEqual({ status: "complete", accountId: "github.com/42" });
+      expect(exchanges).toBe(1);
+      await expect(flows.poll(started.flowId)).rejects.toBeInstanceOf(DeviceFlowError);
+    } finally {
+      closeDatabase(database);
+    }
+  });
+
   it("cancels and expires scripted flows", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-flow-"));
     const database = openDatabase({

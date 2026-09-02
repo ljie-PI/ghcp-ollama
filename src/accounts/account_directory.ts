@@ -179,15 +179,29 @@ export class AccountDirectory {
     }, signal), signal);
   }
 
-  async remove(accountId: AccountId, expectedRevision: number, signal?: AbortSignal): Promise<AccountSummary> {
+  async remove(
+    accountId: AccountId,
+    expectedRevision: number,
+    signal?: AbortSignal,
+    onRemoving?: () => void,
+  ): Promise<AccountSummary> {
     throwIfAborted(signal);
     return await withAccountLifecycleLock(
-      () => withCredentialGenerationLock(accountId, () => this.removeUnlocked(accountId, expectedRevision, signal), signal),
+      () => withCredentialGenerationLock(
+        accountId,
+        () => this.removeUnlocked(accountId, expectedRevision, signal, onRemoving),
+        signal,
+      ),
       signal,
     );
   }
 
-  private async removeUnlocked(accountId: AccountId, expectedRevision: number, signal?: AbortSignal): Promise<AccountSummary> {
+  private async removeUnlocked(
+    accountId: AccountId,
+    expectedRevision: number,
+    signal?: AbortSignal,
+    onRemoving?: () => void,
+  ): Promise<AccountSummary> {
     throwIfAborted(signal);
     const row = this.readAccount(accountId);
     if (row === undefined) {
@@ -197,6 +211,7 @@ export class AccountDirectory {
       throw new AccountDirectoryError("revision_conflict", "account revision conflict");
     }
     if (row.credential_state === "removed") {
+      onRemoving?.();
       return toSummary(row);
     }
 
@@ -212,6 +227,7 @@ export class AccountDirectory {
       })();
     }
 
+    onRemoving?.();
     await this.credentials.removeAccount(accountId);
     this.database.prepare(
       "UPDATE accounts SET credential_state = 'removed', credential_generation = NULL, revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",

@@ -29,6 +29,7 @@ interface Subscriber {
   readonly heartbeat: ReturnType<typeof setInterval>;
   unsubscribeSession: (() => void) | undefined;
   replay: Uint8Array[];
+  replayBytes: number;
   replayCursor: string | null;
   replayThrough: bigint | null;
   replayStarted: boolean;
@@ -93,6 +94,7 @@ export class AdminEventStreamHub {
           abortController,
           callerSignal: signal,
           replay: [],
+          replayBytes: 0,
           replayCursor: lastEventId,
           replayThrough: null,
           replayStarted: false,
@@ -214,11 +216,11 @@ export class AdminEventStreamHub {
     if (subscriber === undefined || subscriber.closed) {
       return;
     }
-    if (!counted && subscriber.queue.length > 0) {
+    if (!counted && (subscriber.queue.length > 0 || subscriber.replay.length > 0 || subscriber.performancePending)) {
       return;
     }
-    if (counted && (subscriber.queuedEvents >= ADMIN_EVENT_QUEUE_CAP
-      || subscriber.queuedBytes + frame.byteLength > ADMIN_EVENT_QUEUE_BYTES)) {
+    if (counted && (subscriber.queuedEvents + subscriber.replay.length >= ADMIN_EVENT_QUEUE_CAP
+      || subscriber.queuedBytes + subscriber.replayBytes + frame.byteLength > ADMIN_EVENT_QUEUE_BYTES)) {
       this.closeSubscriber(subscriber);
       return;
     }
@@ -244,6 +246,7 @@ export class AdminEventStreamHub {
     subscriber.unsubscribeSession = undefined;
     subscriber.queue.length = 0;
     subscriber.replay.length = 0;
+    subscriber.replayBytes = 0;
     subscriber.queuedBytes = 0;
     subscriber.queuedEvents = 0;
     this.subscribers.delete(subscriber);
@@ -253,6 +256,7 @@ export class AdminEventStreamHub {
   private async nextInitialFrame(subscriber: Subscriber): Promise<Uint8Array | undefined> {
     const buffered = subscriber.replay.shift();
     if (buffered !== undefined) {
+      subscriber.replayBytes -= buffered.byteLength;
       return buffered;
     }
     if (subscriber.initialFrame !== undefined) {
@@ -282,7 +286,8 @@ export class AdminEventStreamHub {
       }
     } else if (!replay.found) {
       subscriber.replayDone = true;
-      return undefined;
+      subscriber.initialFrame = resetFrame(replay.latestEventId);
+      return this.nextInitialFrame(subscriber);
     }
 
     const through = subscriber.replayThrough;
@@ -291,7 +296,15 @@ export class AdminEventStreamHub {
       : replay.items
         .slice(0, ADMIN_EVENT_REPLAY_BATCH_SIZE)
         .filter((event) => BigInt(event.eventId) <= through);
-    subscriber.replay = items.map(operationalFrame);
+    const frames = items.map(operationalFrame);
+    const replayBytes = frames.reduce((total, frame) => total + frame.byteLength, 0);
+    if (subscriber.queuedEvents + frames.length > ADMIN_EVENT_QUEUE_CAP
+      || subscriber.queuedBytes + replayBytes > ADMIN_EVENT_QUEUE_BYTES) {
+      this.closeSubscriber(subscriber);
+      return undefined;
+    }
+    subscriber.replay = frames;
+    subscriber.replayBytes = replayBytes;
     const last = items.at(-1);
     if (last !== undefined) {
       subscriber.replayCursor = last.eventId;
@@ -299,7 +312,11 @@ export class AdminEventStreamHub {
     if (last === undefined || through === null || BigInt(last.eventId) >= through) {
       subscriber.replayDone = true;
     }
-    return subscriber.replay.shift();
+    const frame = subscriber.replay.shift();
+    if (frame !== undefined) {
+      subscriber.replayBytes -= frame.byteLength;
+    }
+    return frame;
   }
 
   private discardReplayedLiveEvents(subscriber: Subscriber): void {

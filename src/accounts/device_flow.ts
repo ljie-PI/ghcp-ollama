@@ -50,6 +50,7 @@ interface PendingFlow extends DeviceFlowSnapshot {
 
 export class DeviceFlowService {
   private readonly flows = new Map<string, PendingFlow>();
+  private readonly pollingFlows = new Set<string>();
   private startingFlows = 0;
 
   constructor(
@@ -108,25 +109,33 @@ export class DeviceFlowService {
       this.flows.delete(flowId);
       return { status: "expired" };
     }
-    const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode, signal);
-    throwIfAborted(signal);
-    if (result.status === "pending") {
+    if (this.pollingFlows.has(flowId)) {
       return { status: "pending" };
     }
-    if (result.status === "failed") {
+    this.pollingFlows.add(flowId);
+    try {
+      const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode, signal);
+      throwIfAborted(signal);
+      if (result.status === "pending") {
+        return { status: "pending" };
+      }
+      if (result.status === "failed") {
+        this.flows.delete(flowId);
+        return { status: "failed" };
+      }
+      const secret: SecretCredential = { generation: 0, githubToken: result.accessToken };
+      const bound = await this.directory.upsertAuthenticated({
+        host: flow.environment.host,
+        userId: result.user.id,
+        login: result.user.login,
+        ...(result.user.name === undefined ? {} : { displayName: result.user.name }),
+        secret,
+      }, signal);
       this.flows.delete(flowId);
-      return { status: "failed" };
+      return { status: "complete", accountId: bound.accountId };
+    } finally {
+      this.pollingFlows.delete(flowId);
     }
-    const secret: SecretCredential = { generation: 0, githubToken: result.accessToken };
-    const bound = await this.directory.upsertAuthenticated({
-      host: flow.environment.host,
-      userId: result.user.id,
-      login: result.user.login,
-      ...(result.user.name === undefined ? {} : { displayName: result.user.name }),
-      secret,
-    }, signal);
-    this.flows.delete(flowId);
-    return { status: "complete", accountId: bound.accountId };
   }
 
   cancel(flowId: string): void {

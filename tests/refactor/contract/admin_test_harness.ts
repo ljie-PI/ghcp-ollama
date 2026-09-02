@@ -93,10 +93,11 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         defaultAccountId = accountId;
         return defaultRevision;
       },
-      remove: async (accountId, expectedRevision, signal) => {
+      remove: async (accountId, expectedRevision, signal, onRemoving) => {
         signal?.throwIfAborted();
         if (accountId !== account.accountId) throw coded("not_found");
         if (expectedRevision !== account.revision) throw coded("revision_conflict");
+        onRemoving?.();
         return { ...account, revision: 5, state: "removed" };
       },
     },

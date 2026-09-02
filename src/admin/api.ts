@@ -125,7 +125,12 @@ export interface AdminAccountDirectory {
   list(): readonly AdminAccountSummary[];
   defaultState(): { readonly defaultRevision: number; readonly defaultAccountId: string | null };
   use(accountId: string, expectedRevision: number, signal?: AbortSignal): number | Promise<number>;
-  remove(accountId: string, expectedRevision: number, signal?: AbortSignal): Promise<AdminAccountSummary>;
+  remove(
+    accountId: string,
+    expectedRevision: number,
+    signal?: AbortSignal,
+    onRemoving?: () => void,
+  ): Promise<AdminAccountSummary>;
 }
 
 export interface AdminAccountSummary {
@@ -299,8 +304,12 @@ export class AdminManagementApi {
 
   async removeAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<AdminAccount> {
     signal.throwIfAborted();
-    this.dependencies.accountCaches.invalidate(accountId);
-    const removed = await this.dependencies.accounts.remove(accountId, expectedRevision, signal);
+    const removed = await this.dependencies.accounts.remove(
+      accountId,
+      expectedRevision,
+      signal,
+      () => this.dependencies.accountCaches.invalidate(accountId),
+    );
     signal.throwIfAborted();
     return this.account(removed);
   }
