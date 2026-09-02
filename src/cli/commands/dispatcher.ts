@@ -76,6 +76,7 @@ export class CommandDispatcher {
       const input = args as ControlOperationMap["auth.logout"]["args"];
       const account = input.accountId === undefined ? this.defaultAccount() : this.requireAccount(input.accountId);
       const removed = await this.dependencies.directory.remove(account.accountId, account.revision);
+      this.dependencies.catalog.invalidate(account.accountId);
       return this.adminAccount(removed) as ControlOperationMap[Operation]["result"];
     }
     case "auth.status": {
@@ -96,6 +97,7 @@ export class CommandDispatcher {
       const input = args as ControlOperationMap["accounts.remove"]["args"];
       const account = this.requireAccount(input.accountId);
       const removed = await this.dependencies.directory.remove(input.accountId, account.revision);
+      this.dependencies.catalog.invalidate(input.accountId);
       return this.adminAccount(removed) as ControlOperationMap[Operation]["result"];
     }
     case "models.list": {

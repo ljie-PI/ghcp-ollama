@@ -127,6 +127,7 @@ describe("RM-18 CLI parser", () => {
   it("rejects unknown commands, chat aliases, missing args, and misplaced startup flags", () => {
     for (const argv of [
       ["chat"],
+      ["help"],
       ["ghcpo"],
       ["models", "set"],
       ["accounts", "use"],

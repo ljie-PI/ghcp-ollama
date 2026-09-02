@@ -111,7 +111,7 @@ function parseCommand(
   context: { readonly env: NodeJS.ProcessEnv; readonly homedir: string; readonly dataDir: string; readonly cliDataDir?: string },
 ): ParsedCliCommand {
   const [command, groupAction, third, fourth, ...extra] = tokens;
-  if (command === undefined || command === "--help" || command === "help") {
+  if (command === undefined || command === "--help") {
     return { kind: "help", text: ROOT_HELP };
   }
   if (command === "serve") {

@@ -368,6 +368,9 @@ export class HttpControlClient implements ControlClient {
       if (timeout.parentAborted()) {
         throw new CliError("interrupted");
       }
+      if (pathPart.endsWith("/status")) {
+        return { state: "unreachable" };
+      }
       throw new CliError("daemon_unreachable");
     }
     let payload: unknown;

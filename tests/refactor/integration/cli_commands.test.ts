@@ -252,6 +252,16 @@ describe("RM-18 CLI commands", () => {
     }));
     await expect(foreground.lifecycle("stop", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
     await expect(foreground.lifecycle("restart", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
+
+    const unreachable = new HttpControlClient(async () => {
+      throw new TypeError("offline");
+    }, async () => ({
+      managed: true,
+      controlToken: "control-token",
+      instanceNonce: "nonce",
+      port: 31_400,
+    }));
+    await expect(unreachable.lifecycle("status", { dataDir: "selected" })).resolves.toMatchObject({ state: "unreachable" });
   });
 
   it("maps control timeout and caller abort without leaking as daemon failures", async () => {

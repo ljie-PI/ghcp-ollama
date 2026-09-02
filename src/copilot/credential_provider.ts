@@ -9,43 +9,52 @@ export async function refreshCopilotToken(
   githubToken: string,
   signal?: AbortSignal,
 ): Promise<{ readonly token: string; readonly expiresAtMs: number }> {
+  const timeout = credentialTimeout(signal);
   let response: Response;
   try {
-    response = await fetch("https://api.github.com/copilot_internal/v2/token", {
+    response = await Promise.race([fetch("https://api.github.com/copilot_internal/v2/token", {
       method: "GET",
       headers: {
         authorization: `Bearer ${githubToken}`,
         accept: "application/json",
         ...copilotHeaders(),
       },
-      ...(signal === undefined ? {} : { signal }),
-    });
+      signal: timeout.signal,
+    }), timeout.promise]);
   } catch (error: unknown) {
+    timeout.clear();
+    if (timeout.timedOut()) {
+      throw new TokenRefreshError("timeout", "copilot token refresh failed");
+    }
     if (isAbortError(error)) {
       throw error;
     }
     throw new TokenRefreshError("network", "copilot token refresh failed");
   }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new TokenRefreshError(response.status === 401 ? "unauthorized" : "network", "copilot token refresh failed");
-  }
-  let body: { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
   try {
-    body = await readJsonObject(response, signal) as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new TokenRefreshError(response.status === 401 ? "unauthorized" : "network", "copilot token refresh failed");
+    }
+    const body = await readJsonObject(response, timeout.signal) as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
+    if (typeof body.token !== "string") {
+      throw new TokenRefreshError("network", "copilot token refresh failed");
+    }
+    return {
+      token: body.token,
+      expiresAtMs: tokenExpiry(body),
+    };
   } catch (error: unknown) {
     if (isAbortError(error)) {
       throw error;
     }
+    if (error instanceof TokenRefreshError) {
+      throw error;
+    }
     throw new TokenRefreshError("network", "copilot token refresh failed");
+  } finally {
+    timeout.clear();
   }
-  if (typeof body.token !== "string") {
-    throw new TokenRefreshError("network", "copilot token refresh failed");
-  }
-  return {
-    token: body.token,
-    expiresAtMs: tokenExpiry(body),
-  };
 }
 
 export function createCopilotEndpointDiscovery(
@@ -63,28 +72,34 @@ async function fetchCopilotDiscovery(
   if (credential === null) {
     return null;
   }
+  const timeout = credentialTimeout(signal);
   const base = account.environment.apiBaseUrl;
   const url = new URL("copilot_internal/user", `${base.replace(/\/+$/u, "")}/`);
   try {
-    const response = await fetch(url, {
+    const response = await Promise.race([fetch(url, {
       method: "GET",
       headers: {
         authorization: `Bearer ${credential.githubToken}`,
         accept: "application/json",
         ...copilotHeaders(),
       },
-      ...(signal === undefined ? {} : { signal }),
-    });
+      signal: timeout.signal,
+    }), timeout.promise]);
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
       return null;
     }
-    return endpointFromCopilotUser(await readJsonObject(response, signal));
+    return endpointFromCopilotUser(await readJsonObject(response, timeout.signal));
   } catch (error: unknown) {
+    if (timeout.timedOut()) {
+      return null;
+    }
     if (isAbortError(error)) {
       throw error;
     }
     return null;
+  } finally {
+    timeout.clear();
   }
 }
 
@@ -176,4 +191,30 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 
 function isAbortError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+}
+
+function credentialTimeout(parent: AbortSignal | undefined): {
+  readonly signal: AbortSignal;
+  readonly promise: Promise<never>;
+  readonly clear: () => void;
+  readonly timedOut: () => boolean;
+} {
+  const controller = new AbortController();
+  const signal = parent === undefined ? controller.signal : AbortSignal.any([parent, controller.signal]);
+  let timedOut = false;
+  let rejectTimeout: (error: unknown) => void = () => undefined;
+  const promise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    rejectTimeout(new TokenRefreshError("timeout", "copilot credential timeout"));
+  }, 30_000);
+  return {
+    signal,
+    promise,
+    clear: () => clearTimeout(timer),
+    timedOut: () => timedOut,
+  };
 }
