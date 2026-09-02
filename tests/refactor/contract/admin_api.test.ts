@@ -161,6 +161,47 @@ describe("RM-20 Admin API", () => {
       await harness.close();
     }
   });
+
+  it("keeps model mutations serialized when a queued request aborts", async () => {
+    const dependencies = adminDependencies();
+    let releaseCatalog = (): void => undefined;
+    let calls = 0;
+    const originalGet = dependencies.catalog.get;
+    dependencies.catalog.get = async (accountId, signal) => {
+      calls += 1;
+      if (calls === 1) {
+        await new Promise<void>((resolve) => { releaseCatalog = resolve; });
+      }
+      return await originalGet(accountId, signal);
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const first = mutate(harness.gateway, "POST", "/admin/api/v1/models/refresh", session, { accountId: "github.com/42" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const abort = new AbortController();
+      const second = harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/models/refresh`, {
+        method: "POST",
+        signal: abort.signal,
+        headers: { "content-type": "application/json", cookie: session.cookie, origin: ORIGIN, "x-ghcg-csrf": session.csrf },
+        body: JSON.stringify({ accountId: "github.com/42" }),
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      abort.abort();
+      await second;
+      const third = mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
+        accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(calls).toBe(1);
+      releaseCatalog();
+      expect((await first).status).toBe(200);
+      expect((await third).status).toBe(200);
+      expect(calls).toBe(2);
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 async function createHarness(dependencies = adminDependencies()): Promise<{

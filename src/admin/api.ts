@@ -494,9 +494,11 @@ export class AdminManagementApi {
       return await work();
     } finally {
       release();
-      if (this.modelMutations.get(accountId) === queued) {
-        this.modelMutations.delete(accountId);
-      }
+      void queued.finally(() => {
+        if (this.modelMutations.get(accountId) === queued) {
+          this.modelMutations.delete(accountId);
+        }
+      });
     }
   }
 }
