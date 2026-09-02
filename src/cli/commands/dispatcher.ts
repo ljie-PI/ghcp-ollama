@@ -4,8 +4,8 @@ import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_f
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import type { RuntimeConfigStore } from "../../config/runtime_config.js";
-import { RuntimeConfigError } from "../../config/runtime_config.js";
-import { defaultRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "../../config/schema.js";
+import { isRuntimeConfigKey, readRuntimeConfigNumber, RUNTIME_CONFIG_RANGES, RuntimeConfigError, withRuntimeConfigNumber } from "../../config/runtime_config.js";
+import type { RuntimeConfigSnapshot } from "../../config/schema.js";
 import { PreferredModelManager } from "../../protocols/model_catalog/preferred.js";
 import {
   CliError,
@@ -187,7 +187,7 @@ export class CommandDispatcher {
     return {
       revision: this.dependencies.runtimeConfig.readRevision(),
       config: this.dependencies.runtimeConfig.readSnapshot(),
-      ranges: CONFIG_RANGES,
+      ranges: RUNTIME_CONFIG_RANGES,
     };
   }
 }
@@ -204,41 +204,23 @@ export class DispatcherControlClient implements Pick<ControlClient, "request"> {
   }
 }
 
-const CONFIG_RANGES: AdminRuntimeConfig["ranges"] = {
-  "limits.requestBodyBytes": { min: 1_048_576, max: 67_108_864, unit: "bytes" },
-  "limits.sseEventBytes": { min: 65_536, max: 16_777_216, unit: "bytes" },
-  "limits.nonstreamBodyBytes": { min: 1_048_576, max: 134_217_728, unit: "bytes" },
-  "limits.accumulatorBytes": { min: 1_048_576, max: 134_217_728, unit: "bytes" },
-  "admission.activeMax": { min: 1, max: 16, unit: "count" },
-  "admission.queueMax": { min: 0, max: 64, unit: "count" },
-  "timeouts.queueMs": { min: 1_000, max: 300_000, unit: "ms" },
-  "timeouts.connectMs": { min: 1_000, max: 120_000, unit: "ms" },
-  "timeouts.firstByteMs": { min: 5_000, max: 600_000, unit: "ms" },
-  "timeouts.streamIdleMs": { min: 5_000, max: 600_000, unit: "ms" },
-  "timeouts.totalMs": { min: 60_000, max: 7_200_000, unit: "ms" },
-  "accounts.maxAuthenticated": { min: 1, max: 32, unit: "count" },
-  "history.ttlDays": { min: 1, max: 365, unit: "days" },
-  "usage.retentionDays": { min: 1, max: 365, unit: "days" },
-  "events.retentionDays": { min: 1, max: 30, unit: "days" },
-};
-
 function configEntry(config: RuntimeConfigSnapshot, key: string): {
   readonly value: number;
   readonly range: { readonly min: number; readonly max: number; readonly unit: string };
 } {
-  const range = CONFIG_RANGES[key];
-  if (range === undefined) {
+  if (!isRuntimeConfigKey(key)) {
     throw new CliError(startupOnlyKeys.has(key) ? "validation_error" : "not_found");
   }
-  const value = readConfigNumber(config, key);
+  const range = RUNTIME_CONFIG_RANGES[key];
+  const value = readRuntimeConfigNumber(config, key);
   return { value, range };
 }
 
 function setConfigValue(config: RuntimeConfigSnapshot, key: string, rawValue: string): RuntimeConfigSnapshot {
-  const range = CONFIG_RANGES[key];
-  if (range === undefined || startupOnlyKeys.has(key)) {
+  if (!isRuntimeConfigKey(key) || startupOnlyKeys.has(key)) {
     throw new CliError("validation_error");
   }
+  const range = RUNTIME_CONFIG_RANGES[key];
   if (!/^[0-9]+$/u.test(rawValue)) {
     throw new CliError("validation_error");
   }
@@ -246,58 +228,7 @@ function setConfigValue(config: RuntimeConfigSnapshot, key: string, rawValue: st
   if (value < range.min || value > range.max) {
     throw new CliError("validation_error");
   }
-  const next = defaultRuntimeConfigSnapshot();
-  Object.assign(next.limits, config.limits);
-  Object.assign(next.admission, config.admission);
-  Object.assign(next.timeouts, config.timeouts);
-  Object.assign(next.accounts, config.accounts);
-  Object.assign(next.history, config.history);
-  Object.assign(next.usage, config.usage);
-  Object.assign(next.events, config.events);
-  assignConfigNumber(next, key, value);
-  return next;
-}
-
-function readConfigNumber(config: RuntimeConfigSnapshot, key: string): number {
-  switch (key) {
-  case "limits.requestBodyBytes": return config.limits.requestBodyBytes;
-  case "limits.sseEventBytes": return config.limits.sseEventBytes;
-  case "limits.nonstreamBodyBytes": return config.limits.nonstreamBodyBytes;
-  case "limits.accumulatorBytes": return config.limits.accumulatorBytes;
-  case "admission.activeMax": return config.admission.activeMax;
-  case "admission.queueMax": return config.admission.queueMax;
-  case "timeouts.queueMs": return config.timeouts.queueMs;
-  case "timeouts.connectMs": return config.timeouts.connectMs;
-  case "timeouts.firstByteMs": return config.timeouts.firstByteMs;
-  case "timeouts.streamIdleMs": return config.timeouts.streamIdleMs;
-  case "timeouts.totalMs": return config.timeouts.totalMs;
-  case "accounts.maxAuthenticated": return config.accounts.maxAuthenticated;
-  case "history.ttlDays": return config.history.ttlDays;
-  case "usage.retentionDays": return config.usage.retentionDays;
-  case "events.retentionDays": return config.events.retentionDays;
-  default: throw new CliError("not_found");
-  }
-}
-
-function assignConfigNumber(config: RuntimeConfigSnapshot, key: string, value: number): void {
-  switch (key) {
-  case "limits.requestBodyBytes": config.limits.requestBodyBytes = value; return;
-  case "limits.sseEventBytes": config.limits.sseEventBytes = value; return;
-  case "limits.nonstreamBodyBytes": config.limits.nonstreamBodyBytes = value; return;
-  case "limits.accumulatorBytes": config.limits.accumulatorBytes = value; return;
-  case "admission.activeMax": config.admission.activeMax = value; return;
-  case "admission.queueMax": config.admission.queueMax = value; return;
-  case "timeouts.queueMs": config.timeouts.queueMs = value; return;
-  case "timeouts.connectMs": config.timeouts.connectMs = value; return;
-  case "timeouts.firstByteMs": config.timeouts.firstByteMs = value; return;
-  case "timeouts.streamIdleMs": config.timeouts.streamIdleMs = value; return;
-  case "timeouts.totalMs": config.timeouts.totalMs = value; return;
-  case "accounts.maxAuthenticated": config.accounts.maxAuthenticated = value; return;
-  case "history.ttlDays": config.history.ttlDays = value; return;
-  case "usage.retentionDays": config.usage.retentionDays = value; return;
-  case "events.retentionDays": config.events.retentionDays = value; return;
-  default: throw new CliError("validation_error");
-  }
+  return withRuntimeConfigNumber(config, key, value);
 }
 
 function mapDispatcherError(error: unknown): CliError {
@@ -321,6 +252,9 @@ function mapDispatcherError(error: unknown): CliError {
   }
   if (error instanceof RuntimeConfigError) {
     return new CliError(error.code === "revision_conflict" ? "revision_conflict" : "validation_error");
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return new CliError("interrupted");
   }
   if (error instanceof DeviceFlowError) {
     return new CliError(error.code === "not_found" || error.code === "expired" ? "not_found" : "unavailable");

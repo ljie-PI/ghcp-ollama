@@ -168,7 +168,7 @@ export async function createProductionApplicationContext(
   };
 }
 
-function litellmStyleTokenCounter(input: { readonly messages?: unknown; readonly text?: string }): number {
+export function litellmStyleTokenCounter(input: { readonly messages?: unknown; readonly text?: string }): number {
   const text = input.text ?? flattenMessagesForTokenCounter(input.messages);
   return text.match(/[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu)?.length ?? 0;
 }

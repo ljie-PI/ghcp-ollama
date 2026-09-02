@@ -330,10 +330,6 @@ export class HttpControlClient implements ControlClient {
     return { opened: true };
   }
 
-  async cancelLogin(_flowId: string, _context: CliLifecycleContext): Promise<void> {
-    // RM-19 owns the real local control operation surface. Device flows remain bounded by TTL/cap until then.
-  }
-
   private async requireEndpoint(dataDir: string): Promise<ControlEndpoint> {
     const endpoint = await this.locateEndpoint(dataDir);
     if (endpoint === null) {

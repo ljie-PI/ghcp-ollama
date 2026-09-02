@@ -16,7 +16,7 @@ import { migration as runtimeConfigMigration } from "../../../src/persistence/mi
 import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
 import { migration as telemetryMigration } from "../../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../../src/persistence/migrations/030_responses_history.js";
-import { bootstrapGateway, createPublicRouteRegistrations } from "../../../src/main.js";
+import { bootstrapGateway, createPublicRouteRegistrations, litellmStyleTokenCounter } from "../../../src/main.js";
 import { SqliteResponsesHistory } from "../../../src/protocols/responses/history.js";
 
 const encoder = new TextEncoder();
@@ -302,12 +302,17 @@ describe("RM-18 CLI commands", () => {
   it("foreground composition registers all completed public routes without legacy fallback", async () => {
     const harness = await dispatcherHarness();
     try {
+      await harness.directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "42",
+        secret: { generation: 0, githubToken: "gho_scripted" },
+      });
       const routes = createPublicRouteRegistrations({
         directory: harness.directory,
         catalog: harness.catalog,
         copilot: harness.backend,
         history: harness.history,
-        tokenCounter: () => 0,
+        tokenCounter: litellmStyleTokenCounter,
       });
       expect(routes.map((route) => `${route.method} ${route.path}`)).toEqual([
         "GET /v1/models",
@@ -327,6 +332,13 @@ describe("RM-18 CLI commands", () => {
         const version = await gateway.fetch(new Request("http://127.0.0.1:31400/api/version"));
         expect(version.status).toBe(200);
         expect(await version.text()).toBe("{\"version\":\"0.1.0\"}");
+        const ollama = await gateway.fetch(new Request("http://127.0.0.1:31400/api/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "gpt", stream: false, messages: [{ role: "user", content: "hello world" }] }),
+        }));
+        expect(ollama.status).toBe(200);
+        expect(await ollama.text()).toContain("\"prompt_eval_count\":2");
         const legacy = await gateway.fetch(new Request("http://127.0.0.1:31400/models"));
         expect(legacy.status).toBe(404);
       } finally {
@@ -375,7 +387,7 @@ async function dispatcherHarness(options: {
   runtimeConfig.seedIfEmpty({});
   const history = new SqliteResponsesHistory(database, { nowMs: now });
   const backend = new ScriptedCopilotBackend({
-    chat: { status: 200, headers: new Headers(), body: encoder.encode("{\"choices\":[]}") },
+    chat: { status: 200, headers: new Headers(), body: encoder.encode("{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}") },
     responses: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
   });
   const dispatcher = new CommandDispatcher({
