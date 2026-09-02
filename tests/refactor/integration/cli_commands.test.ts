@@ -444,6 +444,25 @@ describe("RM-18 CLI commands", () => {
       throw new DOMException("aborted", "AbortError");
     });
     await expect(createCopilotEndpointDiscovery(store)(account)).rejects.toMatchObject({ name: "AbortError" });
+
+    let discoveryCancelled = false;
+    vi.stubGlobal("fetch", async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        discoveryCancelled = true;
+      },
+    }), { status: 500 }));
+    await expect(createCopilotEndpointDiscovery(store)(account)).resolves.toBeNull();
+    expect(discoveryCancelled).toBe(true);
+
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", async () => await new Promise<Response>(() => undefined));
+    const discoveryTimedOut = expect(createCopilotEndpointDiscovery(store)(account)).resolves.toBeNull();
+    await vi.advanceTimersByTimeAsync(30_000);
+    await discoveryTimedOut;
+    vi.useRealTimers();
   });
 });
 
