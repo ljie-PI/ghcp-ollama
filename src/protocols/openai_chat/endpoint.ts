@@ -785,6 +785,8 @@ function statusForFailure(failure: Readonly<GatewayFailure>): number {
     return 503;
   case "upstream_network":
   case "invalid_upstream_response":
+  case "invalid_tool_arguments":
+  case "invalid_logprobs":
     return 502;
   case "upstream_timeout":
     return 504;
@@ -818,6 +820,8 @@ function messageForFailure(failure: Readonly<GatewayFailure>): string {
   case "upstream_timeout":
     return "upstream timeout";
   case "invalid_upstream_response":
+  case "invalid_tool_arguments":
+  case "invalid_logprobs":
     return "invalid upstream response";
   case "upstream_http":
   case "upstream_network":

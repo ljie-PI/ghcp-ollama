@@ -34,6 +34,25 @@ export interface FixtureManifestEntry {
 
 const FIXTURE_ROOT = path.resolve("tests/refactor/fixtures");
 
+type GoReferenceJson =
+  | null
+  | boolean
+  | number
+  | string
+  | GoReferenceJson[]
+  | GoReferenceObject;
+
+interface GoReferenceObject {
+  readonly kind: "go-reference-object";
+  readonly members: readonly GoReferenceMember[];
+}
+
+interface GoReferenceMember {
+  readonly key: string;
+  readonly value: GoReferenceJson | undefined;
+  readonly omitEmpty?: boolean;
+}
+
 async function findManifests(root: string): Promise<string[]> {
   if (!existsSync(root)) {
     return [];
@@ -187,7 +206,7 @@ async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): P
   for (const entry of entries.filter((candidate) => candidate.owner === "RM-10")) {
     const expected = await expectedOllamaFixture(entry);
     if (expected === undefined) {
-      throw new Error(`fixture case ${entry.caseId} does not have an RM-10 generator`);
+      throw new Error(`fixture case ${entry.caseId} does not have an Ollama generator`);
     }
     const actual = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.expected), "utf8");
     if (actual !== expected) {
@@ -197,10 +216,13 @@ async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): P
 }
 
 async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
-  if (entry.caseId !== "ollama.request.capture") {
+  if (entry.caseId !== "ollama.request.capture" && entry.caseId !== "ollama.nonstream.success") {
     return undefined;
   }
   const input = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.input), "utf8");
+  if (entry.caseId === "ollama.nonstream.success") {
+    return ollamaNonstreamSuccessReference();
+  }
   const backend = new FixtureOllamaBackend();
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-fixture-"));
   const database = openDatabase({
@@ -221,6 +243,7 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
     directory: accounts,
     copilot: backend,
     now: () => new Date(0),
+    tokenCounter: (input) => input.text === undefined ? 1 : 0,
   }), {
     createRequestId: () => "req_fixture",
   });
@@ -235,6 +258,113 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
     await gateway.close();
     closeDatabase(database);
   }
+
+  function ollamaNonstreamSuccessReference(): string {
+    return stringifyGoReference(goObject([
+      { key: "model", value: "gpt" },
+      { key: "remote_model", value: undefined, omitEmpty: true },
+      { key: "remote_host", value: undefined, omitEmpty: true },
+      { key: "created_at", value: "2023-11-14T22:13:20Z" },
+      {
+        key: "message",
+        value: goObject([
+          { key: "role", value: "assistant" },
+          { key: "content", value: "visible" },
+          { key: "thinking", value: "hidden", omitEmpty: true },
+          { key: "images", value: undefined, omitEmpty: true },
+          {
+            key: "tool_calls",
+            value: [
+              goObject([
+                { key: "id", value: "call_1", omitEmpty: true },
+                {
+                  key: "function",
+                  value: goObject([
+                    { key: "index", value: 2 },
+                    { key: "name", value: "weather" },
+                    { key: "arguments", value: goObject([
+                      { key: "city", value: "Tokyo" },
+                      { key: "unit", value: "c" },
+                    ]) },
+                  ]),
+                },
+              ]),
+            ],
+            omitEmpty: true,
+          },
+          { key: "tool_name", value: undefined, omitEmpty: true },
+          { key: "tool_call_id", value: undefined, omitEmpty: true },
+        ]),
+      },
+      { key: "done", value: true },
+      { key: "done_reason", value: "stop", omitEmpty: true },
+      { key: "_debug_info", value: undefined, omitEmpty: true },
+      {
+        key: "logprobs",
+        value: [
+          goObject([
+            { key: "token", value: "visible" },
+            { key: "logprob", value: -0.5 },
+            { key: "bytes", value: [118, 105], omitEmpty: true },
+            {
+              key: "top_logprobs",
+              value: [goObject([
+                { key: "token", value: "visible" },
+                { key: "logprob", value: -0.5 },
+                { key: "bytes", value: [118], omitEmpty: true },
+              ])],
+              omitEmpty: true,
+            },
+          ]),
+        ],
+        omitEmpty: true,
+      },
+      { key: "total_duration", value: undefined, omitEmpty: true },
+      { key: "load_duration", value: undefined, omitEmpty: true },
+      { key: "prompt_eval_count", value: 12, omitEmpty: true },
+      { key: "prompt_eval_duration", value: undefined, omitEmpty: true },
+      { key: "eval_count", value: 6, omitEmpty: true },
+      { key: "eval_duration", value: undefined, omitEmpty: true },
+    ]));
+  }
+
+  function goObject(members: readonly GoReferenceMember[]): GoReferenceObject {
+    return { kind: "go-reference-object", members };
+  }
+
+  function stringifyGoReference(value: GoReferenceJson): string {
+    return goEscapeJson(writeGoReference(value));
+  }
+
+  function writeGoReference(value: GoReferenceJson): string {
+    if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map(writeGoReference).join(",")}]`;
+    }
+    const members = value.members.filter((member) => !member.omitEmpty || !isGoEmpty(member.value));
+    return `{${members.map((member) => `${JSON.stringify(member.key)}:${writeGoReference(member.value as GoReferenceJson)}`).join(",")}}`;
+  }
+
+  function isGoEmpty(value: GoReferenceJson | undefined): boolean {
+    return value === undefined
+      || value === null
+      || value === false
+      || value === 0
+      || value === ""
+      || (Array.isArray(value) && value.length === 0);
+  }
+
+  function goEscapeJson(json: string): string {
+    return json
+      .replace(/</gu, "\\u003c")
+      .replace(/>/gu, "\\u003e")
+      .replace(/&/gu, "\\u0026")
+      .replace(/\u2028/gu, "\\u2028")
+      .replace(/\u2029/gu, "\\u2029");
+  }
+
   const request = backend.requests[0];
   if (request === undefined) {
     throw new Error("ollama.request.capture did not call Chat upstream");
@@ -266,7 +396,35 @@ class FixtureOllamaBackend implements CopilotBackend {
       target,
       completeChat: async (request): Promise<ChatResponse> => {
         this.requests.push(request);
-        return { status: 200, headers: new Headers(), body: new TextEncoder().encode("{}") };
+        return {
+          status: 200,
+          headers: new Headers(),
+          body: new TextEncoder().encode(JSON.stringify({
+            created: 1_700_000_000,
+            choices: [{
+              index: 0,
+              message: {
+                content: "<think>hidden</thinking>visible",
+                tool_calls: [{
+                  id: "call_1",
+                  index: 2,
+                  type: "function",
+                  function: { name: "weather", arguments: "{\"city\":\"Tokyo\",\"unit\":\"c\"}" },
+                }],
+              },
+              finish_reason: "tool_calls",
+              logprobs: {
+                content: [{
+                  token: "visible",
+                  logprob: -0.5,
+                  bytes: [118, 105],
+                  top_logprobs: [{ token: "visible", logprob: -0.5, bytes: [118] }],
+                }],
+              },
+            }],
+            usage: { prompt_tokens: 12, completion_tokens: 6 },
+          })),
+        };
       },
       openChatStream: async (request): Promise<UpstreamByteStream> => {
         this.requests.push(request);

@@ -1,7 +1,11 @@
 import { VERSION } from "../../version.js";
-import type { CopilotBackend } from "../../copilot/backend.js";
+import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import type { AccountDirectory } from "../../accounts/account_directory.js";
 import { iterateChatFrames } from "../../copilot/backend.js";
+import {
+  UpstreamBodyLimitError,
+  UpstreamTimeoutError,
+} from "../../copilot/transport.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import type { FailurePresenter, RouteRegistration } from "../../gateway/hono_app.js";
 import {
@@ -15,12 +19,15 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
-import { encodeNdjson, ollamaCreatedAt, ollamaErrorBody } from "./wire.js";
+import { encodeNdjson, ollamaCreatedAt, ollamaErrorBody, ollamaJsonStringify } from "./wire.js";
+import { ollamaNonstreamResponse, type OllamaTokenCounter } from "./bridge.js";
+import type { ChatRequest } from "../chat_completions/types.js";
 
 export interface OllamaRouteDependencies {
   readonly directory: AccountDirectory;
   readonly copilot: CopilotBackend;
   readonly now?: () => Date;
+  readonly tokenCounter: OllamaTokenCounter;
 }
 
 const JSON_HEADERS = {
@@ -30,24 +37,7 @@ const JSON_HEADERS = {
 
 export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): readonly RouteRegistration[] {
   const presentFailure: FailurePresenter = (failure) => {
-    const status = failure.kind === "queue_full" || failure.kind === "queue_timeout"
-      ? 503
-      : failure.kind === "unsupported_semantics"
-        ? 422
-        : failure.kind === "upstream_timeout"
-          ? 504
-          : failure.kind === "internal"
-            ? 500
-            : 400;
-    const text = failure.kind === "queue_full" || failure.kind === "queue_timeout"
-      ? "server overloaded"
-      : failure.kind === "unsupported_semantics"
-        ? "unsupported semantics"
-        : failure.kind === "upstream_timeout"
-          ? "upstream timeout"
-          : failure.kind === "internal"
-            ? "internal error"
-            : "invalid request";
+    const { status, text } = ollamaFailureStatusAndText(failure);
     return new Response(ollamaErrorBody(text), { status, headers: JSON_HEADERS });
   };
 
@@ -90,9 +80,8 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
         const account = await dependencies.directory.bindDefault(scope.signal);
         const copilot = await dependencies.copilot.bind(account, scope.signal);
         const chatBody = serializeWireJson(chatRequest);
-        const createdAt = ollamaCreatedAt((dependencies.now ?? (() => new Date()))());
         if (!stream) {
-          const response = await copilot.completeChat({
+          const response = await completeChat(copilot, {
             model,
             body: chatBody,
             stream: false,
@@ -102,15 +91,19 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
             firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
             signal: scope.signal,
           });
-          const content = extractContent(response.body);
-          return new Response(JSON.stringify({
+          if (response.status < 200 || response.status >= 300) {
+            throw new GatewayFailureError({ kind: "upstream_http", status: response.status });
+          }
+          return new Response(ollamaJsonStringify(ollamaNonstreamResponse(
+            response.body,
             model,
-            created_at: createdAt,
-            message: { role: "assistant", content },
-            done: true,
-            done_reason: "stop",
-          }), { headers: { "Content-Type": "application/json; charset=utf-8" } });
+            chatMessagesFromRequest(chatRequest),
+            scope.config.limits.nonstreamBodyBytes,
+            dependencies.now ?? (() => new Date()),
+            dependencies.tokenCounter,
+          )), { headers: JSON_HEADERS });
         }
+        const createdAt = ollamaCreatedAt((dependencies.now ?? (() => new Date()))());
         const writer = createStreamResponseWriter({
           signal: scope.signal,
           headers: { "Content-Type": "application/x-ndjson" },
@@ -172,6 +165,32 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
       },
     },
   ];
+}
+
+function ollamaFailureStatusAndText(failure: Parameters<FailurePresenter>[0]): { readonly status: number; readonly text: string } {
+  switch (failure.kind) {
+  case "queue_full":
+  case "queue_timeout":
+    return { status: 503, text: "server overloaded" };
+  case "unsupported_semantics":
+    return { status: 422, text: "unsupported semantics" };
+  case "upstream_timeout":
+    return { status: 504, text: "upstream timeout" };
+  case "upstream_http":
+    return { status: failure.status, text: "upstream request failed" };
+  case "upstream_network":
+    return { status: 502, text: "upstream request failed" };
+  case "invalid_upstream_response":
+    return { status: 502, text: "invalid upstream response" };
+  case "invalid_tool_arguments":
+    return { status: 502, text: "invalid tool arguments" };
+  case "invalid_logprobs":
+    return { status: 502, text: "invalid logprobs" };
+  case "internal":
+    return { status: 500, text: "internal error" };
+  default:
+    return { status: 400, text: "invalid request" };
+  }
 }
 
 function asNonEmptyString(value: WireJson | undefined): string | undefined {
@@ -236,6 +255,14 @@ function buildOllamaChatRequest(
     members.push({ key: "top_logprobs", value: topLogprobs });
   }
   return { kind: "object", members };
+}
+
+function chatMessagesFromRequest(request: WireJsonObject): WireJsonArray {
+  const messages = memberValues(request, "messages")[0];
+  if (!isWireJsonArray(messages)) {
+    throw new GatewayFailureError({ kind: "internal" });
+  }
+  return messages;
 }
 
 function assertNoUnsupportedTopLevel(body: WireJsonObject): void {
@@ -611,15 +638,28 @@ function isIntegerInRange(value: WireJson, min: number, max: number): boolean {
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max;
 }
 
-function extractContent(body: Uint8Array): string {
+async function completeChat(copilot: BoundCopilot, request: Readonly<ChatRequest>) {
   try {
-    const parsed = JSON.parse(new TextDecoder().decode(body)) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    return parsed.choices?.[0]?.message?.content ?? "";
-  } catch (_error) {
-    return "";
+    return await copilot.completeChat(request);
+  } catch (error: unknown) {
+    throw upstreamCallFailure(error);
   }
+}
+
+function upstreamCallFailure(error: unknown): GatewayFailureError {
+  if (error instanceof GatewayFailureError) {
+    return error;
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return new GatewayFailureError({ kind: "aborted" });
+  }
+  if (error instanceof UpstreamBodyLimitError) {
+    return new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+  }
+  if (error instanceof UpstreamTimeoutError) {
+    return new GatewayFailureError({ kind: "upstream_timeout", cause: error });
+  }
+  return new GatewayFailureError({ kind: "upstream_network", cause: error });
 }
 
 function textFromWire(value: WireJson): string {

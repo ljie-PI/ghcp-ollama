@@ -20,6 +20,8 @@ const nowMs = (): number => 1_700_000_000_000;
 
 class CapturingBackend implements CopilotBackend {
   readonly requests: ChatRequest[] = [];
+  responseStatus = 200;
+  responseBody = new TextEncoder().encode("{\"created\":1700000000,\"choices\":[{\"index\":0,\"message\":{\"content\":\"\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":0}}");
 
   async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
     const target: CopilotTarget = { endpoint: "https://api.githubcopilot.com", token: "t" };
@@ -28,7 +30,7 @@ class CapturingBackend implements CopilotBackend {
       target,
       completeChat: async (request): Promise<ChatResponse> => {
         this.requests.push(request);
-        return { status: 200, headers: new Headers(), body: new TextEncoder().encode("{}") };
+        return { status: this.responseStatus, headers: new Headers(), body: this.responseBody };
       },
       openChatStream: async (request): Promise<UpstreamByteStream> => {
         this.requests.push(request);
@@ -49,7 +51,10 @@ class CapturingBackend implements CopilotBackend {
   }
 }
 
-async function ollamaGateway(backend: CopilotBackend) {
+async function ollamaGateway(
+  backend: CopilotBackend,
+  tokenCounter: (input: { readonly model: ""; readonly messages?: unknown; readonly text?: string }) => number = () => 0,
+) {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-"));
   const database = openDatabase({
     path: path.join(dir, "state.db"),
@@ -69,6 +74,7 @@ async function ollamaGateway(backend: CopilotBackend) {
     directory: accounts,
     copilot: backend,
     now: () => new Date("2026-01-02T03:04:05.000Z"),
+    tokenCounter,
   }));
   return { gw, close: async () => { await gw.close(); closeDatabase(database); } };
 }
