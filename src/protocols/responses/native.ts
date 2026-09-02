@@ -13,6 +13,7 @@ import {
 } from "../../serialization/wire_json.js";
 import type { NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../chat_completions/types.js";
 import type { NativeResponsesPlan } from "./planner.js";
+import { encodeResponsesSseEvent } from "./wire.js";
 
 export interface NativeResponsesRequestOptions {
   readonly requestId: string;
@@ -129,14 +130,6 @@ export async function* normalizeNativeResponsesStream(
   if (!terminal) {
     throw new GatewayFailureError({ kind: "invalid_upstream_response" });
   }
-}
-
-export function encodeResponsesSseEvent(event: WireJsonObject): Uint8Array {
-  const type = stringMember(event, "type");
-  if (type === undefined || type.length === 0) {
-    throw new GatewayFailureError({ kind: "invalid_upstream_response" });
-  }
-  return new TextEncoder().encode(`event: ${type}\ndata: ${new TextDecoder().decode(serializeWireJson(event))}\n\n`);
 }
 
 function normalizeNativeResponsesEvent(

@@ -32,22 +32,39 @@ export interface ResponsesBridgeRequestContext {
   readonly clientSessionId?: string;
 }
 
+export interface PreparedChatBridgeRequest {
+  readonly body: WireJsonObject;
+  readonly toolContext: RequestToolContext;
+}
+
 export async function buildChatBridgeRequest(
   plan: Readonly<ChatBridgePlan>,
   history: ResponsesHistory,
   options: Omit<ResponsesBridgeRequestContext, "resolvedModel" | "toolContext">,
   signal: AbortSignal,
 ): Promise<WireJsonObject> {
+  return (await prepareChatBridgeRequest(plan, history, options, signal)).body;
+}
+
+export async function prepareChatBridgeRequest(
+  plan: Readonly<ChatBridgePlan>,
+  history: ResponsesHistory,
+  options: Omit<ResponsesBridgeRequestContext, "resolvedModel" | "toolContext">,
+  signal: AbortSignal,
+): Promise<PreparedChatBridgeRequest> {
   const explicitPromptCacheKey = stringMember(plan.originalRequest.body, "prompt_cache_key");
   const enriched = await history.enrich(plan.originalRequest, signal);
   const modeled = applyResolvedModel(enriched, plan.resolvedModel.upstreamModel);
   const toolContext = buildRequestToolContext(modeled);
-  return convertResponsesRequest(modeled, {
-    ...options,
-    resolvedModel: plan.resolvedModel.upstreamModel,
+  return {
     toolContext,
-    ...(options.clientSessionId === undefined ? {} : { clientSessionId: options.clientSessionId }),
-  }, explicitPromptCacheKey);
+    body: convertResponsesRequest(modeled, {
+      ...options,
+      resolvedModel: plan.resolvedModel.upstreamModel,
+      toolContext,
+      ...(options.clientSessionId === undefined ? {} : { clientSessionId: options.clientSessionId }),
+    }, explicitPromptCacheKey),
+  };
 }
 
 export function convertResponsesRequest(
