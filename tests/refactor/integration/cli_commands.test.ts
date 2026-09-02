@@ -405,6 +405,11 @@ describe("RM-18 CLI commands", () => {
 
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ endpoints: {} }), { status: 200 }));
     await expect(createCopilotEndpointDiscovery(store)(account)).resolves.toBeNull();
+
+    vi.stubGlobal("fetch", async () => {
+      throw new DOMException("aborted", "AbortError");
+    });
+    await expect(createCopilotEndpointDiscovery(store)(account)).rejects.toMatchObject({ name: "AbortError" });
   });
 });
 

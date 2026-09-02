@@ -78,7 +78,10 @@ async function fetchCopilotDiscovery(
       return null;
     }
     return endpointFromCopilotUser(await response.json() as unknown);
-  } catch (_error: unknown) {
+  } catch (error: unknown) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     return null;
   }
 }
