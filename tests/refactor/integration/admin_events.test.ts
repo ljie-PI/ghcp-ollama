@@ -195,6 +195,41 @@ describe("RM-20 Admin event stream", () => {
       await harness.close();
     }
   });
+
+  it("disconnects a subscriber whose live queue reaches 128 events", async () => {
+    const harness = await createHarness();
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = await open(harness.gateway, session.cookie);
+      const reader = response.body!.getReader();
+      await reader.read();
+      for (let eventId = 1; eventId <= 129; eventId += 1) {
+        harness.dependencies.emitted.publish({ kind: "operational", event: operationalEvent(String(eventId)) });
+      }
+      expect((await reader.read()).done).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("disconnects a subscriber whose live queue exceeds 1 MiB before 128 events", async () => {
+    const harness = await createHarness();
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = await open(harness.gateway, session.cookie);
+      const reader = response.body!.getReader();
+      await reader.read();
+      for (let eventId = 1; eventId <= 70; eventId += 1) {
+        harness.dependencies.emitted.publish({
+          kind: "operational",
+          event: { ...operationalEvent(String(eventId)), metadata: { status: "x".repeat(16_000) } },
+        });
+      }
+      expect((await reader.read()).done).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 async function createHarness(dependencies = adminDependencies()): Promise<{

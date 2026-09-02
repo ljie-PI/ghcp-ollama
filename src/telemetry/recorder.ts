@@ -142,11 +142,7 @@ export class TelemetryRecorder {
   recordEvent(input: OperationalEventInput): void {
     const requestedKind = input.kind;
     const capacityCheck = metadataJsonOrRejected(sanitizeMetadata(input.metadata));
-    const encoded = capacityCheck.kind === "metadata_rejected"
-      ? capacityCheck
-      : this.observer === undefined
-        ? capacityCheck
-        : metadataJsonOrRejected(sanitizeOperationalEventMetadata(requestedKind, input.metadata));
+    const encoded = capacityCheck;
     const kind: OperationalEventKind = encoded.kind === "metadata_rejected"
       ? "metadata_rejected"
       : requestedKind;

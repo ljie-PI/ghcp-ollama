@@ -76,8 +76,8 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
       if (closed) {
         return failure(new AdminApiError("unauthenticated"), context.requestId);
       }
-      const bodyLimit = dependencies.runtimeConfig.readSnapshot().limits.requestBodyBytes;
       try {
+        const bodyLimit = dependencies.runtimeConfig.readSnapshot().limits.requestBodyBytes;
         return await dispatch(request, context, bodyLimit, auth, api, eventHub, dependencies.nowMs ?? Date.now);
       } catch (error: unknown) {
         if (context.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {

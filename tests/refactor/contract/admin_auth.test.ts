@@ -95,6 +95,23 @@ describe("RM-20 Admin authentication", () => {
       })).status).toBe(403);
       expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, { host: "github.com" })).status).toBe(201);
 
+      const mutations = [
+        ["POST", "/admin/api/v1/auth/logout", undefined],
+        ["POST", "/admin/api/v1/device-flows", { host: "github.com" }],
+        ["DELETE", "/admin/api/v1/accounts/github.com%2F42", { expectedRevision: 3 }],
+        ["PUT", "/admin/api/v1/accounts/default", { accountId: "github.com/42", expectedRevision: 2 }],
+        ["POST", "/admin/api/v1/models/refresh", { accountId: "github.com/42" }],
+        ["PUT", "/admin/api/v1/models/preferred", { accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0 }],
+        ["PUT", "/admin/api/v1/config", { expectedRevision: 1, config: defaultRuntimeConfigSnapshot() }],
+        ["DELETE", "/admin/api/v1/history", { expectedRevision: 0 }],
+      ] as const;
+      for (const [method, path, body] of mutations) {
+        const missingCsrf = await securedRequest(harness.gateway, method, path, loggedIn, body, { csrf: "" });
+        expect(missingCsrf.status, `${method} ${path} without CSRF`).toBe(403);
+        const wrongOrigin = await securedRequest(harness.gateway, method, path, loggedIn, body, { origin: "http://127.0.0.1:9999" });
+        expect(wrongOrigin.status, `${method} ${path} with wrong Origin`).toBe(403);
+      }
+
       const logout = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/logout`, {
         method: "POST",
         headers: { cookie: loggedIn.cookie, origin: ORIGIN, "x-ghcg-csrf": loggedIn.csrf },
@@ -103,6 +120,20 @@ describe("RM-20 Admin authentication", () => {
       expect(await logout.text()).toBe("");
       expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
       expect((await session(harness.gateway, loggedIn.cookie)).status).toBe(401);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("rejects a ninth live Admin Session", async () => {
+    const harness = await createHarness();
+    try {
+      for (let index = 0; index < 8; index += 1) {
+        const token = issued(harness.admin.mintBootstrap());
+        expect((await exchange(harness.gateway, token.token)).status).toBe(200);
+      }
+      const ninth = issued(harness.admin.mintBootstrap());
+      expect((await exchange(harness.gateway, ninth.token)).status).toBe(503);
     } finally {
       await harness.close();
     }
@@ -162,5 +193,25 @@ async function mutate(
       "x-ghcg-csrf": override.csrf ?? sessionValue.csrf,
     },
     body: JSON.stringify(body),
+  }));
+}
+
+async function securedRequest(
+  gateway: Gateway,
+  method: string,
+  path: string,
+  sessionValue: { readonly cookie: string; readonly csrf: string },
+  body: unknown,
+  override: { readonly csrf?: string; readonly origin?: string },
+): Promise<Response> {
+  return await gateway.fetch(new Request(`${ORIGIN}${path}`, {
+    method,
+    headers: {
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      cookie: sessionValue.cookie,
+      origin: override.origin ?? ORIGIN,
+      "x-ghcg-csrf": override.csrf ?? sessionValue.csrf,
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));
 }

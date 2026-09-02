@@ -83,6 +83,9 @@ describe("RM-20 Admin API", () => {
       expect((await rawMutation(harness.gateway, "/admin/api/v1/device-flows", session, JSON.stringify({ host: "x".repeat(100) }), "application/json")).status).toBe(400);
       expect((await rawMutation(harness.gateway, "/admin/api/v1/auth/bootstrap", session, JSON.stringify({ token: "x".repeat(129) }), "application/json")).status).toBe(400);
 
+      dependencies.runtimeConfig.readSnapshot().limits.requestBodyBytes = 256;
+      expect((await rawMutation(harness.gateway, "/admin/api/v1/device-flows", session, JSON.stringify({ host: "x".repeat(100) }), "application/json")).status).toBe(201);
+
       expect((await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/logout`, {
         method: "POST",
         headers: { cookie: session.cookie, origin: ORIGIN, "x-ghcg-csrf": session.csrf },
@@ -123,6 +126,37 @@ describe("RM-20 Admin API", () => {
       });
       expect(response.status).toBe(500);
       expect(dependencies.calls.slice(-2)).toEqual(["invalidate-account:github.com/42", "remove-started"]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("serializes refresh and preferred-model mutations for one account", async () => {
+    const dependencies = adminDependencies();
+    let releaseCatalog = (): void => undefined;
+    let calls = 0;
+    const originalGet = dependencies.catalog.get;
+    dependencies.catalog.get = async (accountId, signal) => {
+      calls += 1;
+      if (calls === 1) {
+        await new Promise<void>((resolve) => { releaseCatalog = resolve; });
+      }
+      return await originalGet(accountId, signal);
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const refresh = mutate(harness.gateway, "POST", "/admin/api/v1/models/refresh", session, { accountId: "github.com/42" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const preferred = mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
+        accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(calls).toBe(1);
+      releaseCatalog();
+      expect((await refresh).status).toBe(200);
+      expect((await preferred).status).toBe(200);
+      expect(calls).toBe(2);
     } finally {
       await harness.close();
     }

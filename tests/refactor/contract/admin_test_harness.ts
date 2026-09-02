@@ -123,9 +123,12 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     },
     preferences: {
       get: () => preference,
-      set: (accountId, candidate, expectedRevision) => {
+    },
+    preferredModels: {
+      setPreferred: (accountId, modelId, expectedRevision, catalog) => {
         if (expectedRevision !== (preference?.revision ?? 0)) throw coded("revision_conflict");
-        preference = { accountId, revision: expectedRevision + 1, modelId: candidate.modelId, validity: "valid", catalogGeneration: candidate.catalogGeneration };
+        if (!catalog.models.some((model) => model.id === modelId)) throw new Error("model not in catalog");
+        preference = { accountId, revision: expectedRevision + 1, modelId, validity: "valid", catalogGeneration: catalog.generation };
         return preference;
       },
       markInvalidIfMissing: () => {

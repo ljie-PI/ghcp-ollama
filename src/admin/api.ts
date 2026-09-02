@@ -180,18 +180,19 @@ export interface AdminAccountCaches {
 
 export interface AdminPreferences {
   get(accountId: string): AdminStoredPreference | null;
-  set(
+}
+
+export interface AdminPreferredModels {
+  setPreferred(
     accountId: string,
-    candidate: Readonly<{ modelId: string; catalogGeneration: number }>,
+    modelId: string,
     expectedRevision: number,
-    signal?: AbortSignal,
+    catalog: Awaited<ReturnType<AdminCatalog["get"]>>,
   ): AdminStoredPreference;
   markInvalidIfMissing(
     accountId: string,
-    visibleModelIds: ReadonlySet<string>,
-    catalogGeneration: number,
-    expectedRevision?: number | null,
-    signal?: AbortSignal,
+    catalog: Awaited<ReturnType<AdminCatalog["get"]>>,
+    expectedRevision: number | null,
   ): AdminStoredPreference | null;
 }
 
@@ -223,6 +224,7 @@ export interface AdminApiDependencies {
   readonly deviceFlows: AdminDeviceFlows;
   readonly catalog: AdminCatalog;
   readonly preferences: AdminPreferences;
+  readonly preferredModels: AdminPreferredModels;
   readonly runtimeConfig: AdminRuntimeConfigStore;
   readonly history: AdminHistory;
   readonly telemetry: AdminTelemetry;
@@ -344,12 +346,10 @@ export class AdminManagementApi {
       const catalog = await this.dependencies.catalog.get(accountId, signal);
       signal.throwIfAborted();
       this.requireActiveAccount(accountId);
-      this.dependencies.preferences.markInvalidIfMissing(
+      this.dependencies.preferredModels.markInvalidIfMissing(
         accountId,
-        new Set(catalog.models.map((model) => model.id)),
-        catalog.generation,
+        catalog,
         before?.revision ?? null,
-        signal,
       );
       return this.modelsDto(catalog);
     });
@@ -366,15 +366,20 @@ export class AdminManagementApi {
       const catalog = await this.dependencies.catalog.get(accountId, signal);
       signal.throwIfAborted();
       this.requireActiveAccount(accountId);
-      if (!catalog.models.some((model) => model.id === modelId)) {
-        throw new AdminApiError("not_found");
+      let preference: AdminStoredPreference;
+      try {
+        preference = this.dependencies.preferredModels.setPreferred(
+          accountId,
+          modelId,
+          expectedRevision,
+          catalog,
+        );
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message === "model not in catalog") {
+          throw new AdminApiError("not_found");
+        }
+        throw error;
       }
-      const preference = this.dependencies.preferences.set(
-        accountId,
-        { modelId, catalogGeneration: catalog.generation },
-        expectedRevision,
-        signal,
-      );
       return { accountId, preferredModel: preferenceDto(preference) };
     });
   }
