@@ -85,7 +85,8 @@ interface PendingEvent {
   readonly seq: number;
   event: OperationalEventInput;
   json: string;
-  kind: OperationalEventKind;
+  kind: OperationalEventKind | "config_updated";
+  observerKind: OperationalEventKind;
 }
 
 type Pending = PendingUsage | PendingEvent;
@@ -138,12 +139,9 @@ export class TelemetryRecorder {
   }
 
   recordEvent(input: OperationalEventInput): void {
+    const sanitized = sanitizeMetadata(input.metadata);
+    const encoded = metadataJsonOrRejected(sanitized);
     const requestedKind = input.kind === "config_updated" ? "runtime_config_changed" : input.kind;
-    const sanitized = sanitizeOperationalEventMetadata(requestedKind, input.metadata);
-    const capacityChecked = metadataJsonOrRejected(sanitizeMetadata(input.metadata));
-    const encoded = capacityChecked.kind === "metadata_rejected"
-      ? capacityChecked
-      : metadataJsonOrRejected(sanitized);
     const kind: OperationalEventKind = encoded.kind === "metadata_rejected"
       ? "metadata_rejected"
       : requestedKind;
@@ -161,7 +159,8 @@ export class TelemetryRecorder {
       this.pending.splice(oldestEvent, 1);
       this.droppedEvents = saturate(this.droppedEvents + 1);
     }
-    this.pending.push({ type: "event", seq: this.nextSeq(), event, json: encoded.json, kind });
+    const persistedKind = encoded.kind === "metadata_rejected" ? "metadata_rejected" : input.kind;
+    this.pending.push({ type: "event", seq: this.nextSeq(), event, json: encoded.json, kind: persistedKind, observerKind: kind });
   }
 
   async flush(signal?: AbortSignal): Promise<void> {
@@ -257,9 +256,9 @@ export class TelemetryRecorder {
     return {
       eventId: String(result.lastInsertRowid),
       occurredAtMs: item.event.occurredAtMs,
-      kind: item.kind,
+      kind: item.observerKind,
       severity: item.event.severity,
-      metadata: parseRecordedMetadata(item.json),
+      metadata: sanitizeOperationalEventMetadata(item.observerKind, parseRecordedMetadata(item.json)),
     };
   }
 

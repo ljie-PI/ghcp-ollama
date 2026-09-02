@@ -18,7 +18,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
   let configRevision = 1;
   let historyRevision = 0;
   const account = {
-    accountId: "github.com:42",
+    accountId: "github.com/42",
     revision: 3,
     host: "github.com",
     userId: "42",
@@ -116,7 +116,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       async get(accountId, signal) {
         signal.throwIfAborted();
         calls.push(`catalog:${accountId}`);
-        return { accountId, generation: 7, fetchedAt: "2027-01-15T08:00:00.000Z", models: [{ id: "gpt-test", name: "GPT Test", vendor: "OpenAI" }] };
+        return { accountId, generation: 7, fetchedAt: "2027-01-15T08:00:00.000Z", models: [{ id: "gpt-test", name: "GPT Test", vendor: "OpenAI", maxInputTokens: 200_000, maxOutputTokens: 8_192 }] };
       },
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
     },

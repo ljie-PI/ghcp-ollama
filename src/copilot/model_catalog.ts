@@ -5,6 +5,8 @@ export interface CopilotCatalogModel {
   readonly name: string;
   readonly vendor: string;
   readonly modelPickerEnabled: boolean;
+  readonly maxInputTokens?: number;
+  readonly maxOutputTokens?: number;
   readonly routing?: {
     readonly mode?: string;
     readonly supportedEndpoints?: readonly string[];
@@ -112,34 +114,57 @@ export function parseCapiModels(raw: CapiModelsResponse | unknown): CopilotCatal
     if (record.model_picker_enabled !== true) {
       continue;
     }
-    const routing = routingFromRecord(record).routing;
+    const metadata = metadataFromRecord(record);
     const model = {
       id: record.id,
       name: record.name,
       vendor: record.vendor,
       modelPickerEnabled: true,
     };
-    models.push(routing === undefined ? model : { ...model, routing });
+    models.push({
+      ...model,
+      ...(metadata.routing === undefined ? {} : { routing: metadata.routing }),
+      ...(metadata.maxInputTokens === undefined ? {} : { maxInputTokens: metadata.maxInputTokens }),
+      ...(metadata.maxOutputTokens === undefined ? {} : { maxOutputTokens: metadata.maxOutputTokens }),
+    });
   }
   return models;
 }
 
-function routingFromRecord(record: Record<string, unknown>): { readonly routing?: CopilotCatalogModel["routing"] } {
+function metadataFromRecord(record: Record<string, unknown>): {
+  readonly routing?: CopilotCatalogModel["routing"];
+  readonly maxInputTokens?: number;
+  readonly maxOutputTokens?: number;
+} {
   const raw = modelInfoRecord(record);
   const mode = typeof raw?.mode === "string" ? raw.mode : undefined;
   const supportedEndpoints = Array.isArray(raw?.supported_endpoints)
     ? raw.supported_endpoints.filter((item): item is string => typeof item === "string")
     : undefined;
-  if (mode !== undefined && supportedEndpoints !== undefined) {
-    return { routing: { mode, supportedEndpoints } };
+  const routing = mode === undefined && supportedEndpoints === undefined
+    ? undefined
+    : {
+      ...(mode === undefined ? {} : { mode }),
+      ...(supportedEndpoints === undefined ? {} : { supportedEndpoints }),
+    };
+  const maxInputTokens = coerceTokenLimit(raw?.max_input_tokens);
+  const maxOutputTokens = coerceTokenLimit(raw?.max_output_tokens);
+  return {
+    ...(routing === undefined ? {} : { routing }),
+    ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+  };
+}
+
+function coerceTokenLimit(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
   }
-  if (mode !== undefined) {
-    return { routing: { mode } };
+  if (typeof value === "string" && /^\s*[+-]?[0-9]+\s*$/u.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
   }
-  if (supportedEndpoints !== undefined) {
-    return { routing: { supportedEndpoints } };
-  }
-  return {};
+  return undefined;
 }
 
 function modelInfoRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {

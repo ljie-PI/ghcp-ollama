@@ -450,15 +450,16 @@ function usageDto(row: UsageRow): AdminUsageBucket {
 }
 
 function eventDto(row: EventRow): AdminOperationalEvent {
-  if (!EVENT_KINDS.has(row.kind)) {
+  const kind = row.kind === "config_updated" ? "runtime_config_changed" : row.kind;
+  if (!EVENT_KINDS.has(kind)) {
     throw new Error("invalid operational event kind");
   }
   return {
     eventId: String(row.event_id),
     occurredAt: new Date(row.occurred_at_ms).toISOString(),
-    kind: row.kind as AdminOperationalEventKind,
+    kind: kind as AdminOperationalEventKind,
     severity: row.severity,
-    metadata: sanitizeEventMetadata(row.kind, parseMetadata(row.metadata_json)),
+    metadata: sanitizeEventMetadata(kind, parseMetadata(row.metadata_json)),
   };
 }
 

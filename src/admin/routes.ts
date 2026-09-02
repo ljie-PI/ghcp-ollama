@@ -233,7 +233,7 @@ function matchRoute(method: string, pathname: string): MatchedRoute | null {
   if (method === "GET" && device?.[1] !== undefined) {
     return parameterRoute("devicePoll", device[1], false);
   }
-  const account = /^\/admin\/api\/v1\/accounts\/([^/]+)$/u.exec(pathname);
+  const account = /^\/admin\/api\/v1\/accounts\/(.+)$/u.exec(pathname);
   if (method === "DELETE" && account?.[1] !== undefined) {
     return parameterRoute("accountDelete", account[1], true);
   }
@@ -247,7 +247,7 @@ function parameterRoute(id: "devicePoll" | "accountDelete", encoded: string, bod
   } catch {
     throw new AdminApiError("validation_failed");
   }
-  if (parameter.length === 0 || parameter.includes("/")) {
+  if (parameter.length === 0) {
     throw new AdminApiError("validation_failed");
   }
   return { id, body, mutation: id === "accountDelete", query: new Set(), parameter };
@@ -417,7 +417,7 @@ function optionalQuery(url: URL, key: string): string | null {
 function parseUsageQuery(url: URL, now: number): AdminUsageQuery {
   const fromMs = parseUtc(url, "from") ?? now - 86_400_000;
   const toMs = parseUtc(url, "to") ?? now;
-  if (fromMs >= toMs || fromMs < now - 90 * 86_400_000 || toMs > now + 60_000) {
+  if (fromMs >= toMs || fromMs < now - 90 * 86_400_000 || toMs > now) {
     throw new AdminApiError("validation_failed");
   }
   const accountId = optionalQuery(url, "accountId");
@@ -460,7 +460,7 @@ function parseUtc(url: URL, key: string): number | null {
     return null;
   }
   const parsed = Date.parse(value);
-  if (!value.endsWith("Z") || !Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+  if (!value.endsWith("Z") || !Number.isFinite(parsed)) {
     throw new AdminApiError("validation_failed");
   }
   return parsed;

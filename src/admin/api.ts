@@ -158,7 +158,13 @@ export interface AdminCatalog {
     readonly accountId: string;
     readonly generation: number;
     readonly fetchedAt: string;
-    readonly models: readonly { readonly id: string; readonly name: string; readonly vendor: string }[];
+    readonly models: readonly {
+      readonly id: string;
+      readonly name: string;
+      readonly vendor: string;
+      readonly maxInputTokens?: number;
+      readonly maxOutputTokens?: number;
+    }[];
   }>;
   invalidate(accountId: string): void;
 }
@@ -317,11 +323,12 @@ export class AdminManagementApi {
   }
 
   async refreshModels(accountId: string, signal: AbortSignal): Promise<AdminModels> {
-    this.requireAccount(accountId);
+    this.requireActiveAccount(accountId);
     const before = this.dependencies.preferences.get(accountId);
     this.dependencies.catalog.invalidate(accountId);
     const catalog = await this.dependencies.catalog.get(accountId, signal);
     signal.throwIfAborted();
+    this.requireActiveAccount(accountId);
     this.dependencies.preferences.markInvalidIfMissing(
       accountId,
       new Set(catalog.models.map((model) => model.id)),
@@ -338,9 +345,10 @@ export class AdminManagementApi {
     expectedRevision: number,
     signal: AbortSignal,
   ): Promise<{ readonly accountId: string; readonly preferredModel: AdminPreference }> {
-    this.requireAccount(accountId);
+    this.requireActiveAccount(accountId);
     const catalog = await this.dependencies.catalog.get(accountId, signal);
     signal.throwIfAborted();
+    this.requireActiveAccount(accountId);
     if (!catalog.models.some((model) => model.id === modelId)) {
       throw new AdminApiError("not_found");
     }
@@ -419,8 +427,8 @@ export class AdminManagementApi {
         id: model.id,
         name: model.name,
         vendor: model.vendor,
-        maxInputTokens: null,
-        maxOutputTokens: null,
+        maxInputTokens: model.maxInputTokens ?? null,
+        maxOutputTokens: model.maxOutputTokens ?? null,
       })),
     };
   }
@@ -428,6 +436,14 @@ export class AdminManagementApi {
   private requireAccount(accountId: string): AdminAccountSummary {
     const account = this.dependencies.accounts.list().find((candidate) => candidate.accountId === accountId);
     if (account === undefined) {
+      throw new AdminApiError("not_found");
+    }
+    return account;
+  }
+
+  private requireActiveAccount(accountId: string): AdminAccountSummary {
+    const account = this.requireAccount(accountId);
+    if (account.state !== "active") {
       throw new AdminApiError("not_found");
     }
     return account;

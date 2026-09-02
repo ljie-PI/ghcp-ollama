@@ -28,7 +28,7 @@ const nowMs = (): number => 1_700_000_000_000;
 
 const CAPI = {
   data: [
-    { id: "keep", name: "Keep", vendor: "x", model_picker_enabled: true, capabilities: { mode: "chat", supported_endpoints: ["/v1/chat/completions"] } },
+    { id: "keep", name: "Keep", vendor: "x", model_picker_enabled: true, capabilities: { mode: "chat", supported_endpoints: ["/v1/chat/completions"], max_input_tokens: "200000", max_output_tokens: 4096.9 } },
     { id: "hidden", name: "Hidden", vendor: "x", model_picker_enabled: false },
     { id: "keep", name: "Dup", vendor: "x", model_picker_enabled: true },
   ],
@@ -42,6 +42,7 @@ describe("RM-08 CAPI parse and cache", () => {
       mode: "chat",
       supportedEndpoints: ["/v1/chat/completions"],
     });
+    expect(models[0]).toMatchObject({ maxInputTokens: 200000, maxOutputTokens: 4096 });
   });
 
   it("rejects incomplete CAPI items", () => {

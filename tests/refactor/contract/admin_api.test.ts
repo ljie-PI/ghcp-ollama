@@ -22,10 +22,10 @@ describe("RM-20 Admin API", () => {
         daemon: { managed: true, pid: 123 },
       });
       expect((await read(harness.gateway, "/admin/api/v1/accounts", session.cookie)).data).toMatchObject({
-        defaultRevision: 2, defaultAccountId: "github.com:42", items: [{ numericUserId: "42", preferredModel: null }],
+        defaultRevision: 2, defaultAccountId: "github.com/42", items: [{ numericUserId: "42", preferredModel: null }],
       });
       expect((await read(harness.gateway, "/admin/api/v1/models", session.cookie)).data).toMatchObject({
-        accountId: "github.com:42", catalogGeneration: 7, items: [{ id: "gpt-test", maxInputTokens: null, maxOutputTokens: null }],
+        accountId: "github.com/42", catalogGeneration: 7, items: [{ id: "gpt-test", maxInputTokens: 200_000, maxOutputTokens: 8_192 }],
       });
       expect(harness.dependencies.calls).not.toContain("preference-invalidated");
       expect((await read(harness.gateway, "/admin/api/v1/config", session.cookie)).data).toMatchObject({
@@ -60,7 +60,7 @@ describe("RM-20 Admin API", () => {
       expect(await cleared.json()).toEqual({ data: { revision: 1, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512 } });
 
       const unknownModel = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
-        accountId: "github.com:42", modelId: "missing", expectedRevision: 0,
+        accountId: "github.com/42", modelId: "missing", expectedRevision: 0,
       });
       expect(unknownModel.status).toBe(404);
     } finally {
@@ -116,11 +116,11 @@ describe("RM-20 Admin API", () => {
     const harness = await createHarness(dependencies);
     try {
       const session = await login(harness.gateway, harness.admin);
-      const response = await mutate(harness.gateway, "DELETE", "/admin/api/v1/accounts/github.com%3A42", session, {
+      const response = await mutate(harness.gateway, "DELETE", "/admin/api/v1/accounts/github.com%2F42", session, {
         expectedRevision: 3,
       });
       expect(response.status).toBe(500);
-      expect(dependencies.calls.slice(-2)).toEqual(["invalidate-account:github.com:42", "remove-started"]);
+      expect(dependencies.calls.slice(-2)).toEqual(["invalidate-account:github.com/42", "remove-started"]);
     } finally {
       await harness.close();
     }
