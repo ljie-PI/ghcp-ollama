@@ -231,6 +231,8 @@ export interface AdminApiDependencies {
 }
 
 export class AdminManagementApi {
+  private readonly modelMutations = new Map<string, Promise<void>>();
+
   constructor(private readonly dependencies: Readonly<AdminApiDependencies>) {}
 
   status(activity: GatewayActivity): AdminStatus {
@@ -332,20 +334,22 @@ export class AdminManagementApi {
   }
 
   async refreshModels(accountId: string, signal: AbortSignal): Promise<AdminModels> {
-    this.requireActiveAccount(accountId);
-    const before = this.dependencies.preferences.get(accountId);
-    this.dependencies.catalog.invalidate(accountId);
-    const catalog = await this.dependencies.catalog.get(accountId, signal);
-    signal.throwIfAborted();
-    this.requireActiveAccount(accountId);
-    this.dependencies.preferences.markInvalidIfMissing(
-      accountId,
-      new Set(catalog.models.map((model) => model.id)),
-      catalog.generation,
-      before?.revision ?? null,
-      signal,
-    );
-    return this.modelsDto(catalog);
+    return await this.withModelMutation(accountId, signal, async () => {
+      this.requireActiveAccount(accountId);
+      const before = this.dependencies.preferences.get(accountId);
+      this.dependencies.catalog.invalidate(accountId);
+      const catalog = await this.dependencies.catalog.get(accountId, signal);
+      signal.throwIfAborted();
+      this.requireActiveAccount(accountId);
+      this.dependencies.preferences.markInvalidIfMissing(
+        accountId,
+        new Set(catalog.models.map((model) => model.id)),
+        catalog.generation,
+        before?.revision ?? null,
+        signal,
+      );
+      return this.modelsDto(catalog);
+    });
   }
 
   async setPreferredModel(
@@ -354,20 +358,22 @@ export class AdminManagementApi {
     expectedRevision: number,
     signal: AbortSignal,
   ): Promise<{ readonly accountId: string; readonly preferredModel: AdminPreference }> {
-    this.requireActiveAccount(accountId);
-    const catalog = await this.dependencies.catalog.get(accountId, signal);
-    signal.throwIfAborted();
-    this.requireActiveAccount(accountId);
-    if (!catalog.models.some((model) => model.id === modelId)) {
-      throw new AdminApiError("not_found");
-    }
-    const preference = this.dependencies.preferences.set(
-      accountId,
-      { modelId, catalogGeneration: catalog.generation },
-      expectedRevision,
-      signal,
-    );
-    return { accountId, preferredModel: preferenceDto(preference) };
+    return await this.withModelMutation(accountId, signal, async () => {
+      this.requireActiveAccount(accountId);
+      const catalog = await this.dependencies.catalog.get(accountId, signal);
+      signal.throwIfAborted();
+      this.requireActiveAccount(accountId);
+      if (!catalog.models.some((model) => model.id === modelId)) {
+        throw new AdminApiError("not_found");
+      }
+      const preference = this.dependencies.preferences.set(
+        accountId,
+        { modelId, catalogGeneration: catalog.generation },
+        expectedRevision,
+        signal,
+      );
+      return { accountId, preferredModel: preferenceDto(preference) };
+    });
   }
 
   runtimeConfig(): AdminRuntimeConfig {
@@ -457,6 +463,41 @@ export class AdminManagementApi {
     }
     return account;
   }
+
+  private async withModelMutation<T>(
+    accountId: string,
+    signal: AbortSignal,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    signal.throwIfAborted();
+    const previous = this.modelMutations.get(accountId) ?? Promise.resolve();
+    let release = (): void => undefined;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    this.modelMutations.set(accountId, queued);
+    try {
+      await waitFor(previous, signal);
+      signal.throwIfAborted();
+      return await work();
+    } finally {
+      release();
+      if (this.modelMutations.get(accountId) === queued) {
+        this.modelMutations.delete(accountId);
+      }
+    }
+  }
+}
+
+async function waitFor(work: Promise<void>, signal: AbortSignal): Promise<void> {
+  let removeAbortListener = (): void => undefined;
+  await Promise.race([
+    work,
+    new Promise<void>((_resolve, reject) => {
+      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    }),
+  ]).finally(removeAbortListener);
 }
 
 export function mapAdminError(error: unknown): AdminApiError {

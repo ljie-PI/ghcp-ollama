@@ -56,7 +56,7 @@ export type OperationalEventKind =
 
 export interface OperationalEventInput {
   readonly occurredAtMs: number;
-  readonly kind: OperationalEventKind | "config_updated";
+  readonly kind: OperationalEventKind;
   readonly severity: "info" | "warning" | "error";
   readonly metadata?: unknown;
 }
@@ -85,7 +85,7 @@ interface PendingEvent {
   readonly seq: number;
   event: OperationalEventInput;
   json: string;
-  kind: OperationalEventKind | "config_updated";
+  kind: OperationalEventKind;
   observerKind: OperationalEventKind;
   observerMetadata: Readonly<Record<string, string | number | boolean>>;
 }
@@ -140,8 +140,11 @@ export class TelemetryRecorder {
   }
 
   recordEvent(input: OperationalEventInput): void {
-    const requestedKind = input.kind === "config_updated" ? "runtime_config_changed" : input.kind;
-    const encoded = metadataJsonOrRejected(sanitizeMetadata(input.metadata));
+    const requestedKind = input.kind;
+    const capacityCheck = metadataJsonOrRejected(sanitizeMetadata(input.metadata));
+    const encoded = capacityCheck.kind === "metadata_rejected"
+      ? capacityCheck
+      : metadataJsonOrRejected(sanitizeOperationalEventMetadata(requestedKind, input.metadata));
     const kind: OperationalEventKind = encoded.kind === "metadata_rejected"
       ? "metadata_rejected"
       : requestedKind;
