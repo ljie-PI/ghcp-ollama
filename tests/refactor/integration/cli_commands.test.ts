@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountDirectory } from "../../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
 import { DeviceFlowService, type DeviceOAuthClient } from "../../../src/accounts/device_flow.js";
 import { ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
+import { refreshCopilotToken } from "../../../src/copilot/credential_provider.js";
 import { CopilotModelCatalog } from "../../../src/copilot/model_catalog.js";
+import type { TokenRefreshError } from "../../../src/copilot/token_refresh.js";
 import { runCli } from "../../../src/cli/main.js";
 import { CliError, HttpControlClient, ScriptedControlClient } from "../../../src/cli/control_client.js";
 import { CommandDispatcher, DispatcherControlClient } from "../../../src/cli/commands/dispatcher.js";
@@ -20,6 +22,10 @@ import { bootstrapGateway, createPublicRouteRegistrations, litellmStyleTokenCoun
 import { SqliteResponsesHistory } from "../../../src/protocols/responses/history.js";
 
 const encoder = new TextEncoder();
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 class CaptureStream {
   chunks = "";
@@ -245,6 +251,7 @@ describe("RM-18 CLI commands", () => {
       port: 31_400,
     }));
     await expect(foreground.lifecycle("stop", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
+    await expect(foreground.lifecycle("restart", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
   });
 
   it("maps control timeout and caller abort without leaking as daemon failures", async () => {
@@ -272,11 +279,12 @@ describe("RM-18 CLI commands", () => {
     let listened = false;
     let closed = false;
     const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
     const run = runCli({
-      argv: ["--json", "serve", "--port", "31403"],
+      argv: ["serve", "--port", "31403"],
       homedir: "Q:/tmp/home",
       stdout,
-      stderr: new CaptureStream(),
+      stderr,
       pid: 123,
       now: () => new Date("2026-09-02T00:00:00.000Z"),
       shutdownSignal: abort.signal,
@@ -293,7 +301,8 @@ describe("RM-18 CLI commands", () => {
     });
     await Promise.resolve();
     await eventually(() => listened);
-    expect(JSON.parse(stdout.chunks)).toEqual({ ok: true, data: { state: "running", managed: false, pid: 123, startedAt: "2026-09-02T00:00:00.000Z", port: 31_403, dataDir: expect.any(String) } });
+    expect(stdout.chunks).toBe("");
+    expect(JSON.parse(stderr.chunks)).toEqual({ state: "running", managed: false, pid: 123, startedAt: "2026-09-02T00:00:00.000Z", port: 31_403, dataDir: expect.any(String) });
     abort.abort();
     expect(await run).toBe(0);
     expect(closed).toBe(true);
@@ -347,6 +356,16 @@ describe("RM-18 CLI commands", () => {
     } finally {
       harness.close();
     }
+  });
+
+  it("classifies production Copilot token refresh failures without leaking response bodies", async () => {
+    vi.stubGlobal("fetch", async () => new Response("secret upstream body", { status: 401 }));
+    await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ code: "unauthorized" } satisfies Partial<TokenRefreshError>);
+
+    vi.stubGlobal("fetch", async () => {
+      throw new DOMException("aborted", "AbortError");
+    });
+    await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ code: "timeout" } satisfies Partial<TokenRefreshError>);
   });
 });
 

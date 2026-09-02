@@ -42,7 +42,7 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
     }
     client = options.controlClient ?? new HttpControlClient();
     if (command.kind === "serve") {
-      return await runServe(command.startup, parsed.json, stdout, options);
+      return await runServe(command.startup, parsed.json, stdout, stderr, options);
     }
     if (command.kind === "lifecycle") {
       const context = {
@@ -116,6 +116,7 @@ async function runServe(
   startup: StartupConfig,
   json: boolean,
   stdout: WritableCliStream,
+  stderr: WritableCliStream,
   options: RunCliOptions,
 ): Promise<number> {
   const env = options.env ?? process.env;
@@ -131,7 +132,7 @@ async function runServe(
       port: startup.port,
       dataDir: startup.dataDir,
     };
-    writeSuccess(stdout, json, result);
+    writeSuccess(json ? stdout : stderr, json, result);
     await waitForShutdown(options.shutdownSignal);
     await gateway.close();
     return 0;

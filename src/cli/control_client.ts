@@ -288,15 +288,18 @@ export class HttpControlClient implements ControlClient {
   ) {}
 
   async lifecycle(action: LifecycleAction, context: CliLifecycleContext): Promise<CliLifecycleResult> {
-    if (action === "start" || action === "restart") {
+    if (action === "start") {
       throw new CliError("unavailable");
     }
     const endpoint = await this.locateEndpoint(context.dataDir);
     if (endpoint === null) {
       return stoppedLifecycle(context.dataDir);
     }
-    if (action === "stop" && !endpoint.managed) {
+    if ((action === "stop" || action === "restart") && !endpoint.managed) {
       throw new CliError("daemon_conflict");
+    }
+    if (action === "restart") {
+      throw new CliError("unavailable");
     }
     if (action === "status") {
       const data = await this.controlRequest(endpoint, "GET", "/__ghcg/control/v1/status", undefined, context);
