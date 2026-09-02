@@ -126,6 +126,7 @@ export class AccountDirectory {
       const generation = (existing?.credential_generation ?? 0) + 1;
       const secret = { ...input.secret, generation };
       await this.credentials.putGeneration(accountId, generation, secret);
+      throwIfAborted(signal);
 
       const now = this.nowMs();
       try {
@@ -229,6 +230,7 @@ export class AccountDirectory {
 
     onRemoving?.();
     await this.credentials.removeAccount(accountId);
+    throwIfAborted(signal);
     this.database.prepare(
       "UPDATE accounts SET credential_state = 'removed', credential_generation = NULL, revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
     ).run(this.nowMs(), accountId);

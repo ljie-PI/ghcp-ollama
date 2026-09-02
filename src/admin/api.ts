@@ -316,11 +316,14 @@ export class AdminManagementApi {
     return this.account(removed);
   }
 
-  async useDefaultAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<AdminAccounts> {
+  async useDefaultAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<{
+    readonly defaultAccountId: string;
+    readonly defaultRevision: number;
+  }> {
     signal.throwIfAborted();
-    await this.dependencies.accounts.use(accountId, expectedRevision, signal);
+    const defaultRevision = await this.dependencies.accounts.use(accountId, expectedRevision, signal);
     signal.throwIfAborted();
-    return this.accounts();
+    return { defaultAccountId: accountId, defaultRevision };
   }
 
   async models(accountId: string | null, signal: AbortSignal): Promise<AdminModels> {

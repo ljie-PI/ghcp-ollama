@@ -266,7 +266,7 @@ export class TelemetryRecorder {
     const result = this.database.prepare(
       "INSERT INTO operational_events (occurred_at_ms, kind, severity, metadata_json) VALUES (?, ?, ?, ?)",
     ).run(item.event.occurredAtMs, item.kind, item.event.severity, item.json);
-    if (!createObserverDto) {
+    if (!createObserverDto || item.observerKind === undefined || item.observerMetadata === undefined) {
       return null;
     }
     return {

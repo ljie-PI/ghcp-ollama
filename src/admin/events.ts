@@ -133,6 +133,7 @@ export class AdminEventStreamHub {
             controller.close();
             return;
           }
+          this.closeSubscriber(current);
           throw error;
         }
         if (current.closed || current.signal.aborted) {
@@ -145,7 +146,12 @@ export class AdminEventStreamHub {
         }
         if (current.performancePending) {
           current.performancePending = false;
-          controller.enqueue(performanceFrame(this.api.status(current.activity)));
+          try {
+            controller.enqueue(performanceFrame(this.api.status(current.activity)));
+          } catch (error: unknown) {
+            this.closeSubscriber(current);
+            throw error;
+          }
           return;
         }
         if (current.queue.length === 0) {
