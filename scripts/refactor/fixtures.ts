@@ -141,7 +141,7 @@ async function main(): Promise<void> {
       await generateOpenAiChatFixture(entry);
       return;
     }
-    if (entry?.owner === "RM-10") {
+    if (entry?.owner === "RM-10" || entry?.owner === "RM-11") {
       await generateOllamaFixture(entry);
       return;
     }
@@ -184,10 +184,10 @@ async function generateOllamaFixture(entry: FixtureManifestEntry): Promise<void>
 }
 
 async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): Promise<void> {
-  for (const entry of entries.filter((candidate) => candidate.owner === "RM-10")) {
+  for (const entry of entries.filter((candidate) => candidate.owner === "RM-10" || candidate.owner === "RM-11")) {
     const expected = await expectedOllamaFixture(entry);
     if (expected === undefined) {
-      throw new Error(`fixture case ${entry.caseId} does not have an RM-10 generator`);
+      throw new Error(`fixture case ${entry.caseId} does not have an Ollama generator`);
     }
     const actual = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.expected), "utf8");
     if (actual !== expected) {
@@ -197,7 +197,7 @@ async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): P
 }
 
 async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
-  if (entry.caseId !== "ollama.request.capture") {
+  if (entry.caseId !== "ollama.request.capture" && entry.caseId !== "ollama.nonstream.success") {
     return undefined;
   }
   const input = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.input), "utf8");
@@ -230,6 +230,9 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
       headers: { "content-type": "application/json" },
       body: input,
     }));
+    if (entry.caseId === "ollama.nonstream.success") {
+      return await response.text();
+    }
     await response.arrayBuffer();
   } finally {
     await gateway.close();
@@ -266,7 +269,35 @@ class FixtureOllamaBackend implements CopilotBackend {
       target,
       completeChat: async (request): Promise<ChatResponse> => {
         this.requests.push(request);
-        return { status: 200, headers: new Headers(), body: new TextEncoder().encode("{}") };
+        return {
+          status: 200,
+          headers: new Headers(),
+          body: new TextEncoder().encode(JSON.stringify({
+            created: 1_700_000_000,
+            choices: [{
+              index: 0,
+              message: {
+                content: "<think>hidden</thinking>visible",
+                tool_calls: [{
+                  id: "call_1",
+                  index: 2,
+                  type: "function",
+                  function: { name: "weather", arguments: "{\"city\":\"Tokyo\",\"unit\":\"c\"}" },
+                }],
+              },
+              finish_reason: "tool_calls",
+              logprobs: {
+                content: [{
+                  token: "visible",
+                  logprob: -0.5,
+                  bytes: [118, 105],
+                  top_logprobs: [{ token: "visible", logprob: -0.5, bytes: [118] }],
+                }],
+              },
+            }],
+            usage: { prompt_tokens: 12, completion_tokens: 6 },
+          })),
+        };
       },
       openChatStream: async (request): Promise<UpstreamByteStream> => {
         this.requests.push(request);

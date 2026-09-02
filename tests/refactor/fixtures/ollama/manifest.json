@@ -6,5 +6,13 @@
     "input": "request/capture.input.json",
     "expected": "request/capture.expected.json",
     "encoder": "ollama-chat-request"
+  },
+  {
+    "caseId": "ollama.nonstream.success",
+    "owner": "RM-11",
+    "source": "docs/ollama_chat_to_chat_completions.md#5-non-stream-response-conversion",
+    "input": "nonstream/success.input.json",
+    "expected": "nonstream/success.expected.json",
+    "encoder": "ollama-chat-nonstream"
   }
 ]
