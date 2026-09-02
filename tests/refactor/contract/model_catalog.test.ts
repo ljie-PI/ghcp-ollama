@@ -1,8 +1,10 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
+import type { Socket } from "node:net";
 import { gzipSync } from "node:zlib";
 import path from "node:path";
+import { Agent } from "undici";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
@@ -225,6 +227,84 @@ describe("RM-08 CAPI parse and cache", () => {
       );
       await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("reuses a bounded CAPI dispatcher and closes it on gateway shutdown", async () => {
+    const sockets = new Set<Socket>();
+    let createdDispatchers = 0;
+    let requests = 0;
+    const server = createServer((request, response) => {
+      requests += 1;
+      expect(request.url).toBe("/models");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"data\":[]}");
+    });
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-cat-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      fetch,
+      { connectTimeoutMs: 100, totalTimeoutMs: 1_000, bodyLimitBytes: 32 },
+      (limits) => {
+        createdDispatchers += 1;
+        return new Agent({
+          connectTimeout: limits.connectTimeoutMs,
+          connections: 1,
+          pipelining: 1,
+        });
+      },
+    );
+    const catalog = new CopilotModelCatalog(source);
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: dir }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      catalog,
+      preferences: accounts.preferences,
+    }), { onClose: () => catalog.close() });
+    try {
+      expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"))).status).toBe(200);
+      catalog.invalidate("github.com/1");
+      expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"))).status).toBe(200);
+      expect(requests).toBe(2);
+      expect(createdDispatchers).toBe(1);
+      expect(sockets.size).toBeLessThanOrEqual(1);
+
+      await gw.close();
+      for (let index = 0; index < 20 && sockets.size > 0; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(sockets.size).toBe(0);
+      await expect(catalog.get("github.com/1", new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" });
+      await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      await gw.close();
+      closeDatabase(database);
+      for (const socket of sockets) {
+        socket.destroy();
+      }
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

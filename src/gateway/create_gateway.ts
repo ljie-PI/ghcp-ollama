@@ -28,6 +28,7 @@ export interface GatewayDependencies {
   readonly delay?: DelayFn;
   readonly createRequestId?: () => string;
   readonly isReady?: () => boolean;
+  readonly onClose?: () => Promise<void> | void;
 }
 
 export type { RouteRegistration };
@@ -88,16 +89,25 @@ export async function createGateway(
       admission.close();
       const current = listener;
       listener = undefined;
+      let listenerCloseError: unknown;
       if (current !== undefined) {
-        await new Promise<void>((resolve, reject) => {
-          current.close((error?: Error) => {
-            if (error !== undefined) {
-              reject(error);
-              return;
-            }
-            resolve();
+        try {
+          await new Promise<void>((resolve, reject) => {
+            current.close((error?: Error) => {
+              if (error !== undefined) {
+                reject(error);
+                return;
+              }
+              resolve();
+            });
           });
-        });
+        } catch (error: unknown) {
+          listenerCloseError = error;
+        }
+      }
+      await dependencies.onClose?.();
+      if (listenerCloseError !== undefined) {
+        throw listenerCloseError;
       }
     },
   };

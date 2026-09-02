@@ -24,6 +24,7 @@ export interface CapiModelsResponse {
 
 export interface CopilotModelsSource {
   fetch(accountId: string, signal: AbortSignal): Promise<CapiModelsResponse>;
+  close?(): Promise<void> | void;
 }
 
 export interface ModelInfoLookup {
@@ -43,6 +44,7 @@ interface CacheEntry {
 export class CopilotModelCatalog {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly generations = new Map<string, number>();
+  private closed = false;
 
   constructor(
     private readonly source: CopilotModelsSource,
@@ -50,12 +52,18 @@ export class CopilotModelCatalog {
   ) {}
 
   async get(accountId: string, signal: AbortSignal): Promise<CatalogSnapshot> {
+    if (this.closed) {
+      throw new DOMException("closed", "AbortError");
+    }
     const hit = this.cache.get(accountId);
     if (hit !== undefined) {
       return hit.catalog;
     }
     const generation = this.generations.get(accountId) ?? 0;
     const raw = await this.source.fetch(accountId, signal);
+    if (this.closed) {
+      throw new DOMException("closed", "AbortError");
+    }
     const models = parseCapiModels(raw);
     const fetchedAt = toRfc3339Nano(this.now());
     const catalog: CatalogSnapshot = { accountId, models, fetchedAt, generation };
@@ -75,6 +83,12 @@ export class CopilotModelCatalog {
       this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1);
     }
     this.cache.clear();
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.clear();
+    await this.source.close?.();
   }
 }
 
