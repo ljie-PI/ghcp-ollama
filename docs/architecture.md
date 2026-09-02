@@ -297,10 +297,11 @@ Gateway Foundation 通过 additive optional mount 接入管理面，而不修改
 export interface AdminRequestContext {
   readonly requestId: string;
   readonly signal: AbortSignal;
-  readonly requestBodyBytes: number;
-  readonly listenerOrigin: string;
+  readonly listenerOrigin: LoopbackOrigin;
   readonly activity: GatewayActivity;
 }
+
+export type LoopbackOrigin = `http://127.0.0.1:${number}`;
 
 export interface AdminModule {
   handle(request: Request, context: Readonly<AdminRequestContext>): Promise<Response>;
@@ -323,9 +324,9 @@ export interface AdminStaticModule {
 与 wire behavior 不变。
 
 Host 在 protocol route matching 前把 exact `/admin/api/v1` 与 `/admin/api/v1/*` 交给
-`AdminModule.handle`。RM-21 的 `adminStatic` 只在 Admin API matching 后处理 `GET /admin` 和
-`GET /admin/*`；未匹配的 `/admin/api/v1/*` 永远不能变成 SPA HTML。Host 拥有 Admin request ID、caller/
-shutdown abort、captured body limit 和 active listener Origin；Admin module 拥有管理 JSON parsing、TypeBox
+`AdminModule.handle`。RM-21 的 `adminStatic` 只在 Admin API matching 后处理 `GET /admin/*`；未匹配的
+`/admin/api/v1/*` 永远不能变成 SPA HTML。Host 拥有 Admin request ID、caller/shutdown abort 和 active
+listener Origin；Admin module 从 `RuntimeConfigStore` 捕获当前 body limit，并拥有管理 JSON parsing、TypeBox
 validation、authentication、error envelope 与 SSE lifecycle。
 
 ### 7.2 Protocol endpoint modules
@@ -1004,9 +1005,15 @@ export interface GatewayActivity {
 ```
 
 `AdminTelemetry` 是 telemetry module 内的只读 adapter，复用 RM-05 已实现 schema、retention、sanitizer 与
-performance state，不改变写入、batch 或 cleanup 行为。`GatewayActivity` 是已实现 admission/stream state 的
-只读视图，不获得 mutation capability。`subscribe` 只发布 sanitized Operational Event 与 performance
-transition；browser replay、queue 和 backpressure 仍由 `AdminModule` 拥有。
+performance state，不改变写入、batch 或 cleanup 行为。RM-20 给 `TelemetryRecorder` 与
+`PerformanceWindows` 增加可选 in-process observer；无 observer 时 write/evaluate 路径与结果不变。
+`subscribe` 只发布 sanitized Operational Event 与 performance transition；browser replay、queue 和
+backpressure 仍由 `AdminModule` 拥有。
+
+`GatewayActivity` 是 RM-20 在 Gateway 内增加的只读 instrumentation。它从既有 admission counts 读取 active/
+queued request，并只在 response lifecycle 上增加 active-stream counter；无 Admin mount 时不创建 observer、
+不增加 timer/queue，也不改变 response bytes、admission、abort 或 cleanup。Admin 只获得 snapshot，不获得
+mutation capability。
 
 ### 16.2 功能
 
@@ -1035,11 +1042,13 @@ response body、Authorization、OAuth token、Copilot token 或完整 upstream e
 
 Admin HTTP closure：
 
-- `listenerOrigin` 由 active listener 提供，精确为 `http://127.0.0.1:<startup-port>`，不能固定为默认 port。
+- `listenerOrigin` 由 active listener 在 validated startup port 上构造为 `LoopbackOrigin`，精确为
+  `http://127.0.0.1:<startup-port>`，不能固定为默认 port 或接受调用方任意 string。
 - JSON mutations 只接受 `application/json` 或显式 UTF-8 charset，以及缺失/单个 `identity`
   Content-Encoding；empty、malformed、non-object、unknown fields、unsupported media 或 body over-limit 都返回
   `400 validation_failed`。
-- Body read 使用请求开始时捕获的 `limits.requestBodyBytes`，读到第一个超限 byte 时取消 reader。
+- Admin module 在 request handling 开始时从 `RuntimeConfigStore.readSnapshot()` 捕获
+  `limits.requestBodyBytes`，读到第一个超限 byte 时取消 reader；后续 config CAS 只影响后续请求。
 - No-body routes 拒绝 nonempty body；每个 route 拒绝 unknown 或 duplicate query fields。
 - 每个 Admin JSON/SSE response 设置 `Cache-Control: no-store` 与 gateway-generated `x-request-id`；JSON 使用
   `application/json; charset=utf-8`。入站 request ID 不回显。

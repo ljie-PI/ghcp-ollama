@@ -383,10 +383,11 @@ use an additive optional Gateway mount:
 export interface AdminRequestContext {
   readonly requestId: string;
   readonly signal: AbortSignal;
-  readonly requestBodyBytes: number;
-  readonly listenerOrigin: string;
+  readonly listenerOrigin: LoopbackOrigin;
   readonly activity: GatewayActivity;
 }
+
+export type LoopbackOrigin = `http://127.0.0.1:${number}`;
 
 export interface AdminModule {
   handle(request: Request, context: Readonly<AdminRequestContext>): Promise<Response>;
@@ -406,8 +407,9 @@ export interface AdminStaticModule {
 
 `GatewayDependencies` adds optional `admin?: AdminModule` and `adminStatic?: AdminStaticModule`. Existing RM-01 through
 RM-18 callers that omit them preserve identical behavior. Gateway owns Admin request-ID creation, caller/shutdown abort,
-captured body limit and active listener Origin；`AdminModule` owns Admin parsing、validation、security、envelope and SSE
-lifecycle。Gateway also supplies `AdminRequestContext.activity` per request, avoiding an Admin/Gateway composition
+active listener Origin and activity snapshot；`AdminModule` captures the current body limit from `RuntimeConfigStore`
+and owns Admin parsing、validation、security、envelope and SSE lifecycle。Gateway supplies
+`AdminRequestContext.activity` per request, avoiding an Admin/Gateway composition
 cycle。Exact Admin API paths are matched before RM-21 static handling；unmatched `/admin/api/v1/*` never becomes
 SPA HTML。
 
@@ -556,11 +558,10 @@ export interface WireJsonObject {
 | Responses History | `ResponsesHistory` | SQLite | only `ChatBridgePlan` |
 | Usage Buckets | `UsageRecorder` | SQLite batched | content-free、bounded |
 | Operational Events | `OperationalEventStore` | SQLite batched | sanitized、bounded |
-| admin bootstrap/session/CSRF | `AdminAuth` | process memory | restart invalidates all |
+| admin bootstrap/session/CSRF | `AdminModule` via internal `AdminAuth` implementation | process memory | restart invalidates all |
 | daemon PID/start identity/nonce/control token | `DaemonIdentityFile` | protected atomic file | authenticated control before action |
 | credentials/admin long-term secret | `FileCredentialStore` | protected atomic file | never SQLite/log |
 | JSONL files/rotation | `JsonlLogger` | data directory | 10 MiB × 5、max age 7d |
-| Admin sessions/bootstrap/CSRF | `AdminModule` | process / bounded memory | RM-19 control and Admin HTTP share one instance |
 | Admin usage/event queries | `AdminTelemetry` | telemetry module / SQLite read adapter | read-only; reuses RM-05 retention/sanitizer |
 | Admin request/activity counters | `GatewayActivity` | process / read-only snapshot | no admission or stream mutation capability |
 
@@ -1011,10 +1012,12 @@ with spaces。HTTP 204 responses have no body。
 
 Admin HTTP behavior is owned by `AdminModule`, not by protocol `RouteRegistration` or Gateway HTTP protocol parsing：
 
-- exact Origin is `http://127.0.0.1:<active-port>` supplied by Gateway；
+- exact Origin is a Gateway-constructed `LoopbackOrigin` for `http://127.0.0.1:<active-port>`；Admin never accepts an
+  arbitrary caller-provided origin string；
 - JSON mutations accept only `application/json` with optional UTF-8 charset and missing/single `identity` encoding；
 - empty、malformed、non-object、unknown-field、unsupported-media and over-limit bodies return `400 validation_failed`；
-- reads use captured `limits.requestBodyBytes` and cancel at the first excess byte；
+- `AdminModule` captures `RuntimeConfigStore.readSnapshot().limits.requestBodyBytes` at request handling start and
+  cancels at the first excess byte；later config CAS affects only later requests；
 - no-body routes reject nonempty bodies and all routes reject unknown/duplicate query fields；
 - every Admin JSON/SSE response uses `Cache-Control: no-store` and gateway-generated `x-request-id`；JSON uses
   `application/json; charset=utf-8`；
@@ -1031,6 +1034,12 @@ transitions。`AdminModule` owns browser subscriber caps、per-subscriber queues
 slow-consumer disconnect。`AdminModule.close()` is idempotent；closed `handle` fails closed and closed
 `mintBootstrap()` returns `kind:"closed"`。The ninth outstanding bootstrap returns `kind:"capacity"`。RM-19 maps both
 capacity and closed to control `503 not_ready` without exposing internal counts。
+
+RM-20 adds optional in-process observers to `TelemetryRecorder` and `PerformanceWindows` to implement that subscription；
+with no observer registered, RM-05 write/evaluate results、batching、retention、cleanup and resource bounds are unchanged。
+RM-20 also adds `GatewayActivity` instrumentation: existing admission counts are read-only, and one bounded active-stream
+counter follows the existing response lifecycle cleanup。Without an Admin mount it creates no observer/timer/queue and
+does not alter protocol bytes、admission、abort or terminal behavior。
 
 Canonical Admin route matrix：
 
@@ -2282,7 +2291,8 @@ route。Examples fixed by `RM-09` and required for later slices：
   `docs/gateway_http_contracts.md` Admin isolation rules。
 - **Owned scope/files**：`src/admin/auth.ts`、`api.ts`、`events.ts`、`routes.ts`、
   additive Admin mount wiring in `src/gateway/hono_app.ts` and `src/gateway/create_gateway.ts`、
-  read-only `src/telemetry/admin.ts`、serialized `src/main.ts` composition、
+  read-only `src/telemetry/admin.ts`、optional observer hooks in `src/telemetry/recorder.ts` and
+  `src/telemetry/performance.ts`、serialized `src/main.ts` composition、
   `tests/refactor/contract/admin_auth.test.ts`、
   `tests/refactor/contract/admin_api.test.ts`、
   `tests/refactor/integration/admin_events.test.ts`。
@@ -2318,7 +2328,7 @@ route。Examples fixed by `RM-09` and required for later slices：
 - **Deliverables/interface**：`Overview`、`Accounts`、`Models`、`Configuration`、`ResponsesHistory`、`Events`；
   fragment bootstrap exchange、CSRF client、SSE reconnect with bounded UI state；no SvelteKit server。
 - **Static seam**：`src/admin/static.ts` implements `AdminStaticModule` and mounts after exact Admin API handling。Only
-  `GET /admin` and `GET /admin/*` may return assets/SPA fallback；`/admin/api/v1/*`、protocol routes and probes never do。
+  `GET /admin/*` may return assets/SPA fallback；`/admin/api/v1/*`、protocol routes and probes never do。
 - **Tests**：`npm run test:e2e:refactor -- tests/refactor/e2e/admin.spec.ts`，exact 7 flows：
   `bootstrap-and-session-expiry`、`github-and-ghes-account-lifecycle`、
   `model-refresh-invalidates-preference`、`config-revision-and-security-rejection`、
