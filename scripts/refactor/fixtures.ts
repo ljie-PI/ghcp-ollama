@@ -33,7 +33,25 @@ export interface FixtureManifestEntry {
 }
 
 const FIXTURE_ROOT = path.resolve("tests/refactor/fixtures");
-const OLLAMA_NONSTREAM_SUCCESS_REFERENCE = "{\"model\":\"gpt\",\"created_at\":\"2023-11-14T22:13:20Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\",\"thinking\":\"hidden\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"index\":2,\"name\":\"weather\",\"arguments\":{\"city\":\"Tokyo\",\"unit\":\"c\"}}}]},\"done\":true,\"done_reason\":\"stop\",\"logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118,105],\"top_logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118]}]}],\"prompt_eval_count\":12,\"eval_count\":6}";
+
+type GoReferenceJson =
+  | null
+  | boolean
+  | number
+  | string
+  | GoReferenceJson[]
+  | GoReferenceObject;
+
+interface GoReferenceObject {
+  readonly kind: "go-reference-object";
+  readonly members: readonly GoReferenceMember[];
+}
+
+interface GoReferenceMember {
+  readonly key: string;
+  readonly value: GoReferenceJson | undefined;
+  readonly omitEmpty?: boolean;
+}
 
 async function findManifests(root: string): Promise<string[]> {
   if (!existsSync(root)) {
@@ -203,7 +221,7 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
   }
   const input = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.input), "utf8");
   if (entry.caseId === "ollama.nonstream.success") {
-    return OLLAMA_NONSTREAM_SUCCESS_REFERENCE;
+    return ollamaNonstreamSuccessReference();
   }
   const backend = new FixtureOllamaBackend();
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-fixture-"));
@@ -239,6 +257,112 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
   } finally {
     await gateway.close();
     closeDatabase(database);
+  }
+
+  function ollamaNonstreamSuccessReference(): string {
+    return stringifyGoReference(goObject([
+      { key: "model", value: "gpt" },
+      { key: "remote_model", value: undefined, omitEmpty: true },
+      { key: "remote_host", value: undefined, omitEmpty: true },
+      { key: "created_at", value: "2023-11-14T22:13:20Z" },
+      {
+        key: "message",
+        value: goObject([
+          { key: "role", value: "assistant" },
+          { key: "content", value: "visible" },
+          { key: "thinking", value: "hidden", omitEmpty: true },
+          { key: "images", value: undefined, omitEmpty: true },
+          {
+            key: "tool_calls",
+            value: [
+              goObject([
+                { key: "id", value: "call_1", omitEmpty: true },
+                {
+                  key: "function",
+                  value: goObject([
+                    { key: "index", value: 2 },
+                    { key: "name", value: "weather" },
+                    { key: "arguments", value: goObject([
+                      { key: "city", value: "Tokyo" },
+                      { key: "unit", value: "c" },
+                    ]) },
+                  ]),
+                },
+              ]),
+            ],
+            omitEmpty: true,
+          },
+          { key: "tool_name", value: undefined, omitEmpty: true },
+          { key: "tool_call_id", value: undefined, omitEmpty: true },
+        ]),
+      },
+      { key: "done", value: true },
+      { key: "done_reason", value: "stop", omitEmpty: true },
+      { key: "_debug_info", value: undefined, omitEmpty: true },
+      {
+        key: "logprobs",
+        value: [
+          goObject([
+            { key: "token", value: "visible" },
+            { key: "logprob", value: -0.5 },
+            { key: "bytes", value: [118, 105], omitEmpty: true },
+            {
+              key: "top_logprobs",
+              value: [goObject([
+                { key: "token", value: "visible" },
+                { key: "logprob", value: -0.5 },
+                { key: "bytes", value: [118], omitEmpty: true },
+              ])],
+              omitEmpty: true,
+            },
+          ]),
+        ],
+        omitEmpty: true,
+      },
+      { key: "total_duration", value: undefined, omitEmpty: true },
+      { key: "load_duration", value: undefined, omitEmpty: true },
+      { key: "prompt_eval_count", value: 12, omitEmpty: true },
+      { key: "prompt_eval_duration", value: undefined, omitEmpty: true },
+      { key: "eval_count", value: 6, omitEmpty: true },
+      { key: "eval_duration", value: undefined, omitEmpty: true },
+    ]));
+  }
+
+  function goObject(members: readonly GoReferenceMember[]): GoReferenceObject {
+    return { kind: "go-reference-object", members };
+  }
+
+  function stringifyGoReference(value: GoReferenceJson): string {
+    return goEscapeJson(writeGoReference(value));
+  }
+
+  function writeGoReference(value: GoReferenceJson): string {
+    if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map(writeGoReference).join(",")}]`;
+    }
+    const members = value.members.filter((member) => !member.omitEmpty || !isGoEmpty(member.value));
+    return `{${members.map((member) => `${JSON.stringify(member.key)}:${writeGoReference(member.value as GoReferenceJson)}`).join(",")}}`;
+  }
+
+  function isGoEmpty(value: GoReferenceJson | undefined): boolean {
+    return value === undefined
+      || value === null
+      || value === false
+      || value === 0
+      || value === ""
+      || (Array.isArray(value) && value.length === 0);
+  }
+
+  function goEscapeJson(json: string): string {
+    return json
+      .replace(/</gu, "\\u003c")
+      .replace(/>/gu, "\\u003e")
+      .replace(/&/gu, "\\u0026")
+      .replace(/\u2028/gu, "\\u2028")
+      .replace(/\u2029/gu, "\\u2029");
   }
 
   const request = backend.requests[0];

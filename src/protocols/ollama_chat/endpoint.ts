@@ -108,7 +108,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
           signal: scope.signal,
           headers: { "Content-Type": "application/x-ndjson" },
         });
-        const upstream = await openChatStream(copilot, {
+        const upstream = await copilot.openChatStream({
           model,
           body: chatBody,
           stream: true,
@@ -641,14 +641,6 @@ function isIntegerInRange(value: WireJson, min: number, max: number): boolean {
 async function completeChat(copilot: BoundCopilot, request: Readonly<ChatRequest>) {
   try {
     return await copilot.completeChat(request);
-  } catch (error: unknown) {
-    throw upstreamCallFailure(error);
-  }
-}
-
-async function openChatStream(copilot: BoundCopilot, request: Readonly<ChatRequest>) {
-  try {
-    return await copilot.openChatStream(request);
   } catch (error: unknown) {
     throw upstreamCallFailure(error);
   }

@@ -210,7 +210,11 @@ function logprobItem(value: WireJson, allowTop: boolean): Record<string, unknown
       result.bytes = bytes.items.map((item) => numberValue(item));
     }
   }
-  const top = memberValues(value, "top_logprobs")[0];
+  const topValues = memberValues(value, "top_logprobs");
+  if (!allowTop && topValues.length > 0) {
+    throw new GatewayFailureError({ kind: "invalid_logprobs" });
+  }
+  const top = topValues[0];
   if (top !== undefined && top !== null) {
     if (!allowTop || !isWireJsonArray(top)) {
       throw new GatewayFailureError({ kind: "invalid_logprobs" });

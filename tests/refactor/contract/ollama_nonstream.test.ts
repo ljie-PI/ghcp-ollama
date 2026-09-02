@@ -313,6 +313,18 @@ describe("RM-10 Ollama non-stream", () => {
         text: "{\"error\":\"invalid logprobs\"}",
       },
       {
+        body: JSON.stringify({
+          choices: [{
+            index: 0,
+            message: { content: "" },
+            finish_reason: "stop",
+            logprobs: { content: [{ token: "x", logprob: -1, top_logprobs: [{ token: "x", logprob: -1, top_logprobs: null }] }] },
+          }],
+        }),
+        status: 502,
+        text: "{\"error\":\"invalid logprobs\"}",
+      },
+      {
         body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "stop", logprobs: {} }] }),
         status: 502,
         text: "{\"error\":\"invalid logprobs\"}",
