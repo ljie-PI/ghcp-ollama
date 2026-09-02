@@ -155,6 +155,7 @@ describe("RM-10 Ollama request", () => {
       expect(new TextDecoder().decode(backend.requests[0]?.body)).toBe(
         "{\"model\":\"gpt\",\"messages\":[{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"checking\",\"tool_calls\":[{\"id\":\"call_1\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},{\"role\":\"tool\",\"content\":\"sunny\",\"name\":\"weather\",\"tool_call_id\":\"call_1\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"see\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgo=\"}}]}],\"tools\":[{\"type\":\"function\",\"items\":{\"note\":\"kept\"},\"function\":{\"name\":\"weather\",\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}],\"response_format\":{\"type\":\"json_object\"},\"stream\":false,\"reasoning_effort\":\"medium\",\"max_tokens\":256,\"temperature\":0.7,\"top_p\":0.9,\"seed\":42,\"frequency_penalty\":1,\"presence_penalty\":2,\"stop\":[\"END\"],\"_debug_render_only\":false,\"logprobs\":true,\"top_logprobs\":3}",
       );
+      expect(backend.requests[0]?.hasVisionInput).toBe(true);
     } finally {
       await close();
     }
@@ -193,6 +194,7 @@ describe("RM-10 Ollama request", () => {
     for (const body of [
       { model: "gpt", messages: [{ role: "user", content: "hi", images: ["not-base64"] }] },
       { model: "gpt", messages: [{ role: "user", content: "hi", images: ["MTIzNA=="] }] },
+      { model: "gpt", messages: [{ role: "user", content: "hi", images: ["iVBORw=="] }] },
       { model: "gpt", messages: [{ role: "user", content: "hi" }], top_logprobs: 21 },
       {
         model: "gpt",
@@ -206,6 +208,14 @@ describe("RM-10 Ollama request", () => {
         model: "gpt",
         messages: [{ role: "user", content: "hi" }],
         tools: [{ type: "function", function: { name: "bad", parameters: { type: "object" } } }],
+      },
+      {
+        model: "gpt",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{
+          type: "function",
+          function: { name: "bad", parameters: { type: "object", properties: { x: { description: 1 } } } },
+        }],
       },
     ]) {
       const backend = new CapturingBackend();
@@ -245,6 +255,7 @@ describe("RM-10 Ollama request", () => {
       expect(new TextDecoder().decode(backend.requests[0]?.body)).toBe(
         "{\"model\":\"gpt\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,/9j/4AAQSkZJRg==\"}},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/webp;base64,UklGRiQAAABXRUJQ\"}}]}],\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"schema\":{\"type\":\"object\",\"properties\":{}}}},\"stream\":false,\"reasoning_effort\":\"none\"}",
       );
+      expect(backend.requests[0]?.hasVisionInput).toBe(true);
     } finally {
       await close();
     }

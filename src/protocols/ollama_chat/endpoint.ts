@@ -86,6 +86,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
           throw new GatewayFailureError({ kind: "invalid_request" });
         }
         const chatRequest = buildOllamaChatRequest(request.body, model, messages, stream);
+        const hasVisionInput = hasOllamaImages(messages);
         const account = await dependencies.directory.bindDefault(scope.signal);
         const copilot = await dependencies.copilot.bind(account, scope.signal);
         const chatBody = serializeWireJson(chatRequest);
@@ -95,7 +96,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
             model,
             body: chatBody,
             stream: false,
-            hasVisionInput: false,
+            hasVisionInput,
             nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
             connectTimeoutMs: scope.config.timeouts.connectMs,
             firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
@@ -118,7 +119,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
           model,
           body: chatBody,
           stream: true,
-          hasVisionInput: false,
+          hasVisionInput,
           nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
           connectTimeoutMs: scope.config.timeouts.connectMs,
           firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
@@ -333,7 +334,10 @@ function imageMime(base64: string): string {
   if (decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff) {
     return "image/jpeg";
   }
-  if (decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e && decoded[3] === 0x47) {
+  if (
+    decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e && decoded[3] === 0x47
+    && decoded[4] === 0x0d && decoded[5] === 0x0a && decoded[6] === 0x1a && decoded[7] === 0x0a
+  ) {
     return "image/png";
   }
   if (
@@ -424,6 +428,63 @@ function validateToolParameters(parameters: WireJsonObject): void {
   if (required !== undefined && (!isWireJsonArray(required) || required.items.some((item) => typeof item !== "string"))) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+  for (const property of properties.members) {
+    validateToolProperty(property.value);
+  }
+}
+
+function validateToolProperty(value: WireJson): void {
+  if (!isWireJsonObject(value)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const anyOf = memberValues(value, "anyOf")[0];
+  if (anyOf !== undefined) {
+    if (!isWireJsonArray(anyOf)) {
+      throw new GatewayFailureError({ kind: "invalid_request" });
+    }
+    for (const item of anyOf.items) {
+      validateToolProperty(item);
+    }
+  }
+  const type = memberValues(value, "type")[0];
+  if (type !== undefined && typeof type !== "string" && (!isWireJsonArray(type) || type.items.some((item) => typeof item !== "string"))) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const items = memberValues(value, "items")[0];
+  if (items !== undefined && !isWireJsonObject(items) && !isWireJsonArray(items)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const description = memberValues(value, "description")[0];
+  if (description !== undefined && typeof description !== "string") {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const enumValues = memberValues(value, "enum")[0];
+  if (enumValues !== undefined && !isWireJsonArray(enumValues)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const nestedProperties = memberValues(value, "properties")[0];
+  if (nestedProperties !== undefined) {
+    if (!isWireJsonObject(nestedProperties)) {
+      throw new GatewayFailureError({ kind: "invalid_request" });
+    }
+    for (const property of nestedProperties.members) {
+      validateToolProperty(property.value);
+    }
+  }
+  const required = memberValues(value, "required")[0];
+  if (required !== undefined && (!isWireJsonArray(required) || required.items.some((item) => typeof item !== "string"))) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+}
+
+function hasOllamaImages(messages: WireJsonArray): boolean {
+  return messages.items.some((message) => {
+    if (!isWireJsonObject(message)) {
+      return false;
+    }
+    const images = memberValues(message, "images")[0];
+    return isWireJsonArray(images) && images.items.length > 0;
+  });
 }
 
 function mappedOptions(value: WireJson | undefined): Array<{ key: string; value: WireJson }> {
