@@ -74,15 +74,18 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
         }
         const model = asNonEmptyString(memberValues(request.body, "model")[0]);
         const messages = memberValues(request.body, "messages")[0];
-        if (model === undefined || !isWireJsonArray(messages) || messages.items.length === 0) {
+        if (model === undefined || !isWireJsonArray(messages)) {
           throw new GatewayFailureError({ kind: "invalid_request" });
+        }
+        if (messages.items.length === 0) {
+          throw new GatewayFailureError({ kind: "unsupported_semantics" });
         }
         const streamValue = memberValues(request.body, "stream")[0];
         const stream = streamValue === undefined ? true : streamValue === true;
         if (streamValue !== undefined && streamValue !== true && streamValue !== false) {
           throw new GatewayFailureError({ kind: "invalid_request" });
         }
-        const chatRequest = buildChatRequest(request.body, model, messages, stream);
+        const chatRequest = buildOllamaChatRequest(request.body, model, messages, stream);
         const account = await dependencies.directory.bindDefault(scope.signal);
         const copilot = await dependencies.copilot.bind(account, scope.signal);
         const chatBody = serializeWireJson(chatRequest);
@@ -174,7 +177,7 @@ function asNonEmptyString(value: WireJson | undefined): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function buildChatRequest(
+export function buildOllamaChatRequest(
   body: WireJsonObject,
   model: string,
   messages: WireJsonArray,
@@ -190,7 +193,7 @@ function buildChatRequest(
     if (!isWireJsonArray(tools)) {
       throw new GatewayFailureError({ kind: "invalid_request" });
     }
-    members.push({ key: "tools", value: tools });
+    members.push({ key: "tools", value: { kind: "array", items: tools.items.map(ollamaToolToChat) } });
   }
   const format = memberValues(body, "format")[0];
   if (format !== undefined) {
@@ -357,7 +360,7 @@ function ollamaToolCallToChat(value: WireJson): WireJsonObject {
   const index = memberValues(fn, "index")[0];
   const name = memberValues(fn, "name")[0];
   const args = memberValues(fn, "arguments")[0];
-  if (!isWireJsonNumber(index) || typeof name !== "string" || !isWireJsonObject(args)) {
+  if (index === undefined || !isIntegerInRange(index, 0, Number.MAX_SAFE_INTEGER) || typeof name !== "string" || !isWireJsonObject(args)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   const members: Array<{ key: string; value: WireJson }> = [];
@@ -379,6 +382,48 @@ function ollamaToolCallToChat(value: WireJson): WireJsonObject {
     },
   );
   return { kind: "object", members };
+}
+
+function ollamaToolToChat(value: WireJson): WireJsonObject {
+  if (!isWireJsonObject(value)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const type = memberValues(value, "type")[0];
+  const fn = memberValues(value, "function")[0];
+  if (typeof type !== "string" || !isWireJsonObject(fn)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const name = memberValues(fn, "name")[0];
+  const description = memberValues(fn, "description")[0];
+  const parameters = memberValues(fn, "parameters")[0];
+  if (typeof name !== "string" || (description !== undefined && typeof description !== "string") || !isWireJsonObject(parameters)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  validateToolParameters(parameters);
+  const functionMembers: Array<{ key: string; value: WireJson }> = [{ key: "name", value: name }];
+  if (description !== undefined) {
+    functionMembers.push({ key: "description", value: description });
+  }
+  functionMembers.push({ key: "parameters", value: parameters });
+  const members: Array<{ key: string; value: WireJson }> = [{ key: "type", value: type }];
+  const items = memberValues(value, "items")[0];
+  if (items !== undefined) {
+    members.push({ key: "items", value: items });
+  }
+  members.push({ key: "function", value: { kind: "object", members: functionMembers } });
+  return { kind: "object", members };
+}
+
+function validateToolParameters(parameters: WireJsonObject): void {
+  const type = memberValues(parameters, "type")[0];
+  const properties = memberValues(parameters, "properties")[0];
+  const required = memberValues(parameters, "required")[0];
+  if (typeof type !== "string" || !isWireJsonObject(properties)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  if (required !== undefined && (!isWireJsonArray(required) || required.items.some((item) => typeof item !== "string"))) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
 }
 
 function mappedOptions(value: WireJson | undefined): Array<{ key: string; value: WireJson }> {

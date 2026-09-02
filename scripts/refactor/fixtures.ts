@@ -7,8 +7,9 @@ import { assertNode24 } from "./node_version.js";
 import { outboundHeaders } from "../../src/copilot/backend.js";
 import { parseChatSse } from "../../src/copilot/chat_sse.js";
 import { decodeOpenAiChatRequest, prepareOpenAiChatRequest } from "../../src/protocols/openai_chat/endpoint.js";
+import { buildOllamaChatRequest } from "../../src/protocols/ollama_chat/endpoint.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "../../src/protocols/openai_chat/wire.js";
-import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
+import { isWireJsonArray, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 export interface FixtureManifestEntry {
@@ -78,6 +79,7 @@ export async function verifyFixtureManifests(root = FIXTURE_ROOT, verifyExpected
 
   if (verifyExpectedBytes) {
     await verifyOpenAiChatFixtures(entries);
+    await verifyOllamaFixtures(entries);
   }
   return entries;
 }
@@ -128,6 +130,10 @@ async function main(): Promise<void> {
       await generateOpenAiChatFixture(entry);
       return;
     }
+    if (entry?.owner === "RM-10") {
+      await generateOllamaFixture(entry);
+      return;
+    }
     assertFixtureGeneratorAvailable(caseId, entries);
   }
 
@@ -150,11 +156,47 @@ async function verifyOpenAiChatFixtures(entries: readonly FixtureManifestEntry[]
     if (expected === undefined) {
       throw new Error(`fixture case ${entry.caseId} does not have an RM-09 generator`);
     }
+
     const actual = await readFile(path.join(FIXTURE_ROOT, "openai-chat", entry.expected), "utf8");
     if (actual !== expected) {
       throw new Error(`fixture case ${entry.caseId} expected bytes are stale; run fixtures:generate -- --case ${entry.caseId} --accept`);
     }
   }
+}
+
+async function generateOllamaFixture(entry: FixtureManifestEntry): Promise<void> {
+  const expected = await expectedOllamaFixture(entry);
+  if (expected === undefined) {
+    assertFixtureGeneratorAvailable(entry.caseId, [entry]);
+  }
+  await writeFile(path.join(FIXTURE_ROOT, "ollama", entry.expected), expected, "utf8");
+}
+
+async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): Promise<void> {
+  for (const entry of entries.filter((candidate) => candidate.owner === "RM-10")) {
+    const expected = await expectedOllamaFixture(entry);
+    if (expected === undefined) {
+      throw new Error(`fixture case ${entry.caseId} does not have an RM-10 generator`);
+    }
+    const actual = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.expected), "utf8");
+    if (actual !== expected) {
+      throw new Error(`fixture case ${entry.caseId} expected bytes are stale; run fixtures:generate -- --case ${entry.caseId} --accept`);
+    }
+  }
+}
+
+async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
+  if (entry.caseId !== "ollama.request.capture") {
+    return undefined;
+  }
+  const body = await readWireObject(path.join(FIXTURE_ROOT, "ollama", entry.input));
+  const model = memberValues(body, "model")[0];
+  const messages = memberValues(body, "messages")[0];
+  const stream = memberValues(body, "stream")[0];
+  if (typeof model !== "string" || !isWireJsonArray(messages) || stream !== true) {
+    throw new Error("ollama.request.capture input must contain model, messages, and stream:true");
+  }
+  return decodeBytes(serializeWireJson(buildOllamaChatRequest(body, model, messages, true)));
 }
 
 async function expectedOpenAiChatFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
