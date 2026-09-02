@@ -211,6 +211,7 @@ export interface ControlClient {
     context: CliLifecycleContext,
   ): Promise<ControlOperationMap[Operation]["result"]>;
   adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult>;
+  cancelLogin?(flowId: string, context: CliLifecycleContext): Promise<void> | void;
   close?(): Promise<void> | void;
 }
 
@@ -223,7 +224,7 @@ export interface ControlEndpoint {
 
 export class ScriptedControlClient implements ControlClient {
   readonly calls: Array<{
-    readonly kind: "lifecycle" | "control" | "admin.open";
+    readonly kind: "lifecycle" | "control" | "admin.open" | "auth.login.cancel";
     readonly operation: string;
     readonly args: unknown;
     readonly dataDir?: string;
@@ -260,6 +261,10 @@ export class ScriptedControlClient implements ControlClient {
   async adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult> {
     this.calls.push({ kind: "admin.open", operation: "admin.open", args: {}, dataDir: context.dataDir });
     return this.pop("admin.open") as CliAdminOpenResult;
+  }
+
+  async cancelLogin(flowId: string, context: CliLifecycleContext): Promise<void> {
+    this.calls.push({ kind: "auth.login.cancel", operation: "auth.login.cancel", args: { flowId }, dataDir: context.dataDir });
   }
 
   private pop(key: string): unknown {
@@ -323,6 +328,10 @@ export class HttpControlClient implements ControlClient {
     }
     await this.openBrowser(`http://127.0.0.1:${endpoint.port}/admin/#bootstrap_token=${encodeURIComponent(token)}`);
     return { opened: true };
+  }
+
+  async cancelLogin(_flowId: string, _context: CliLifecycleContext): Promise<void> {
+    // RM-19 owns the real local control operation surface. Device flows remain bounded by TTL/cap until then.
   }
 
   private async requireEndpoint(dataDir: string): Promise<ControlEndpoint> {

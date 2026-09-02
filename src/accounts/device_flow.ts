@@ -7,14 +7,14 @@ export const MAX_DEVICE_FLOWS = 8;
 export const DEVICE_FLOW_TTL_MS = 15 * 60 * 1000;
 
 export interface DeviceOAuthClient {
-  requestDeviceCode(environment: GitHubEnvironment): Promise<{
+  requestDeviceCode(environment: GitHubEnvironment, signal?: AbortSignal): Promise<{
     readonly deviceCode: string;
     readonly userCode: string;
     readonly verificationUri: string;
     readonly intervalSec: number;
     readonly expiresInSec: number;
   }>;
-  exchangeDeviceCode(environment: GitHubEnvironment, deviceCode: string): Promise<
+  exchangeDeviceCode(environment: GitHubEnvironment, deviceCode: string, signal?: AbortSignal): Promise<
     | { readonly status: "pending" }
     | { readonly status: "failed" }
     | {
@@ -57,13 +57,15 @@ export class DeviceFlowService {
     private readonly nowMs: () => number = Date.now,
   ) {}
 
-  async start(host: string): Promise<DeviceFlowSnapshot> {
+  async start(host: string, signal?: AbortSignal): Promise<DeviceFlowSnapshot> {
+    throwIfAborted(signal);
     this.gc();
     if (this.flows.size >= MAX_DEVICE_FLOWS) {
       throw new DeviceFlowError("capacity", "too many active device flows");
     }
     const environment = resolveGitHubEnvironment(host);
-    const requested = await this.oauth.requestDeviceCode(environment);
+    const requested = await this.oauth.requestDeviceCode(environment, signal);
+    throwIfAborted(signal);
     const flowId = randomUUID();
     const snapshot: PendingFlow = {
       flowId,
@@ -84,12 +86,13 @@ export class DeviceFlowService {
     };
   }
 
-  async poll(flowId: string): Promise<
+  async poll(flowId: string, signal?: AbortSignal): Promise<
     | { readonly status: "pending" }
     | { readonly status: "expired" }
     | { readonly status: "failed" }
     | { readonly status: "complete"; readonly accountId: string }
   > {
+    throwIfAborted(signal);
     const flow = this.flows.get(flowId);
     if (flow === undefined) {
       throw new DeviceFlowError("not_found", "device flow not found");
@@ -98,7 +101,8 @@ export class DeviceFlowService {
       this.flows.delete(flowId);
       return { status: "expired" };
     }
-    const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode);
+    const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode, signal);
+    throwIfAborted(signal);
     if (result.status === "pending") {
       return { status: "pending" };
     }
@@ -129,5 +133,11 @@ export class DeviceFlowService {
         this.flows.delete(flowId);
       }
     }
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
   }
 }

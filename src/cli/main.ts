@@ -85,19 +85,30 @@ async function runInteractiveLogin(
   stdout: WritableCliStream,
   options: RunCliOptions,
 ): Promise<number> {
-  const started = await client.request("auth.login.start", args, context);
+  const controlContext = {
+    dataDir: context.dataDir,
+    ...(options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal }),
+  };
+  const started = await client.request("auth.login.start", args, controlContext);
   stdout.write(`Code: ${started.userCode}\n`);
   stdout.write(`Open: ${started.verificationUri}\n`);
-  for (;;) {
-    const result = await client.request("auth.login.poll", { flowId: started.flowId }, context);
-    if (result.state === "complete") {
-      stdout.write(`Authenticated: ${result.account.accountId}\n`);
-      return 0;
+  try {
+    for (;;) {
+      const result = await client.request("auth.login.poll", { flowId: started.flowId }, controlContext);
+      if (result.state === "complete") {
+        stdout.write(`Authenticated: ${result.account.accountId}\n`);
+        return 0;
+      }
+      if (result.state !== "pending") {
+        throw new CliError("remote_error");
+      }
+      await sleep(options.pollDelayMs ?? started.pollIntervalSeconds * 1000, options.shutdownSignal);
     }
-    if (result.state !== "pending") {
-      throw new CliError("remote_error");
+  } catch (error: unknown) {
+    if (error instanceof CliError && error.code === "interrupted") {
+      await client.cancelLogin?.(started.flowId, { dataDir: context.dataDir });
     }
-    await sleep(options.pollDelayMs ?? started.pollIntervalSeconds * 1000, options.shutdownSignal);
+    throw error;
   }
 }
 

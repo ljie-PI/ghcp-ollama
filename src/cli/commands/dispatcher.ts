@@ -1,4 +1,4 @@
-import type { AccountDirectory} from "../../accounts/account_directory.js";
+import type { AccountDirectory } from "../../accounts/account_directory.js";
 import { AccountDirectoryError, type AccountSummary } from "../../accounts/account_directory.js";
 import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_flow.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
@@ -20,13 +20,17 @@ import {
 
 export interface CommandDispatcherDependencies {
   readonly directory: AccountDirectory;
-  readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll">;
+  readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll" | "cancel">;
   readonly catalog: CopilotModelCatalog;
   readonly runtimeConfig: RuntimeConfigStore;
 }
 
 export class CommandDispatcher {
   constructor(private readonly dependencies: CommandDispatcherDependencies) {}
+
+  cancelLogin(flowId: string): void {
+    this.dependencies.deviceFlows.cancel(flowId);
+  }
 
   async dispatch<Operation extends ControlOperation>(
     operation: Operation,
@@ -48,7 +52,7 @@ export class CommandDispatcher {
     switch (operation) {
     case "auth.login.start": {
       const input = args as ControlOperationMap["auth.login.start"]["args"];
-      const started = await this.dependencies.deviceFlows.start(input.host ?? "github.com");
+      const started = await this.dependencies.deviceFlows.start(input.host ?? "github.com", signal);
       return {
         flowId: started.flowId,
         userCode: started.userCode,
@@ -59,7 +63,7 @@ export class CommandDispatcher {
     }
     case "auth.login.poll": {
       const input = args as ControlOperationMap["auth.login.poll"]["args"];
-      const result = await this.dependencies.deviceFlows.poll(input.flowId);
+      const result = await this.dependencies.deviceFlows.poll(input.flowId, signal);
       if (result.status === "pending") {
         return { state: "pending" } as ControlOperationMap[Operation]["result"];
       }
