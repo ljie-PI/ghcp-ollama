@@ -115,6 +115,9 @@ function parseCommand(
     return { kind: "help", text: ROOT_HELP };
   }
   if (command === "serve") {
+    if (groupAction === "--help") {
+      return { kind: "help", text: commandHelp("serve") };
+    }
     return { kind: "serve", startup: parseServeStartup(tokens.slice(1), context) };
   }
   if (command === "start") {

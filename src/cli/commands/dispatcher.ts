@@ -137,8 +137,8 @@ export class CommandDispatcher {
     }
     case "config.set": {
       const input = args as ControlOperationMap["config.set"]["args"];
-      const current = this.dependencies.runtimeConfig.readSnapshot();
       const revision = this.dependencies.runtimeConfig.readRevision();
+      const current = this.dependencies.runtimeConfig.readSnapshot();
       const next = setConfigValue(current, input.key, input.value);
       this.dependencies.runtimeConfig.update(next, revision);
       return this.adminRuntimeConfig() as ControlOperationMap[Operation]["result"];

@@ -7,6 +7,7 @@ import { CopilotModelCatalog } from "../../../src/copilot/model_catalog.js";
 import { runCli } from "../../../src/cli/main.js";
 import { CliError, HttpControlClient, ScriptedControlClient } from "../../../src/cli/control_client.js";
 import { CommandDispatcher, DispatcherControlClient } from "../../../src/cli/commands/dispatcher.js";
+import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { RuntimeConfigStore } from "../../../src/config/runtime_config.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
@@ -103,8 +104,27 @@ describe("RM-18 CLI commands", () => {
       expect(await client.request("accounts.list", {}, { dataDir: "unused" })).toMatchObject({ defaultAccountId: "github.com/42", defaultRevision: 1 });
       expect(await client.request("models.list", {}, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", items: [{ id: "gpt" }] });
       expect(await client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "gpt", validity: "valid" });
+      await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });
+      expect(harness.directory.preferences.get("github.com/42")?.validity).toBe("valid");
+      harness.catalog.invalidate("github.com/42");
+      harness.capiModels = [];
+      await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });
+      expect(harness.directory.preferences.get("github.com/42")?.validity).toBe("invalid");
+      harness.catalog.invalidate("github.com/42");
+      harness.capiModels = [{ id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true }];
+      expect(await client.request("models.set", { modelId: "claude" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "claude", validity: "valid" });
       expect(await client.request("config.get", { key: "admission.activeMax" }, { dataDir: "unused" })).toMatchObject({ key: "admission.activeMax", value: 4 });
       expect(await client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "unused" })).toMatchObject({ config: { admission: { activeMax: 2, queueMax: 16 } } });
+      const readSnapshot = harness.runtimeConfig.readSnapshot.bind(harness.runtimeConfig);
+      let forceConflict = true;
+      harness.runtimeConfig.readSnapshot = () => {
+        if (forceConflict) {
+          forceConflict = false;
+          harness.runtimeConfig.update(defaultRuntimeConfigSnapshot(), harness.runtimeConfig.readRevision());
+        }
+        return readSnapshot();
+      };
+      await expect(client.request("config.set", { key: "admission.activeMax", value: "3" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "revision_conflict" });
       await expect(client.request("config.set", { key: "port", value: "31401" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "validation_error" });
       await expect(client.request("models.set", { modelId: "missing" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
       expect(await client.request("auth.status", {}, { dataDir: "unused" })).toMatchObject({ defaultAccountId: "github.com/42", accounts: [{ accountId: "github.com/42" }] });
@@ -115,7 +135,7 @@ describe("RM-18 CLI commands", () => {
     }
   });
 
-  it("returns device-flow expired and failed terminal states once", async () => {
+  it("returns device-flow expired and failed terminal states without retaining flow state", async () => {
     let nowValue = 1_800_000_000_000;
     const expiredHarness = await dispatcherHarness({ device: expiringDeviceClient(), now: () => nowValue });
     try {
@@ -236,6 +256,7 @@ describe("RM-18 CLI commands", () => {
         catalog: harness.catalog,
         copilot: harness.backend,
         history: harness.history,
+        tokenCounter: () => 0,
       });
       expect(routes.map((route) => `${route.method} ${route.path}`)).toEqual([
         "GET /v1/models",
@@ -275,6 +296,8 @@ async function dispatcherHarness(options: {
   readonly catalog: CopilotModelCatalog;
   readonly backend: ScriptedCopilotBackend;
   readonly history: SqliteResponsesHistory;
+  readonly runtimeConfig: RuntimeConfigStore;
+  capiModels: Array<{ readonly id: string; readonly name: string; readonly vendor: string; readonly model_picker_enabled: boolean }>;
   readonly close: () => void;
 }> {
   const now = options.now ?? (() => 1_800_000_000_000);
@@ -289,9 +312,12 @@ async function dispatcherHarness(options: {
     nowMs: now,
   });
   const directory = new AccountDirectory(database, new MemoryCredentialStore(), now);
+  const harness = {
+    capiModels: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }],
+  };
   const catalog = new CopilotModelCatalog({
     async fetch() {
-      return { data: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }] };
+      return { data: harness.capiModels };
     },
   });
   const runtimeConfig = new RuntimeConfigStore(database, now);
@@ -313,6 +339,13 @@ async function dispatcherHarness(options: {
     catalog,
     backend,
     history,
+    runtimeConfig,
+    get capiModels() {
+      return harness.capiModels;
+    },
+    set capiModels(value) {
+      harness.capiModels = value;
+    },
     close: () => closeDatabase(database),
   };
 }

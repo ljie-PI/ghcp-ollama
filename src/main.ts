@@ -50,7 +50,7 @@ export interface ApplicationContext {
   readonly telemetry?: TelemetryRecorder;
   readonly modelsSource?: CopilotModelsSource;
   readonly runtime?: RuntimeConfigStore;
-  readonly tokenCounter?: OllamaTokenCounter;
+  readonly tokenCounter: OllamaTokenCounter;
   close?(): Promise<void> | void;
 }
 
@@ -97,7 +97,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
     ...createOllamaChatRoutes({
       directory: context.directory,
       copilot: context.copilot,
-      tokenCounter: context.tokenCounter ?? missingOllamaUsageCount,
+      tokenCounter: context.tokenCounter,
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
@@ -161,6 +161,7 @@ export async function createProductionApplicationContext(
     telemetry,
     modelsSource,
     runtime,
+    tokenCounter: unavailableOllamaTokenCounter,
     async close() {
       await telemetry.flush();
       await catalog.close();
@@ -169,6 +170,6 @@ export async function createProductionApplicationContext(
   };
 }
 
-function missingOllamaUsageCount(): number {
-  return 0;
+function unavailableOllamaTokenCounter(): number {
+  throw new Error("Ollama non-stream token counter is not configured");
 }

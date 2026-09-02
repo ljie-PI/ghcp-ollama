@@ -48,13 +48,8 @@ interface PendingFlow extends DeviceFlowSnapshot {
   readonly deviceCode: string;
 }
 
-type TerminalFlow =
-  | { readonly status: "expired" }
-  | { readonly status: "failed" };
-
 export class DeviceFlowService {
   private readonly flows = new Map<string, PendingFlow>();
-  private readonly terminalFlows = new Map<string, TerminalFlow>();
 
   constructor(
     private readonly directory: AccountDirectory,
@@ -95,11 +90,6 @@ export class DeviceFlowService {
     | { readonly status: "failed" }
     | { readonly status: "complete"; readonly accountId: string }
   > {
-    const terminal = this.terminalFlows.get(flowId);
-    if (terminal !== undefined) {
-      this.terminalFlows.delete(flowId);
-      return terminal;
-    }
     const flow = this.flows.get(flowId);
     if (flow === undefined) {
       throw new DeviceFlowError("not_found", "device flow not found");
@@ -137,7 +127,6 @@ export class DeviceFlowService {
     for (const [flowId, flow] of this.flows) {
       if (flow.expiresAtMs <= now) {
         this.flows.delete(flowId);
-        this.terminalFlows.set(flowId, { status: "expired" });
       }
     }
   }

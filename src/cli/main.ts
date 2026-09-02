@@ -170,14 +170,23 @@ async function sleep(ms: number, signal: AbortSignal | undefined): Promise<void>
     throw new CliError("interrupted");
   }
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, Math.max(0, ms));
     if (signal === undefined) {
+      setTimeout(resolve, Math.max(0, ms));
       return;
     }
-    signal.addEventListener("abort", () => {
+    const cleanup = (): void => {
       clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = (): void => {
+      cleanup();
       reject(new CliError("interrupted"));
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, Math.max(0, ms));
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 

@@ -68,6 +68,17 @@ describe("RM-18 CLI parser", () => {
     expect(start.command.startup.port).toBe(31_402);
   });
 
+  it("renders command help without starting foreground serve", () => {
+    expect(parseCli(["serve", "--help"], { homedir: home }).command).toEqual({
+      kind: "help",
+      text: "Usage: ghcg [--data-dir <path>] [--json] serve\n",
+    });
+    expect(parseCli(["start", "--help"], { homedir: home }).command).toEqual({
+      kind: "help",
+      text: "Usage: ghcg [--data-dir <path>] [--json] start\n",
+    });
+  });
+
   it("parses every management command to a control operation", () => {
     expect(parseCli(["auth", "login"], { homedir: home }).command).toEqual({ kind: "control", operation: "auth.login.start", args: {} });
     expect(parseCli(["auth", "login", "--host", "ghe.example.com"], { homedir: home }).command).toEqual({ kind: "control", operation: "auth.login.start", args: { host: "ghe.example.com" } });
