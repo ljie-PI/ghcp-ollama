@@ -11,6 +11,8 @@ export type GatewayFailure =
   | { readonly kind: "upstream_http"; readonly status: number; readonly retryAfter?: string }
   | { readonly kind: "upstream_timeout"; readonly cause?: unknown }
   | { readonly kind: "upstream_network"; readonly cause?: unknown }
+  | { readonly kind: "upstream_stream_error"; readonly cause?: unknown }
+  | { readonly kind: "upstream_stream_truncated"; readonly cause?: unknown }
   | { readonly kind: "invalid_upstream_response"; readonly cause?: unknown }
   | { readonly kind: "invalid_tool_arguments"; readonly cause?: unknown }
   | { readonly kind: "invalid_logprobs"; readonly cause?: unknown }

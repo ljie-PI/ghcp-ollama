@@ -1,7 +1,6 @@
 import { VERSION } from "../../version.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import type { AccountDirectory } from "../../accounts/account_directory.js";
-import { iterateChatFrames } from "../../copilot/backend.js";
 import {
   UpstreamBodyLimitError,
   UpstreamTimeoutError,
@@ -18,9 +17,9 @@ import {
   type WireJsonArray,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
-import { createStreamResponseWriter } from "../../gateway/stream_response.js";
-import { encodeNdjson, ollamaCreatedAt, ollamaErrorBody, ollamaJsonStringify } from "./wire.js";
+import { ollamaCreatedAt, ollamaErrorBody, ollamaJsonStringify } from "./wire.js";
 import { ollamaNonstreamResponse, type OllamaTokenCounter } from "./bridge.js";
+import { createOllamaStreamResponse } from "./stream.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 
 export interface OllamaRouteDependencies {
@@ -103,12 +102,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
             dependencies.tokenCounter,
           )), { headers: JSON_HEADERS });
         }
-        const createdAt = ollamaCreatedAt((dependencies.now ?? (() => new Date()))());
-        const writer = createStreamResponseWriter({
-          signal: scope.signal,
-          headers: { "Content-Type": "application/x-ndjson" },
-        });
-        const upstream = await copilot.openChatStream({
+        const upstream = await openChatStream(copilot, {
           model,
           body: chatBody,
           stream: true,
@@ -118,50 +112,16 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
           firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
           signal: scope.signal,
         });
-        void (async () => {
-          try {
-            for await (const frame of iterateChatFrames(upstream)) {
-              if (scope.signal.aborted) {
-                writer.abort();
-                return;
-              }
-              if (frame.kind === "chunk") {
-                const content = textFromWire(frame.chunk.payload);
-                if (content.length > 0) {
-                  await writer.enqueue(encodeNdjson({
-                    model,
-                    created_at: createdAt,
-                    message: { role: "assistant", content },
-                    done: false,
-                  }));
-                }
-              }
-              if (frame.kind === "done") {
-                await writer.enqueue(encodeNdjson({
-                  model,
-                  created_at: createdAt,
-                  message: { role: "assistant", content: "" },
-                  done: true,
-                  done_reason: "stop",
-                }));
-                writer.close();
-                return;
-              }
-              if (frame.kind === "error") {
-                await writer.enqueue(encodeNdjson({ error: "upstream stream error" }));
-                writer.close();
-                return;
-              }
-            }
-            writer.close();
-          } catch (_error) {
-            if (writer.committed) {
-              await writer.enqueue(encodeNdjson({ error: "upstream stream error" }));
-            }
-            writer.close();
-          }
-        })();
-        return writer.response;
+        if (upstream.status < 200 || upstream.status >= 300) {
+          await upstream.cancel();
+          throw new GatewayFailureError({ kind: "upstream_http", status: upstream.status });
+        }
+        return await createOllamaStreamResponse({
+          upstream,
+          model,
+          createdAt: ollamaCreatedAt((dependencies.now ?? (() => new Date()))()),
+          scope,
+        });
       },
     },
   ];
@@ -180,6 +140,10 @@ function ollamaFailureStatusAndText(failure: Parameters<FailurePresenter>[0]): {
     return { status: failure.status, text: "upstream request failed" };
   case "upstream_network":
     return { status: 502, text: "upstream request failed" };
+  case "upstream_stream_error":
+    return { status: 502, text: "upstream stream error" };
+  case "upstream_stream_truncated":
+    return { status: 502, text: "upstream stream truncated" };
   case "invalid_upstream_response":
     return { status: 502, text: "invalid upstream response" };
   case "invalid_tool_arguments":
@@ -646,6 +610,14 @@ async function completeChat(copilot: BoundCopilot, request: Readonly<ChatRequest
   }
 }
 
+async function openChatStream(copilot: BoundCopilot, request: Readonly<ChatRequest>) {
+  try {
+    return await copilot.openChatStream(request);
+  } catch (error: unknown) {
+    throw upstreamCallFailure(error);
+  }
+}
+
 function upstreamCallFailure(error: unknown): GatewayFailureError {
   if (error instanceof GatewayFailureError) {
     return error;
@@ -660,20 +632,4 @@ function upstreamCallFailure(error: unknown): GatewayFailureError {
     return new GatewayFailureError({ kind: "upstream_timeout", cause: error });
   }
   return new GatewayFailureError({ kind: "upstream_network", cause: error });
-}
-
-function textFromWire(value: WireJson): string {
-  if (!isWireJsonObject(value)) {
-    return "";
-  }
-  const choices = memberValues(value, "choices")[0];
-  if (!isWireJsonArray(choices) || choices.items[0] === undefined || !isWireJsonObject(choices.items[0])) {
-    return "";
-  }
-  const delta = memberValues(choices.items[0], "delta")[0];
-  if (!isWireJsonObject(delta)) {
-    return "";
-  }
-  const content = memberValues(delta, "content")[0];
-  return typeof content === "string" ? content : "";
 }

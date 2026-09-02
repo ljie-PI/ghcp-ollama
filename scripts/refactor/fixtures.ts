@@ -216,12 +216,15 @@ async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): P
 }
 
 async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
-  if (entry.caseId !== "ollama.request.capture" && entry.caseId !== "ollama.nonstream.success") {
+  if (entry.caseId !== "ollama.request.capture" && entry.caseId !== "ollama.nonstream.success" && entry.caseId !== "ollama.stream.success") {
     return undefined;
   }
   const input = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.input), "utf8");
   if (entry.caseId === "ollama.nonstream.success") {
     return ollamaNonstreamSuccessReference();
+  }
+  if (entry.caseId === "ollama.stream.success") {
+    return ollamaStreamSuccessReference();
   }
   const backend = new FixtureOllamaBackend();
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-fixture-"));
@@ -257,6 +260,42 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
   } finally {
     await gateway.close();
     closeDatabase(database);
+  }
+
+  function ollamaStreamSuccessReference(): string {
+    return `${stringifyGoReference(goObject([
+      { key: "model", value: "gpt" },
+      { key: "remote_model", value: undefined, omitEmpty: true },
+      { key: "remote_host", value: undefined, omitEmpty: true },
+      { key: "created_at", value: "2026-01-02T03:04:05.12Z" },
+      { key: "message", value: goObject([
+        { key: "role", value: "assistant" },
+        { key: "content", value: "hello" },
+        { key: "thinking", value: undefined, omitEmpty: true },
+        { key: "images", value: undefined, omitEmpty: true },
+        { key: "tool_calls", value: undefined, omitEmpty: true },
+        { key: "tool_name", value: undefined, omitEmpty: true },
+        { key: "tool_call_id", value: undefined, omitEmpty: true },
+      ]) },
+      { key: "done", value: false },
+      { key: "done_reason", value: undefined, omitEmpty: true },
+    ]))}\n${stringifyGoReference(goObject([
+      { key: "model", value: "gpt" },
+      { key: "remote_model", value: undefined, omitEmpty: true },
+      { key: "remote_host", value: undefined, omitEmpty: true },
+      { key: "created_at", value: "2026-01-02T03:04:05.12Z" },
+      { key: "message", value: goObject([
+        { key: "role", value: "assistant" },
+        { key: "content", value: "" },
+        { key: "thinking", value: undefined, omitEmpty: true },
+        { key: "images", value: undefined, omitEmpty: true },
+        { key: "tool_calls", value: undefined, omitEmpty: true },
+        { key: "tool_name", value: undefined, omitEmpty: true },
+        { key: "tool_call_id", value: undefined, omitEmpty: true },
+      ]) },
+      { key: "done", value: true },
+      { key: "done_reason", value: "stop", omitEmpty: true },
+    ]))}\n`;
   }
 
   function ollamaNonstreamSuccessReference(): string {

@@ -31,9 +31,9 @@ export function ollamaNonstreamResponse(
   }
   const reduced = reduceMessage(message);
   const toolCalls = toolCallsFromMessage(message);
-  const doneReason = doneReasonFromChoice(choice, toolCalls.length);
+  const doneReason = ollamaDoneReason(memberValues(choice, "finish_reason")[0], toolCalls.length);
   const usage = usageCounts(root, chatMessages, reduced.content, tokenCounter);
-  const logprobs = logprobsFromChoice(choice);
+  const logprobs = ollamaLogprobsFromChoice(choice);
   return {
     model,
     created_at: createdAtFromUpstream(root, now),
@@ -147,7 +147,7 @@ function toolCallFromChat(value: WireJson, position: number): Record<string, unk
   if (typeof name !== "string" || typeof args !== "string") {
     throw new GatewayFailureError({ kind: "invalid_upstream_response" });
   }
-  const parsedArgs = parseToolArguments(args);
+  const parsedArgs = parseOllamaToolArguments(args);
   const call: Record<string, unknown> = {};
   if (id !== undefined && id.length > 0) {
     call.id = id;
@@ -160,7 +160,7 @@ function toolCallFromChat(value: WireJson, position: number): Record<string, unk
   return call;
 }
 
-function parseToolArguments(value: string): WireJsonObject {
+export function parseOllamaToolArguments(value: string): WireJsonObject {
   const bytes = new TextEncoder().encode(value);
   try {
     const parsed = parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 64 });
@@ -176,7 +176,7 @@ function parseToolArguments(value: string): WireJsonObject {
   }
 }
 
-function logprobsFromChoice(choice: WireJsonObject): Array<Record<string, unknown>> | undefined {
+export function ollamaLogprobsFromChoice(choice: WireJsonObject): Array<Record<string, unknown>> | undefined {
   const logprobs = memberValues(choice, "logprobs")[0];
   if (logprobs === undefined || logprobs === null) {
     return undefined;
@@ -226,8 +226,7 @@ function logprobItem(value: WireJson, allowTop: boolean): Record<string, unknown
   return result;
 }
 
-function doneReasonFromChoice(choice: WireJsonObject, toolCallCount: number): "stop" | "length" {
-  const finish = memberValues(choice, "finish_reason")[0];
+export function ollamaDoneReason(finish: WireJson | undefined, toolCallCount: number): "stop" | "length" {
   if (finish === undefined || finish === null || finish === "stop" || finish === "content_filter") {
     return "stop";
   }
