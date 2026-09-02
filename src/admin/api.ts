@@ -163,13 +163,7 @@ export interface AdminCatalog {
     readonly accountId: string;
     readonly generation: number;
     readonly fetchedAt: string;
-    readonly models: readonly {
-      readonly id: string;
-      readonly name: string;
-      readonly vendor: string;
-      readonly maxInputTokens?: number;
-      readonly maxOutputTokens?: number;
-    }[];
+    readonly models: readonly { readonly id: string; readonly name: string; readonly vendor: string }[];
   }>;
   invalidate(accountId: string): void;
 }
@@ -194,6 +188,13 @@ export interface AdminPreferredModels {
     catalog: Awaited<ReturnType<AdminCatalog["get"]>>,
     expectedRevision: number | null,
   ): AdminStoredPreference | null;
+}
+
+export interface AdminModelMetadata {
+  get(modelId: string): Readonly<{
+    maxInputTokens?: number;
+    maxOutputTokens?: number;
+  }> | null;
 }
 
 export interface AdminStoredPreference extends AdminPreference {
@@ -225,6 +226,7 @@ export interface AdminApiDependencies {
   readonly catalog: AdminCatalog;
   readonly preferences: AdminPreferences;
   readonly preferredModels: AdminPreferredModels;
+  readonly modelMetadata: AdminModelMetadata;
   readonly runtimeConfig: AdminRuntimeConfigStore;
   readonly history: AdminHistory;
   readonly telemetry: AdminTelemetry;
@@ -446,13 +448,16 @@ export class AdminManagementApi {
       catalogGeneration: catalog.generation,
       fetchedAt: catalog.fetchedAt,
       preferredModel: nullablePreference(this.dependencies.preferences.get(catalog.accountId)),
-      items: catalog.models.map((model) => ({
-        id: model.id,
-        name: model.name,
-        vendor: model.vendor,
-        maxInputTokens: model.maxInputTokens ?? null,
-        maxOutputTokens: model.maxOutputTokens ?? null,
-      })),
+      items: catalog.models.map((model) => {
+        const metadata = this.dependencies.modelMetadata.get(model.id);
+        return {
+          id: model.id,
+          name: model.name,
+          vendor: model.vendor,
+          maxInputTokens: metadata?.maxInputTokens ?? null,
+          maxOutputTokens: metadata?.maxOutputTokens ?? null,
+        };
+      }),
     };
   }
 

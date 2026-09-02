@@ -117,7 +117,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       async get(accountId, signal) {
         signal.throwIfAborted();
         calls.push(`catalog:${accountId}`);
-        return { accountId, generation: 7, fetchedAt: "2027-01-15T08:00:00.000Z", models: [{ id: "gpt-test", name: "GPT Test", vendor: "OpenAI", maxInputTokens: 200_000, maxOutputTokens: 8_192 }] };
+        return { accountId, generation: 7, fetchedAt: "2027-01-15T08:00:00.000Z", models: [{ id: "gpt-test", name: "GPT Test", vendor: "OpenAI" }] };
       },
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
     },
@@ -135,6 +135,9 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         calls.push("preference-invalidated");
         return preference;
       },
+    },
+    modelMetadata: {
+      get: (modelId) => modelId === "gpt-test" ? { maxInputTokens: 200_000, maxOutputTokens: 8_192 } : null,
     },
     runtimeConfig: {
       readSnapshot: () => config,
