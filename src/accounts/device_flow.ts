@@ -7,15 +7,16 @@ export const MAX_DEVICE_FLOWS = 8;
 export const DEVICE_FLOW_TTL_MS = 15 * 60 * 1000;
 
 export interface DeviceOAuthClient {
-  requestDeviceCode(environment: GitHubEnvironment): Promise<{
+  requestDeviceCode(environment: GitHubEnvironment, signal?: AbortSignal): Promise<{
     readonly deviceCode: string;
     readonly userCode: string;
     readonly verificationUri: string;
     readonly intervalSec: number;
     readonly expiresInSec: number;
   }>;
-  exchangeDeviceCode(environment: GitHubEnvironment, deviceCode: string): Promise<
+  exchangeDeviceCode(environment: GitHubEnvironment, deviceCode: string, signal?: AbortSignal): Promise<
     | { readonly status: "pending" }
+    | { readonly status: "failed" }
     | {
         readonly status: "complete";
         readonly accessToken: string;
@@ -29,6 +30,7 @@ export interface DeviceFlowSnapshot {
   readonly userCode: string;
   readonly verificationUri: string;
   readonly expiresAtMs: number;
+  readonly pollIntervalSeconds: number;
 }
 
 export class DeviceFlowError extends Error {
@@ -55,13 +57,15 @@ export class DeviceFlowService {
     private readonly nowMs: () => number = Date.now,
   ) {}
 
-  async start(host: string): Promise<DeviceFlowSnapshot> {
+  async start(host: string, signal?: AbortSignal): Promise<DeviceFlowSnapshot> {
+    throwIfAborted(signal);
     this.gc();
     if (this.flows.size >= MAX_DEVICE_FLOWS) {
       throw new DeviceFlowError("capacity", "too many active device flows");
     }
     const environment = resolveGitHubEnvironment(host);
-    const requested = await this.oauth.requestDeviceCode(environment);
+    const requested = await this.oauth.requestDeviceCode(environment, signal);
+    throwIfAborted(signal);
     const flowId = randomUUID();
     const snapshot: PendingFlow = {
       flowId,
@@ -70,6 +74,7 @@ export class DeviceFlowService {
       userCode: requested.userCode,
       verificationUri: requested.verificationUri,
       expiresAtMs: this.nowMs() + Math.min(requested.expiresInSec * 1000, DEVICE_FLOW_TTL_MS),
+      pollIntervalSeconds: requested.intervalSec,
     };
     this.flows.set(flowId, snapshot);
     return {
@@ -77,22 +82,33 @@ export class DeviceFlowService {
       userCode: snapshot.userCode,
       verificationUri: snapshot.verificationUri,
       expiresAtMs: snapshot.expiresAtMs,
+      pollIntervalSeconds: snapshot.pollIntervalSeconds,
     };
   }
 
-  async poll(flowId: string): Promise<{ readonly status: "pending" } | { readonly status: "complete"; readonly accountId: string }> {
-    this.gc();
+  async poll(flowId: string, signal?: AbortSignal): Promise<
+    | { readonly status: "pending" }
+    | { readonly status: "expired" }
+    | { readonly status: "failed" }
+    | { readonly status: "complete"; readonly accountId: string }
+  > {
+    throwIfAborted(signal);
     const flow = this.flows.get(flowId);
     if (flow === undefined) {
       throw new DeviceFlowError("not_found", "device flow not found");
     }
     if (flow.expiresAtMs <= this.nowMs()) {
       this.flows.delete(flowId);
-      throw new DeviceFlowError("expired", "device flow expired");
+      return { status: "expired" };
     }
-    const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode);
+    const result = await this.oauth.exchangeDeviceCode(flow.environment, flow.deviceCode, signal);
+    throwIfAborted(signal);
     if (result.status === "pending") {
       return { status: "pending" };
+    }
+    if (result.status === "failed") {
+      this.flows.delete(flowId);
+      return { status: "failed" };
     }
     const secret: SecretCredential = { generation: 0, githubToken: result.accessToken };
     const bound = await this.directory.upsertAuthenticated({
@@ -117,5 +133,11 @@ export class DeviceFlowService {
         this.flows.delete(flowId);
       }
     }
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) {
+    throw new DOMException("aborted", "AbortError");
   }
 }

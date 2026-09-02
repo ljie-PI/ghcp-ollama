@@ -76,6 +76,20 @@ export class AccountDirectory {
     return this.bind(accountId);
   }
 
+  async bindAccount(accountId: AccountId, _signal?: AbortSignal): Promise<BoundAccount> {
+    return this.bind(accountId);
+  }
+
+  defaultState(): { readonly defaultRevision: number; readonly defaultAccountId: AccountId | null } {
+    const prefs = this.readPrefs();
+    return { defaultRevision: prefs.revision, defaultAccountId: prefs.default_account_id };
+  }
+
+  defaultPreference(): { readonly revision: number; readonly defaultAccountId: string | null } {
+    const state = this.defaultState();
+    return { revision: state.defaultRevision, defaultAccountId: state.defaultAccountId };
+  }
+
   use(accountId: AccountId, expectedRevision: number): number {
     const prefs = this.readPrefs();
     if (prefs.revision !== expectedRevision) {

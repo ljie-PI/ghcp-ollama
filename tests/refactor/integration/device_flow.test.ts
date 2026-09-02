@@ -122,6 +122,7 @@ describe("RM-06 device flow", () => {
       await expect(flows.poll(started.flowId)).rejects.toBeInstanceOf(DeviceFlowError);
       const second = await flows.start("ghe.example.com");
       now += 2_000;
+      await expect(flows.poll(second.flowId)).resolves.toEqual({ status: "expired" });
       await expect(flows.poll(second.flowId)).rejects.toBeInstanceOf(DeviceFlowError);
     } finally {
       closeDatabase(database);

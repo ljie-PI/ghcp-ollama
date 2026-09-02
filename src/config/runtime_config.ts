@@ -2,6 +2,8 @@ import type Database from "better-sqlite3";
 import {
   defaultRuntimeConfigSnapshot,
   parseRuntimeConfigSnapshot,
+  RUNTIME_CONFIG_RANGES,
+  type RuntimeConfigKey,
   type RuntimeConfigSnapshot,
 } from "./schema.js";
 
@@ -99,6 +101,31 @@ export class RuntimeConfigStore {
          updated_at_ms = excluded.updated_at_ms`,
     ).run(revision, JSON.stringify(snapshot), this.nowMs());
   }
+}
+
+export { RUNTIME_CONFIG_RANGES, type RuntimeConfigKey };
+
+export function isRuntimeConfigKey(key: string): key is RuntimeConfigKey {
+  return Object.hasOwn(RUNTIME_CONFIG_RANGES, key);
+}
+
+export function readRuntimeConfigNumber(config: RuntimeConfigSnapshot, key: RuntimeConfigKey): number {
+  const [section, property] = key.split(".") as [keyof RuntimeConfigSnapshot, string];
+  return (config[section] as Record<string, number>)[property] as number;
+}
+
+export function withRuntimeConfigNumber(config: RuntimeConfigSnapshot, key: RuntimeConfigKey, value: number): RuntimeConfigSnapshot {
+  const next = defaultRuntimeConfigSnapshot();
+  Object.assign(next.limits, config.limits);
+  Object.assign(next.admission, config.admission);
+  Object.assign(next.timeouts, config.timeouts);
+  Object.assign(next.accounts, config.accounts);
+  Object.assign(next.history, config.history);
+  Object.assign(next.usage, config.usage);
+  Object.assign(next.events, config.events);
+  const [section, property] = key.split(".") as [keyof RuntimeConfigSnapshot, string];
+  (next[section] as Record<string, number>)[property] = value;
+  return next;
 }
 
 function overlayEnvironment(base: RuntimeConfigSnapshot, env: NodeJS.ProcessEnv): RuntimeConfigSnapshot {
