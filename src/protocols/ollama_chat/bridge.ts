@@ -19,10 +19,11 @@ export function ollamaNonstreamResponse(
   body: Uint8Array,
   model: string,
   chatMessages: WireJsonArray,
+  maxBytes: number,
   now: () => Date,
   tokenCounter: OllamaTokenCounter,
 ): Record<string, unknown> {
-  const root = parseUpstreamObject(body);
+  const root = parseUpstreamObject(body, maxBytes);
   const choice = selectedChoice(root);
   const message = memberValues(choice, "message")[0];
   if (!isWireJsonObject(message)) {
@@ -50,9 +51,9 @@ export function ollamaNonstreamResponse(
   };
 }
 
-function parseUpstreamObject(body: Uint8Array): WireJsonObject {
+function parseUpstreamObject(body: Uint8Array, maxBytes: number): WireJsonObject {
   try {
-    const value = parseWireJson(body, { maxBytes: body.byteLength, maxDepth: 64 });
+    const value = parseWireJson(body, { maxBytes, maxDepth: 64 });
     if (!isWireJsonObject(value)) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response" });
     }
@@ -184,9 +185,6 @@ function logprobsFromChoice(choice: WireJsonObject): Array<Record<string, unknow
     throw new GatewayFailureError({ kind: "invalid_logprobs" });
   }
   const content = memberValues(logprobs, "content")[0];
-  if (content === undefined || content === null) {
-    return undefined;
-  }
   if (!isWireJsonArray(content)) {
     throw new GatewayFailureError({ kind: "invalid_logprobs" });
   }

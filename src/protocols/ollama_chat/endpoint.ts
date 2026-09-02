@@ -99,6 +99,7 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
             response.body,
             model,
             chatMessagesFromRequest(chatRequest),
+            scope.config.limits.nonstreamBodyBytes,
             dependencies.now ?? (() => new Date()),
             dependencies.tokenCounter,
           )), { headers: JSON_HEADERS });

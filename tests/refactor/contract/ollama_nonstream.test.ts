@@ -279,6 +279,16 @@ describe("RM-10 Ollama non-stream", () => {
         text: "{\"error\":\"invalid logprobs\"}",
       },
       {
+        body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "stop", logprobs: {} }] }),
+        status: 502,
+        text: "{\"error\":\"invalid logprobs\"}",
+      },
+      {
+        body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "stop", logprobs: { content: null } }] }),
+        status: 502,
+        text: "{\"error\":\"invalid logprobs\"}",
+      },
+      {
         body: JSON.stringify({ choices: [{ index: 0, message: { content: "" }, finish_reason: "surprise" }] }),
         status: 502,
         text: "{\"error\":\"invalid upstream response\"}",
@@ -319,6 +329,23 @@ describe("RM-10 Ollama non-stream", () => {
       expect(await response.text()).toBe("{\"error\":\"upstream request failed\"}");
     } finally {
       await close();
+    }
+
+    const oversizedBackend = new NonstreamBackend();
+    oversizedBackend.responseBody = new TextEncoder().encode(JSON.stringify({
+      choices: [{ index: 0, message: { content: "x".repeat(defaultRuntimeConfigSnapshot().limits.nonstreamBodyBytes) } }],
+    }));
+    const oversized = await ollamaGateway(oversizedBackend);
+    try {
+      const response = await oversized.gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt", stream: false, messages: [{ role: "user", content: "hi" }] }),
+      }));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toBe("{\"error\":\"invalid upstream response\"}");
+    } finally {
+      await oversized.close();
     }
 
     const overLimitBackend = new NonstreamBackend();
