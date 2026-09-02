@@ -25,6 +25,7 @@ import { SqliteResponsesHistory } from "../../../src/protocols/responses/history
 const encoder = new TextEncoder();
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -384,6 +385,25 @@ describe("RM-18 CLI commands", () => {
       throw new DOMException("aborted", "AbortError");
     });
     await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ name: "AbortError" });
+
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", async () => await new Promise<Response>(() => undefined));
+    const timedOut = expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ code: "timeout" } satisfies Partial<TokenRefreshError>);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await timedOut;
+    vi.useRealTimers();
+
+    let cancelled = false;
+    vi.stubGlobal("fetch", async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1_048_577));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }), { status: 200 }));
+    await expect(refreshCopilotToken("gho_secret")).rejects.toMatchObject({ code: "network" } satisfies Partial<TokenRefreshError>);
+    expect(cancelled).toBe(true);
   });
 
   it("parses Copilot endpoint discovery success and falls back on malformed responses", async () => {

@@ -95,7 +95,7 @@ function parseGlobal(argv: readonly string[]): { readonly json: boolean; readonl
       index += 1;
       continue;
     }
-    if (token === "--help" || token === "-h") {
+    if (token === "--help") {
       return { json, ...(dataDir === undefined ? {} : { dataDir }), rest: ["--help"] };
     }
     if (token.startsWith("-")) {

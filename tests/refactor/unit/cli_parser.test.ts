@@ -135,6 +135,7 @@ describe("RM-18 CLI parser", () => {
       ["accounts", "use"],
       ["status", "--port", "31400"],
       ["auth", "login", "--host"],
+      ["-h"],
       ["--bogus", "status"],
     ]) {
       expect(() => parseCli(argv, { homedir: home }), argv.join(" ")).toThrow(CliError);
