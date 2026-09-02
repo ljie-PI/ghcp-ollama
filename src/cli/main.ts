@@ -24,10 +24,10 @@ export interface RunCliOptions {
 export async function runCli(options: RunCliOptions = {}): Promise<number> {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
-  let json = false;
+  const argv = options.argv ?? process.argv.slice(2);
+  let json = argv.includes("--json");
   let client: ControlClient | undefined;
   try {
-    const argv = options.argv ?? process.argv.slice(2);
     const env = options.env ?? process.env;
     const parsed = parseCli(argv, { env, ...(options.homedir === undefined ? {} : { homedir: options.homedir }) });
     json = parsed.json;

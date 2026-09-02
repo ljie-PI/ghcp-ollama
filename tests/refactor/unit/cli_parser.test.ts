@@ -47,6 +47,8 @@ describe("RM-18 CLI parser", () => {
       homedir: home,
     }).dataDir).toBe(path.resolve("cli-dir"));
     expect(parseCli(["status"], { homedir: home }).dataDir).toBe(path.join(home, ".ghc-gateway"));
+    expect(() => parseCli(["--data-dir", "", "status"], { homedir: home })).toThrow(CliError);
+    expect(() => parseCli(["status"], { env: { GHC_GATEWAY_DATA_DIR: "" }, homedir: home })).toThrow(CliError);
   });
 
   it("parses serve and start startup-only flags", () => {

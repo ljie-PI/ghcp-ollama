@@ -58,6 +58,10 @@ describe("RM-18 CLI commands", () => {
     expect(errorOut.chunks).toBe("");
     expect(errorErr.chunks).toBe(`${JSON.stringify({ ok: false, error: { code: "revision_conflict", message: "revision conflict" } })}\n`);
 
+    const parseErr = new CaptureStream();
+    expect(await runCli({ argv: ["--json", "--bogus"], homedir: "Q:/tmp/home", stdout: new CaptureStream(), stderr: parseErr, controlClient: client })).toBe(2);
+    expect(parseErr.chunks).toBe(`${JSON.stringify({ ok: false, error: { code: "usage_error", message: "usage error" } })}\n`);
+
     const helpOut = new CaptureStream();
     expect(await runCli({ argv: ["--json", "auth", "--help"], homedir: "Q:/tmp/home", stdout: helpOut, stderr: new CaptureStream(), controlClient: client })).toBe(0);
     expect(JSON.parse(helpOut.chunks)).toMatchObject({ ok: true, data: { help: expect.stringContaining("Usage: ghcg") } });
@@ -151,6 +155,7 @@ describe("RM-18 CLI commands", () => {
       };
       await expect(client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "revision_conflict" });
       expect(await client.request("config.get", { key: "admission.activeMax" }, { dataDir: "unused" })).toMatchObject({ key: "admission.activeMax", value: 4 });
+      await expect(client.request("config.get", { key: "toString" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
       expect(await client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "unused" })).toMatchObject({ config: { admission: { activeMax: 2, queueMax: 16 } } });
       const readSnapshot = harness.runtimeConfig.readSnapshot.bind(harness.runtimeConfig);
       let forceConflict = true;

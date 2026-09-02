@@ -13,3 +13,5 @@ RM-18 integrates the non-default foreground runtime and CLI against modules deli
 These changes do not add legacy aliases, do not alter default published entrypoints, and are covered by RM-18 targeted CLI/foreground integration tests plus existing refactor gates.
 
 RM-19 remains responsible for protected identity-file ACL/reparse-point validation, process-start identity verification, detached lifecycle (`start`/`restart`), and any additional authenticated control operations. RM-18's default HTTP control client only consumes an already-published endpoint enough to exercise the CLI transport seam and fails closed when it cannot locate one.
+
+Because RM-19 owns daemon creation and verified restart, RM-18 returns `unavailable` for `start` and `restart` instead of pretending to manage a daemon. This is a deliberate fail-closed seam, not a lifecycle implementation.

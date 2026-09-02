@@ -70,7 +70,7 @@ export function parseCli(argv: readonly string[], options: ParseCliOptions = {})
 }
 
 export function resolveCliDataDir(cliDataDir: string | undefined, env: NodeJS.ProcessEnv, homedir: string): string {
-  const selected = firstDefined(cliDataDir, env.GHC_GATEWAY_DATA_DIR, path.join(homedir, ".ghc-gateway"));
+  const selected = cliDataDir ?? env.GHC_GATEWAY_DATA_DIR ?? path.join(homedir, ".ghc-gateway");
   if (selected.trim() === "") {
     throw new CliError("validation_error");
   }
@@ -343,13 +343,4 @@ function readValue(tokens: readonly string[], index: number): string {
     throw new CliError("usage_error");
   }
   return value;
-}
-
-function firstDefined(...values: Array<string | undefined>): string {
-  for (const value of values) {
-    if (value !== undefined && value !== "") {
-      return value;
-    }
-  }
-  throw new CliError("validation_error");
 }

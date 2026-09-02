@@ -45,6 +45,9 @@ export async function refreshCopilotToken(
       expiresAtMs: tokenExpiry(body),
     };
   } catch (error: unknown) {
+    if (timeout.timedOut()) {
+      throw new TokenRefreshError("timeout", "copilot token refresh failed");
+    }
     if (isAbortError(error)) {
       throw error;
     }

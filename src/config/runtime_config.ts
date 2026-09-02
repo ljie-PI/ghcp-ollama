@@ -106,7 +106,7 @@ export class RuntimeConfigStore {
 export { RUNTIME_CONFIG_RANGES, type RuntimeConfigKey };
 
 export function isRuntimeConfigKey(key: string): key is RuntimeConfigKey {
-  return key in RUNTIME_CONFIG_RANGES;
+  return Object.hasOwn(RUNTIME_CONFIG_RANGES, key);
 }
 
 export function readRuntimeConfigNumber(config: RuntimeConfigSnapshot, key: RuntimeConfigKey): number {
