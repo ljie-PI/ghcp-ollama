@@ -1,0 +1,176 @@
+import { defaultRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "../../../src/config/schema.js";
+import type { AdminModuleDependencies } from "../../../src/admin/routes.js";
+import type { AdminMonitorEvent, AdminTelemetry } from "../../../src/telemetry/admin.js";
+import type { AdminModule, Gateway } from "../../../src/gateway/create_gateway.js";
+
+const ORIGIN = "http://127.0.0.1:31400";
+
+export interface TestAdminDependencies extends AdminModuleDependencies {
+  readonly now: { value: number };
+  readonly emitted: { publish(event: AdminMonitorEvent): void };
+  readonly calls: string[];
+}
+
+export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdminDependencies {
+  const calls: string[] = [];
+  const listeners = new Set<(event: Readonly<AdminMonitorEvent>) => void>();
+  let config = defaultRuntimeConfigSnapshot();
+  let configRevision = 1;
+  let historyRevision = 0;
+  const account = {
+    accountId: "github.com:42",
+    revision: 3,
+    host: "github.com",
+    userId: "42",
+    login: "octocat",
+    displayName: "Octocat",
+    state: "active" as const,
+    authenticatedAtMs: now.value - 1_000,
+  };
+  let defaultRevision = 2;
+  let defaultAccountId: string | null = account.accountId;
+  let preference: {
+    readonly accountId: string;
+    readonly revision: number;
+    readonly modelId: string;
+    readonly validity: "valid" | "invalid";
+    readonly catalogGeneration: number;
+  } | null = null;
+  const telemetry: AdminTelemetry = {
+    async queryUsage(query, signal) {
+      calls.push(`usage:${query.limit}`);
+      signal.throwIfAborted();
+      return {
+        items: [], nextCursor: null,
+        totals: { requestCount: 0, errorCount: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0, latencySumMs: 0, latencyMaxMs: 0 },
+      };
+    },
+    async queryEvents(query, signal) {
+      calls.push(`events:${query.limit}`);
+      signal.throwIfAborted();
+      return { items: [], nextCursor: null };
+    },
+    async replayEvents(afterEventId, signal) {
+      signal.throwIfAborted();
+      return afterEventId === "1"
+        ? { found: true, latestEventId: "2", items: [operationalEvent("2")] }
+        : { found: false, latestEventId: "2", items: [] };
+    },
+    snapshot() {
+      return {
+        storage: { usageBucketCount: 2, eventCount: 3 },
+        pendingMutations: 1,
+        droppedUsageUpdates: 4,
+        droppedOperationalEvents: 5,
+        performance: {
+          status: "healthy", startedAtMs: null,
+          metrics: {
+            bufferedMs: { p95: null, status: "insufficient_data" },
+            eventMs: { p95: null, status: "insufficient_data" },
+            checkpointMs: { p95: null, status: "insufficient_data" },
+            eventLoopMs: { p95: null, status: "insufficient_data" },
+          },
+        },
+      };
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+  return {
+    now,
+    calls,
+    emitted: { publish: (event) => { for (const listener of listeners) listener(event); } },
+    accounts: {
+      list: () => [account],
+      defaultState: () => ({ defaultRevision, defaultAccountId }),
+      use: async (accountId, expectedRevision, signal) => {
+        signal?.throwIfAborted();
+        if (expectedRevision !== defaultRevision) throw coded("revision_conflict");
+        if (accountId !== account.accountId) throw coded("not_found");
+        defaultRevision += 1;
+        defaultAccountId = accountId;
+        return defaultRevision;
+      },
+      remove: async (accountId, expectedRevision, signal) => {
+        signal?.throwIfAborted();
+        if (accountId !== account.accountId) throw coded("not_found");
+        if (expectedRevision !== account.revision) throw coded("revision_conflict");
+        return { ...account, revision: 5, state: "removed" };
+      },
+    },
+    deviceFlows: {
+      async start(host, signal) {
+        signal?.throwIfAborted();
+        calls.push(`device-start:${host}`);
+        return { flowId: "flow-1", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAtMs: now.value + 900_000, pollIntervalSeconds: 5 };
+      },
+      async poll(flowId, signal) {
+        signal?.throwIfAborted();
+        calls.push(`device-poll:${flowId}`);
+        return { status: "pending" };
+      },
+    },
+    catalog: {
+      async get(accountId, signal) {
+        signal.throwIfAborted();
+        calls.push(`catalog:${accountId}`);
+        return { accountId, generation: 7, fetchedAt: "2027-01-15T08:00:00.000Z", models: [{ id: "gpt-test", name: "GPT Test", vendor: "OpenAI" }] };
+      },
+      invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
+    },
+    preferences: {
+      get: () => preference,
+      set: (accountId, candidate, expectedRevision) => {
+        if (expectedRevision !== (preference?.revision ?? 0)) throw coded("revision_conflict");
+        preference = { accountId, revision: expectedRevision + 1, modelId: candidate.modelId, validity: "valid", catalogGeneration: candidate.catalogGeneration };
+        return preference;
+      },
+      markInvalidIfMissing: () => preference,
+    },
+    runtimeConfig: {
+      readSnapshot: () => config,
+      readRevision: () => configRevision,
+      update: (candidate, expectedRevision) => {
+        if (expectedRevision !== configRevision) throw coded("revision_conflict");
+        config = structuredClone(candidate) as RuntimeConfigSnapshot;
+        configRevision += 1;
+        return config;
+      },
+    },
+    history: {
+      inspect: () => ({ revision: historyRevision, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512 }),
+      clear: (expectedRevision) => {
+        if (expectedRevision !== historyRevision) throw coded("revision_conflict");
+        historyRevision += 1;
+      },
+    },
+    telemetry,
+    runtimeStatus: {
+      snapshot: () => ({ version: "test", uptimeMs: 1234, daemon: { managed: true, pid: 123, startedAt: "2027-01-15T07:00:00.000Z" } }),
+    },
+    nowMs: () => now.value,
+  };
+}
+
+export function operationalEvent(eventId: string) {
+  return { eventId, occurredAt: "2027-01-15T08:00:00.000Z", kind: "gateway_started" as const, severity: "info" as const, metadata: { status: "ready" } };
+}
+
+export async function login(gateway: Gateway, admin: AdminModule): Promise<{ readonly cookie: string; readonly csrf: string }> {
+  const minted = admin.mintBootstrap();
+  if (minted.kind !== "issued") throw new Error("bootstrap was not issued");
+  const response = await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/bootstrap`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: ORIGIN },
+    body: JSON.stringify({ token: minted.token }),
+  }));
+  if (response.status !== 200) throw new Error("bootstrap exchange failed");
+  const body = await response.json() as { data: { csrfToken: string } };
+  return { cookie: response.headers.get("set-cookie") ?? "", csrf: body.data.csrfToken };
+}
+
+function coded(code: string): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
+}

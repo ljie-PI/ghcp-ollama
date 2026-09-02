@@ -21,6 +21,13 @@ export interface PerformanceSnapshot {
   };
 }
 
+export interface PerformanceEvaluation {
+  readonly snapshot: PerformanceSnapshot;
+  readonly transition: "enter" | "clear" | null;
+}
+
+export type PerformanceObserver = (evaluation: Readonly<PerformanceEvaluation>) => void;
+
 export class PerformanceWindows {
   private readonly buffered: number[] = [];
   private readonly event: number[] = [];
@@ -31,7 +38,10 @@ export class PerformanceWindows {
   private status: PerformanceStatus = "healthy";
   private degradedSinceMs: number | null = null;
 
-  constructor(private readonly nowMs: () => number = Date.now) {}
+  constructor(
+    private readonly nowMs: () => number = Date.now,
+    private readonly observer?: PerformanceObserver,
+  ) {}
 
   observeBuffered(ms: number): void {
     this.buffered.push(ms);
@@ -49,7 +59,7 @@ export class PerformanceWindows {
     this.eventLoop.push(ms);
   }
 
-  evaluateWindow(): { readonly snapshot: PerformanceSnapshot; readonly transition: "enter" | "clear" | null } {
+  evaluateWindow(): PerformanceEvaluation {
     const buffered = summarize(this.buffered, THRESHOLDS.bufferedMs);
     const event = summarize(this.event, THRESHOLDS.eventMs);
     const checkpoint = summarize(this.checkpoint, THRESHOLDS.checkpointMs);
@@ -84,7 +94,7 @@ export class PerformanceWindows {
       }
     }
 
-    return {
+    const evaluation: PerformanceEvaluation = {
       snapshot: {
         status: this.status,
         startedAtMs: this.degradedSinceMs,
@@ -97,6 +107,12 @@ export class PerformanceWindows {
       },
       transition,
     };
+    try {
+      this.observer?.(evaluation);
+    } catch {
+      // Monitoring observers cannot change performance state transitions.
+    }
+    return evaluation;
   }
 }
 

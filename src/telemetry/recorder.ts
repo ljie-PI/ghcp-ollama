@@ -40,18 +40,36 @@ export interface UsageUpdate {
 
 export type OperationalEventKind =
   | "gateway_started"
+  | "gateway_stopped"
+  | "request_failed"
+  | "account_authenticated"
+  | "account_removed"
+  | "default_account_changed"
+  | "preferred_model_changed"
+  | "runtime_config_changed"
+  | "catalog_refreshed"
   | "performance_degraded"
   | "performance_recovered"
+  | "telemetry_dropped"
   | "metadata_rejected"
-  | "daemon_start_failed"
-  | "config_updated";
+  | "daemon_start_failed";
 
 export interface OperationalEventInput {
   readonly occurredAtMs: number;
-  readonly kind: OperationalEventKind;
+  readonly kind: OperationalEventKind | "config_updated";
   readonly severity: "info" | "warning" | "error";
   readonly metadata?: unknown;
 }
+
+export interface RecordedOperationalEvent {
+  readonly eventId: string;
+  readonly occurredAtMs: number;
+  readonly kind: OperationalEventKind;
+  readonly severity: "info" | "warning" | "error";
+  readonly metadata: Readonly<Record<string, string | number | boolean | null>>;
+}
+
+export type TelemetryRecorderObserver = (event: Readonly<RecordedOperationalEvent>) => void;
 
 interface PendingUsage {
   readonly type: "usage";
@@ -67,7 +85,7 @@ interface PendingEvent {
   readonly seq: number;
   event: OperationalEventInput;
   json: string;
-  kind: string;
+  kind: OperationalEventKind;
 }
 
 type Pending = PendingUsage | PendingEvent;
@@ -84,6 +102,7 @@ export class TelemetryRecorder {
     private readonly usageRowCap = USAGE_ROW_CAP,
     private readonly eventRowCap = EVENT_ROW_CAP,
     private readonly queueCap = TELEMETRY_QUEUE_CAP,
+    private readonly observer?: TelemetryRecorderObserver,
   ) {
     this.cleanup(this.nowMs());
   }
@@ -121,7 +140,9 @@ export class TelemetryRecorder {
   recordEvent(input: OperationalEventInput): void {
     const sanitized = sanitizeMetadata(input.metadata);
     const encoded = metadataJsonOrRejected(sanitized);
-    const kind: OperationalEventKind = encoded.kind === "metadata_rejected" ? "metadata_rejected" : input.kind;
+    const kind: OperationalEventKind = encoded.kind === "metadata_rejected"
+      ? "metadata_rejected"
+      : input.kind === "config_updated" ? "runtime_config_changed" : input.kind;
     const event: OperationalEventInput = {
       occurredAtMs: input.occurredAtMs,
       kind,
@@ -136,7 +157,7 @@ export class TelemetryRecorder {
       this.pending.splice(oldestEvent, 1);
       this.droppedEvents = saturate(this.droppedEvents + 1);
     }
-    this.pending.push({ type: "event", seq: this.nextSeq(), event, json: encoded.json, kind: event.kind });
+    this.pending.push({ type: "event", seq: this.nextSeq(), event, json: encoded.json, kind });
   }
 
   async flush(signal?: AbortSignal): Promise<void> {
@@ -144,19 +165,32 @@ export class TelemetryRecorder {
       return;
     }
     const batch = this.pending.splice(0, this.pending.length);
+    const recordedEvents: RecordedOperationalEvent[] | null = this.observer === undefined ? null : [];
     const now = this.nowMs();
     const tx = this.database.transaction(() => {
       for (const item of batch) {
         if (item.type === "usage") {
           this.upsertUsage(item.update, item.latencySumMs, item.latencyMaxMs);
         } else {
-          this.insertEvent(item);
+          const recorded = this.insertEvent(item, recordedEvents !== null);
+          if (recorded !== null) {
+            recordedEvents?.push(recorded);
+          }
         }
       }
       this.persistDrops(now);
       this.cleanup(now);
     });
     tx();
+    if (recordedEvents !== null) {
+      for (const event of recordedEvents) {
+        try {
+          this.observer?.(event);
+        } catch {
+          // Telemetry observers cannot affect an already committed telemetry batch.
+        }
+      }
+    }
   }
 
   droppedCounters(): { readonly droppedUsageUpdates: number; readonly droppedOperationalEvents: number } {
@@ -164,8 +198,8 @@ export class TelemetryRecorder {
       "SELECT dropped_usage_updates, dropped_operational_events FROM telemetry_state WHERE singleton_id = 1",
     ).get() as { dropped_usage_updates: number; dropped_operational_events: number } | undefined;
     return {
-      droppedUsageUpdates: this.droppedUsage + (row?.dropped_usage_updates ?? 0),
-      droppedOperationalEvents: this.droppedEvents + (row?.dropped_operational_events ?? 0),
+      droppedUsageUpdates: saturate(this.droppedUsage + (row?.dropped_usage_updates ?? 0)),
+      droppedOperationalEvents: saturate(this.droppedEvents + (row?.dropped_operational_events ?? 0)),
     };
   }
 
@@ -209,10 +243,20 @@ export class TelemetryRecorder {
     );
   }
 
-  private insertEvent(item: PendingEvent): void {
-    this.database.prepare(
+  private insertEvent(item: PendingEvent, createObserverDto: boolean): RecordedOperationalEvent | null {
+    const result = this.database.prepare(
       "INSERT INTO operational_events (occurred_at_ms, kind, severity, metadata_json) VALUES (?, ?, ?, ?)",
     ).run(item.event.occurredAtMs, item.kind, item.event.severity, item.json);
+    if (!createObserverDto) {
+      return null;
+    }
+    return {
+      eventId: String(result.lastInsertRowid),
+      occurredAtMs: item.event.occurredAtMs,
+      kind: item.kind,
+      severity: item.event.severity,
+      metadata: parseRecordedMetadata(item.json),
+    };
   }
 
   private persistDrops(now: number): void {
@@ -289,4 +333,9 @@ function mergeUsage(left: UsageUpdate, right: UsageUpdate): UsageUpdate {
 
 function saturate(value: number): number {
   return Math.min(value, Number.MAX_SAFE_INTEGER);
+}
+
+function parseRecordedMetadata(json: string): Readonly<Record<string, string | number | boolean | null>> {
+  const parsed = JSON.parse(json) as Record<string, string | number | boolean | null>;
+  return parsed;
 }

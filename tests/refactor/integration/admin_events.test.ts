@@ -1,65 +1,108 @@
 import { describe, expect, it } from "vitest";
-import { AdminApiError, type AdminOperationalEvent, type AdminStatus } from "../../../src/admin/api.js";
-import { AdminEventStreamHub, ADMIN_EVENT_SUBSCRIBER_CAP } from "../../../src/admin/events.js";
+import { createAdminModule } from "../../../src/admin/routes.js";
+import { ADMIN_EVENT_SUBSCRIBER_CAP } from "../../../src/admin/events.js";
+import type { AdminModule } from "../../../src/gateway/create_gateway.js";
+import { createGateway, type Gateway } from "../../../src/gateway/create_gateway.js";
+import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
+import { parseStartupConfig } from "../../../src/config/startup_config.js";
+import { adminDependencies, login, operationalEvent, type TestAdminDependencies } from "../contract/admin_test_harness.js";
 
-const status: AdminStatus = {
-  version: "test",
-  uptimeMs: 1,
-  health: "ok",
-  performance: "healthy",
-  performanceMetrics: [],
-  admission: { activeRequests: 0, activeStreams: 0, queuedRequests: 0, activeMax: 4, queueMax: 16 },
-  storage: { historyCount: 0, usageBucketCount: 0, eventCount: 0 },
-  telemetry: { pendingMutations: 0, droppedUsageUpdates: 0, droppedOperationalEvents: 0 },
-  daemon: { managed: false },
-};
+const ORIGIN = "http://127.0.0.1:31400";
 
-describe("RM-20 admin events stream", () => {
-  it("replays, resets, caps subscribers, and cancels only one subscriber", async () => {
-    const event: AdminOperationalEvent = {
-      eventId: "2",
-      occurredAt: "2026-09-02T00:00:00.000Z",
-      kind: "gateway_started",
-      severity: "info",
-      metadata: {},
-    };
-    const hub = new AdminEventStreamHub({
-      status: () => status,
-      replayAfter: (eventId) => eventId === "1"
-        ? { found: true, latestEventId: "2", items: [event] }
-        : { found: false, latestEventId: "2", items: [] },
-    }, ((_handler: () => void) => 0 as unknown as NodeJS.Timeout) as typeof setInterval, (() => undefined) as typeof clearInterval);
+describe("RM-20 Admin event stream", () => {
+  it("emits exact replay, performance, operational, and reset frames", async () => {
+    const harness = await createHarness();
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const replay = await open(harness.gateway, session.cookie, "1");
+      const reader = replay.body!.getReader();
+      expect(decode((await reader.read()).value)).toBe(
+        `id: 2\nevent: operational\ndata: ${JSON.stringify({ kind: "operational", event: operationalEvent("2") })}\n\n`,
+      );
+      expect(decode((await reader.read()).value)).toContain("event: performance\ndata: {\"kind\":\"performance\",\"status\":");
+      harness.dependencies.emitted.publish({ kind: "operational", event: operationalEvent("3") });
+      expect(decode((await reader.read()).value)).toBe(
+        `id: 3\nevent: operational\ndata: ${JSON.stringify({ kind: "operational", event: operationalEvent("3") })}\n\n`,
+      );
+      await reader.cancel();
 
-    const first = hub.open("1");
-    expect(first.status).toBe(200);
-    expect(first.headers.get("cache-control")).toBe("no-store");
-    const second = hub.open(null);
-    expect(hub.activeSubscribers()).toBe(2);
-    await first.body?.cancel();
-    expect(hub.activeSubscribers()).toBe(1);
-    await second.body?.cancel();
-    expect(hub.activeSubscribers()).toBe(0);
-
-    expect(() => hub.open("bad-id")).toThrow(AdminApiError);
-    const opened: Response[] = [];
-    for (let index = 0; index < ADMIN_EVENT_SUBSCRIBER_CAP; index += 1) {
-      opened.push(hub.open(null));
+      const reset = await open(harness.gateway, session.cookie, "99");
+      const resetReader = reset.body!.getReader();
+      expect(decode((await resetReader.read()).value)).toBe(
+        "event: reset\ndata: {\"kind\":\"reset\",\"reason\":\"history_unavailable\",\"latestEventId\":\"2\"}\n\n",
+      );
+      await resetReader.cancel();
+    } finally {
+      await harness.close();
     }
-    expect(() => hub.open(null)).toThrow(AdminApiError);
-    await Promise.all(opened.map(async (response) => await response.body?.cancel()));
+  });
 
-    const reset = hub.open("99");
-    const text = await readSome(reset);
-    expect(text).toContain("event: reset");
+  it("rejects malformed Last-Event-ID, caps subscribers, and closes streams on module close", async () => {
+    const harness = await createHarness();
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      expect((await open(harness.gateway, session.cookie, "01")).status).toBe(400);
+      const responses: Response[] = [];
+      for (let index = 0; index < ADMIN_EVENT_SUBSCRIBER_CAP; index += 1) {
+        responses.push(await open(harness.gateway, session.cookie));
+      }
+      expect((await open(harness.gateway, session.cookie)).status).toBe(503);
+      harness.admin.close();
+      for (const response of responses) {
+        const reader = response.body!.getReader();
+        await reader.read();
+        expect((await reader.read()).done).toBe(true);
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("emits a 15-second heartbeat only when no event is queued", async () => {
+    let heartbeat: (() => void) | undefined;
+    const base = adminDependencies();
+    const dependencies: TestAdminDependencies = { ...base,
+      setInterval: ((handler: TimerHandler) => {
+        heartbeat = handler as () => void;
+        return 1 as unknown as NodeJS.Timeout;
+      }) as unknown as typeof setInterval,
+      clearInterval: (() => undefined) as typeof clearInterval,
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = await open(harness.gateway, session.cookie);
+      const reader = response.body!.getReader();
+      await reader.read();
+      heartbeat?.();
+      expect(decode((await reader.read()).value)).toBe(": keep-alive\n\n");
+      await reader.cancel();
+    } finally {
+      await harness.close();
+    }
   });
 });
 
-async function readSome(response: Response): Promise<string> {
-  const reader = response.body?.getReader();
-  if (reader === undefined) {
-    return "";
-  }
-  const first = await reader.read();
-  await reader.cancel();
-  return new TextDecoder().decode(first.value);
+async function createHarness(dependencies = adminDependencies()): Promise<{
+  readonly gateway: Gateway;
+  readonly admin: AdminModule;
+  readonly dependencies: TestAdminDependencies;
+  readonly close: () => Promise<void>;
+}> {
+  let token = 0;
+  const admin = createAdminModule({ ...dependencies, createToken: () => `event-token-${++token}` });
+  const gateway = await createGateway({
+    startup: parseStartupConfig([], {}, { homedir: "Q:/tmp/rm20-events" }), runtime: defaultRuntimeConfigSnapshot(),
+  }, [], { admin, createRequestId: () => "req_admin_events" });
+  return { gateway, admin, dependencies, close: async () => gateway.close() };
+}
+
+async function open(gateway: Gateway, cookie: string, lastEventId?: string): Promise<Response> {
+  const headers = new Headers({ cookie });
+  if (lastEventId !== undefined) headers.set("last-event-id", lastEventId);
+  return await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/events/stream`, { headers }));
+}
+
+function decode(value: Uint8Array | undefined): string {
+  return new TextDecoder().decode(value);
 }

@@ -1,31 +1,21 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { RuntimeConfigSchema } from "../config/schema.js";
-import type { DecodedHttpRequest, RouteRegistration } from "../gateway/hono_app.js";
-import type { GatewayFailure } from "../gateway/failures.js";
-import type { RequestScope } from "../gateway/request_scope.js";
 import type {
-  DefaultAdminManagementApi} from "./api.js";
+  AdminBootstrapResult,
+  AdminModule,
+  AdminRequestContext,
+} from "../gateway/create_gateway.js";
+import type { AdminEventQuery, AdminUsageQuery } from "../telemetry/admin.js";
+import { AdminManagementApi, AdminApiError, mapAdminError, type AdminApiDependencies } from "./api.js";
 import {
-  AdminApiError,
-  mapAdminError,
-  type AdminEventQuery,
-  type AdminUsageQuery,
-} from "./api.js";
-import type {
-  AdminAuth} from "./auth.js";
-import {
+  AdminAuth,
   AdminAuthError,
   readSessionCookie,
   serializeExpiredSessionCookie,
   serializeSessionCookie,
 } from "./auth.js";
 import { AdminEventStreamHub } from "./events.js";
-
-const JSON_HEADERS = {
-  "Content-Type": "application/json; charset=utf-8",
-  "Cache-Control": "no-store",
-} as const;
 
 const BootstrapSchema = Type.Object({ token: Type.String({ minLength: 1 }) }, { additionalProperties: false });
 const DeviceFlowStartSchema = Type.Object({ host: Type.String({ minLength: 1 }) }, { additionalProperties: false });
@@ -45,411 +35,507 @@ const RuntimeConfigUpdateSchema = Type.Object({
   config: RuntimeConfigSchema,
 }, { additionalProperties: false });
 
-const USAGE_PROTOCOLS = new Set(["openai_chat", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]);
-const USAGE_OUTCOMES = new Set(["success", "client_error", "authentication_error", "overloaded", "upstream_error", "timeout", "aborted", "internal_error"]);
-const EVENT_SEVERITIES = new Set(["info", "warning", "error"]);
+const PROTOCOLS = new Set(["openai_chat", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]);
+const OUTCOMES = new Set(["success", "client_error", "authentication_error", "overloaded", "upstream_error", "timeout", "aborted", "internal_error"]);
 const EVENT_KINDS = new Set([
-  "gateway_started",
-  "gateway_stopped",
-  "request_failed",
-  "account_authenticated",
-  "account_removed",
-  "default_account_changed",
-  "preferred_model_changed",
-  "runtime_config_changed",
-  "catalog_refreshed",
-  "performance_degraded",
-  "performance_recovered",
-  "telemetry_dropped",
-  "metadata_rejected",
-  "daemon_start_failed",
-  "config_updated",
+  "gateway_started", "gateway_stopped", "request_failed", "account_authenticated", "account_removed",
+  "default_account_changed", "preferred_model_changed", "runtime_config_changed", "catalog_refreshed",
+  "performance_degraded", "performance_recovered", "telemetry_dropped", "metadata_rejected", "daemon_start_failed",
 ]);
+const SEVERITIES = new Set(["info", "warning", "error"]);
 
-export interface AdminRouteDependencies {
-  readonly auth: AdminAuth;
-  readonly api: DefaultAdminManagementApi;
-  readonly origin?: string;
-  readonly eventHub?: AdminEventStreamHub;
+export interface AdminModuleDependencies extends AdminApiDependencies {
   readonly nowMs?: () => number;
+  readonly createToken?: () => string;
+  readonly setInterval?: typeof setInterval;
+  readonly clearInterval?: typeof clearInterval;
 }
 
-export function createAdminRoutes(dependencies: AdminRouteDependencies): readonly RouteRegistration[] {
-  const origin = dependencies.origin ?? "http://127.0.0.1:31400";
-  const eventHub = dependencies.eventHub ?? new AdminEventStreamHub(dependencies.api);
-  const nowMs = dependencies.nowMs ?? Date.now;
+export function createAdminModule(dependencies: Readonly<AdminModuleDependencies>): AdminModule {
+  const api = new AdminManagementApi(dependencies);
+  const auth = new AdminAuth(dependencies.nowMs ?? Date.now, dependencies.createToken);
+  const eventHub = new AdminEventStreamHub(
+    dependencies.telemetry,
+    api,
+    dependencies.setInterval,
+    dependencies.clearInterval,
+  );
+  let closed = false;
 
-  return [
-    adminRoute("POST", "/admin/api/v1/auth/bootstrap", "admin-json-object", async (request, scope) => {
-      requireExactOrigin(request.headers, origin);
-      const body = checked(BootstrapSchema, request.adminBody);
-      const session = dependencies.auth.exchangeBootstrapToken(body.token);
-      const headers = successHeaders(scope.requestId);
-      headers.set("Set-Cookie", serializeSessionCookie(session.sessionId, session.absoluteExpiresAtMs));
-      return json(200, { data: dependencies.auth.metadata(session) }, headers);
-    }),
-    adminRoute("GET", "/admin/api/v1/auth/session", "none", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      return json(200, { data: dependencies.auth.metadata(session) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("POST", "/admin/api/v1/auth/logout", "none", async (request, scope) => {
-      const sessionId = readSessionCookie(request.headers);
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      dependencies.auth.logout(sessionId);
-      const headers = successHeaders(scope.requestId);
-      headers.set("Set-Cookie", serializeExpiredSessionCookie());
-      return new Response(null, { status: 204, headers });
-    }),
-    adminRoute("GET", "/admin/api/v1/status", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      return json(200, { data: dependencies.api.status() }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/usage", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      return json(200, { data: dependencies.api.usage(parseUsageQuery(request.url, nowMs())) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/accounts", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      return json(200, { data: dependencies.api.accounts() }, successHeaders(scope.requestId));
-    }),
-    adminRoute("POST", "/admin/api/v1/device-flows", "admin-json-object", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      const body = checked(DeviceFlowStartSchema, request.adminBody);
-      return json(201, { data: await dependencies.api.startDeviceFlow(body.host) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/device-flows/:flowId", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      const flowId = pathTail(request.url.pathname);
-      return json(200, { data: await dependencies.api.pollDeviceFlow(flowId) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("DELETE", "/admin/api/v1/accounts/:accountId", "admin-json-object", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      const body = checked(ExpectedRevisionSchema, request.adminBody);
-      return json(200, { data: await dependencies.api.removeAccount(pathTail(request.url.pathname), body.expectedRevision) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("PUT", "/admin/api/v1/accounts/default", "admin-json-object", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      const body = checked(DefaultAccountSchema, request.adminBody);
-      return json(200, { data: dependencies.api.useDefaultAccount(body.accountId, body.expectedRevision) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/models", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      const accountId = singleOptionalQuery(request.url, new Set(["accountId"]), "accountId");
-      return json(200, { data: await dependencies.api.models(accountId) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("POST", "/admin/api/v1/models/refresh", "admin-json-object", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      const body = checked(RefreshModelsSchema, request.adminBody);
-      return json(200, { data: await dependencies.api.refreshModels(body.accountId) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("PUT", "/admin/api/v1/models/preferred", "admin-json-object", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      const body = checked(PreferredModelSchema, request.adminBody);
-      return json(200, { data: await dependencies.api.setPreferredModel(body.accountId, body.modelId, body.expectedRevision) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/config", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      return json(200, { data: dependencies.api.runtimeConfig() }, successHeaders(scope.requestId));
-    }),
-    adminRoute("PUT", "/admin/api/v1/config", "admin-json-object", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      const body = checked(RuntimeConfigUpdateSchema, request.adminBody);
-      return json(200, { data: dependencies.api.updateRuntimeConfig(body.config, body.expectedRevision) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/history", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      return json(200, { data: dependencies.api.history() }, successHeaders(scope.requestId));
-    }),
-    adminRoute("DELETE", "/admin/api/v1/history", "admin-json-object", async (request, scope) => {
-      const session = requireSession(dependencies.auth, request.headers);
-      requireMutationSecurity(request, dependencies.auth, session, origin);
-      const body = checked(ExpectedRevisionSchema, request.adminBody);
-      return json(200, { data: dependencies.api.clearHistory(body.expectedRevision) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/events", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      return json(200, { data: dependencies.api.events(parseEventQuery(request.url)) }, successHeaders(scope.requestId));
-    }),
-    adminRoute("GET", "/admin/api/v1/events/stream", "none", async (request, scope) => {
-      requireSession(dependencies.auth, request.headers);
-      const response = eventHub.open(request.headers.get("last-event-id"));
-      response.headers.set("x-request-id", scope.requestId);
-      return response;
-    }),
-  ];
-}
-
-type AdminEndpoint = (request: Readonly<DecodedHttpRequest>, scope: Readonly<RequestScope>) => Promise<Response> | Response;
-
-function adminRoute(
-  method: RouteRegistration["method"],
-  path: string,
-  body: RouteRegistration["body"],
-  endpoint: AdminEndpoint,
-): RouteRegistration {
   return {
-    method,
-    path,
-    admission: "none",
-    body,
-    presentFailure: adminFailureFromGateway,
-    endpoint: async (request, scope) => {
+    async handle(request, context) {
+      if (closed) {
+        return failure(new AdminApiError("unauthenticated"), context.requestId);
+      }
+      const bodyLimit = dependencies.runtimeConfig.readSnapshot().limits.requestBodyBytes;
       try {
-        return await endpoint(request, scope);
+        return await dispatch(request, context, bodyLimit, auth, api, eventHub, dependencies.nowMs ?? Date.now);
       } catch (error: unknown) {
-        return adminFailure(mapRouteError(error), scope.requestId);
+        if (context.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+          return new Response(null);
+        }
+        return failure(mapRouteError(error), context.requestId);
       }
     },
-  };
-}
-
-function adminFailureFromGateway(failure: Readonly<GatewayFailure>, requestId: string): Response {
-  if (
-    failure.kind === "invalid_request"
-    || failure.kind === "body_too_large"
-    || failure.kind === "unsupported_media_type"
-  ) {
-    return adminFailure(new AdminApiError("validation_failed", "validation failed"), requestId);
-  }
-  return adminFailure(new AdminApiError("internal_error", "internal error"), requestId);
-}
-
-function mapRouteError(error: unknown): AdminApiError {
-  if (error instanceof AdminAuthError) {
-    return new AdminApiError(error.code === "capacity" ? "capacity_exceeded" : error.code === "unauthenticated" ? "unauthenticated" : "forbidden", error.code === "capacity" ? "capacity exceeded" : error.code === "unauthenticated" ? "unauthenticated" : "forbidden");
-  }
-  return mapAdminError(error);
-}
-
-function adminFailure(error: AdminApiError, requestId: string): Response {
-  const status = statusFor(error.code);
-  return json(status, {
-    error: {
-      code: error.code,
-      message: messageFor(error.code),
-      requestId,
+    mintBootstrap(): AdminBootstrapResult {
+      return closed ? { kind: "closed" } : auth.mintBootstrap();
     },
-  }, successHeaders(requestId));
-}
-
-function statusFor(code: AdminApiError["code"]): number {
-  if (code === "validation_failed") {
-    return 400;
-  }
-  if (code === "unauthenticated") {
-    return 401;
-  }
-  if (code === "forbidden") {
-    return 403;
-  }
-  if (code === "not_found") {
-    return 404;
-  }
-  if (code === "revision_conflict") {
-    return 409;
-  }
-  if (code === "capacity_exceeded") {
-    return 503;
-  }
-  return 500;
-}
-
-function messageFor(code: AdminApiError["code"]): string {
-  return code.replaceAll("_", " ");
-}
-
-function successHeaders(requestId: string): Headers {
-  return new Headers({ ...JSON_HEADERS, "x-request-id": requestId });
-}
-
-function json(status: number, body: unknown, headers: Headers): Response {
-  return new Response(JSON.stringify(body), { status, headers });
-}
-
-function checked<TSchemaValue extends TSchema>(schema: TSchemaValue, value: unknown): Static<TSchemaValue> {
-  if (!Value.Check(schema, value)) {
-    throw new AdminApiError("validation_failed", "validation failed");
-  }
-  return structuredClone(value) as Static<TSchemaValue>;
-}
-
-function requireSession(auth: AdminAuth, headers: Headers) {
-  return auth.requireSession(readSessionCookie(headers));
-}
-
-function requireMutationSecurity(
-  request: Readonly<DecodedHttpRequest>,
-  auth: AdminAuth,
-  session: ReturnType<AdminAuth["requireSession"]>,
-  origin: string,
-): void {
-  requireExactOrigin(request.headers, origin);
-  const csrf = request.headers.get("x-ghcg-csrf");
-  if (csrf === null) {
-    throw new AdminApiError("forbidden", "forbidden");
-  }
-  try {
-    auth.requireCsrf(session, csrf);
-  } catch {
-    throw new AdminApiError("forbidden", "forbidden");
-  }
-}
-
-function requireExactOrigin(headers: Headers, expected: string): void {
-  if (headers.get("origin") !== expected) {
-    throw new AdminApiError("forbidden", "forbidden");
-  }
-}
-
-function pathTail(pathname: string): string {
-  const tail = pathname.split("/").at(-1);
-  if (tail === undefined || tail.length === 0) {
-    throw new AdminApiError("not_found", "not found");
-  }
-  try {
-    return decodeURIComponent(tail);
-  } catch {
-    throw new AdminApiError("validation_failed", "validation failed");
-  }
-}
-
-function singleOptionalQuery(url: URL, allowed: ReadonlySet<string>, key: string): string | null {
-  rejectUnknownQuery(url, allowed);
-  const values = url.searchParams.getAll(key);
-  if (values.length > 1) {
-    throw new AdminApiError("validation_failed", "validation failed");
-  }
-  return values[0] ?? null;
-}
-
-function parseUsageQuery(url: URL, nowMs: number): AdminUsageQuery {
-  rejectUnknownQuery(url, new Set(["from", "to", "limit", "cursor", "accountId", "protocol", "resolvedModel", "outcome"]));
-  const fromMs = parseOptionalUtc(url, "from") ?? nowMs - 24 * 60 * 60_000;
-  const toMs = parseOptionalUtc(url, "to") ?? nowMs;
-  if (fromMs >= toMs || fromMs < nowMs - 90 * 24 * 60 * 60_000 || toMs > nowMs + 60_000) {
-    throw new AdminApiError("validation_failed", "validation failed");
-  }
-  const protocol = parseSet(url, "protocol", USAGE_PROTOCOLS);
-  const outcome = parseSet(url, "outcome", USAGE_OUTCOMES);
-  const accountId = nonempty(url, "accountId");
-  const resolvedModel = nonempty(url, "resolvedModel");
-  let result: AdminUsageQuery = {
-    fromMs,
-    toMs,
-    limit: parseLimit(url),
-    cursor: parseCursor(url),
+    close(): void {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      eventHub.close();
+      auth.close();
+    },
   };
-  if (accountId !== null) {
-    result = { ...result, accountId };
+}
+
+async function dispatch(
+  request: Request,
+  context: Readonly<AdminRequestContext>,
+  bodyLimit: number,
+  auth: AdminAuth,
+  api: AdminManagementApi,
+  events: AdminEventStreamHub,
+  nowMs: () => number,
+): Promise<Response> {
+  context.signal.throwIfAborted();
+  const url = new URL(request.url);
+  const route = matchRoute(request.method, url.pathname);
+  if (route === null) {
+    throw new AdminApiError("not_found");
   }
-  if (protocol !== null) {
-    result = { ...result, protocol: protocol as AdminUsageQuery["protocol"] };
+  rejectQuery(url, route.query);
+
+  if (route.id === "bootstrap") {
+    requireOrigin(request.headers, context.listenerOrigin);
+    const body = checked(BootstrapSchema, await readJsonObject(request, bodyLimit, context.signal));
+    const session = auth.exchange(body.token);
+    const headers = responseHeaders(context.requestId);
+    headers.set("Set-Cookie", serializeSessionCookie(session.sessionId, session.absoluteExpiresAtMs));
+    return json(200, { data: auth.metadata(session) }, headers);
   }
-  if (resolvedModel !== null) {
-    result = { ...result, resolvedModel };
+
+  const sessionId = readSessionCookie(request.headers);
+  const session = auth.requireSession(sessionId);
+  if (route.mutation) {
+    requireOrigin(request.headers, context.listenerOrigin);
+    if (!auth.verifyCsrf(session, request.headers.get("x-ghcg-csrf"))) {
+      throw new AdminApiError("forbidden");
+    }
   }
-  if (outcome !== null) {
-    result = { ...result, outcome: outcome as AdminUsageQuery["outcome"] };
+
+  if (!route.body) {
+    await requireNoBody(request, context.signal);
+  }
+  const body = route.body ? await readJsonObject(request, bodyLimit, context.signal) : undefined;
+  let response: Response;
+  switch (route.id) {
+  case "session":
+    response = json(200, { data: auth.metadata(session) }, responseHeaders(context.requestId));
+    break;
+  case "logout": {
+    auth.logout(sessionId);
+    const headers = responseHeaders(context.requestId, false);
+    headers.set("Set-Cookie", serializeExpiredSessionCookie());
+    response = new Response(null, { status: 204, headers });
+    break;
+  }
+  case "status":
+    response = success(api.status(context.activity), context.requestId);
+    break;
+  case "usage":
+    response = success(await api.usage(parseUsageQuery(url, nowMs()), context.signal), context.requestId);
+    break;
+  case "accounts":
+    response = success(api.accounts(), context.requestId);
+    break;
+  case "deviceStart": {
+    const value = checked(DeviceFlowStartSchema, body);
+    response = success(await api.startDeviceFlow(value.host, context.signal), context.requestId, 201);
+    break;
+  }
+  case "devicePoll":
+    response = success(await api.pollDeviceFlow(route.parameter, context.signal), context.requestId);
+    break;
+  case "accountDelete": {
+    const value = checked(ExpectedRevisionSchema, body);
+    response = success(await api.removeAccount(route.parameter, value.expectedRevision, context.signal), context.requestId);
+    break;
+  }
+  case "accountDefault": {
+    const value = checked(DefaultAccountSchema, body);
+    response = success(await api.useDefaultAccount(value.accountId, value.expectedRevision, context.signal), context.requestId);
+    break;
+  }
+  case "models":
+    response = success(await api.models(optionalQuery(url, "accountId"), context.signal), context.requestId);
+    break;
+  case "modelsRefresh": {
+    const value = checked(RefreshModelsSchema, body);
+    response = success(await api.refreshModels(value.accountId, context.signal), context.requestId);
+    break;
+  }
+  case "modelsPreferred": {
+    const value = checked(PreferredModelSchema, body);
+    response = success(await api.setPreferredModel(value.accountId, value.modelId, value.expectedRevision, context.signal), context.requestId);
+    break;
+  }
+  case "configGet":
+    response = success(api.runtimeConfig(), context.requestId);
+    break;
+  case "configPut": {
+    const value = checked(RuntimeConfigUpdateSchema, body);
+    response = success(api.updateRuntimeConfig(value.config, value.expectedRevision, context.signal), context.requestId);
+    break;
+  }
+  case "historyGet":
+    response = success(api.history(), context.requestId);
+    break;
+  case "historyDelete": {
+    const value = checked(ExpectedRevisionSchema, body);
+    response = success(api.clearHistory(value.expectedRevision, context.signal), context.requestId);
+    break;
+  }
+  case "events":
+    response = success(await api.events(parseEventQuery(url), context.signal), context.requestId);
+    break;
+  case "eventStream":
+    response = await events.open(request.headers.get("last-event-id"), context.signal, context.activity);
+    response.headers.set("x-request-id", context.requestId);
+    break;
+  default:
+    throw new AdminApiError("not_found");
+  }
+  context.signal.throwIfAborted();
+  return response;
+}
+
+type RouteId = "bootstrap" | "session" | "logout" | "status" | "usage" | "accounts" | "deviceStart"
+  | "devicePoll" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
+  | "configGet" | "configPut" | "historyGet" | "historyDelete" | "events" | "eventStream";
+
+interface MatchedRoute {
+  readonly id: RouteId;
+  readonly body: boolean;
+  readonly mutation: boolean;
+  readonly query: ReadonlySet<string>;
+  readonly parameter: string;
+}
+
+function matchRoute(method: string, pathname: string): MatchedRoute | null {
+  const exact = ROUTES.get(`${method} ${pathname}`);
+  if (exact !== undefined) {
+    return { ...exact, parameter: "" };
+  }
+  const device = /^\/admin\/api\/v1\/device-flows\/([^/]+)$/u.exec(pathname);
+  if (method === "GET" && device?.[1] !== undefined) {
+    return parameterRoute("devicePoll", device[1], false);
+  }
+  const account = /^\/admin\/api\/v1\/accounts\/([^/]+)$/u.exec(pathname);
+  if (method === "DELETE" && account?.[1] !== undefined) {
+    return parameterRoute("accountDelete", account[1], true);
+  }
+  return null;
+}
+
+function parameterRoute(id: "devicePoll" | "accountDelete", encoded: string, body: boolean): MatchedRoute {
+  let parameter: string;
+  try {
+    parameter = decodeURIComponent(encoded);
+  } catch {
+    throw new AdminApiError("validation_failed");
+  }
+  if (parameter.length === 0 || parameter.includes("/")) {
+    throw new AdminApiError("validation_failed");
+  }
+  return { id, body, mutation: id === "accountDelete", query: new Set(), parameter };
+}
+
+const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([
+  route("POST", "/admin/api/v1/auth/bootstrap", "bootstrap", true, true),
+  route("GET", "/admin/api/v1/auth/session", "session"),
+  route("POST", "/admin/api/v1/auth/logout", "logout", false, true),
+  route("GET", "/admin/api/v1/status", "status"),
+  route("GET", "/admin/api/v1/usage", "usage", false, false, ["from", "to", "limit", "cursor", "accountId", "protocol", "resolvedModel", "outcome"]),
+  route("GET", "/admin/api/v1/accounts", "accounts"),
+  route("POST", "/admin/api/v1/device-flows", "deviceStart", true, true),
+  route("PUT", "/admin/api/v1/accounts/default", "accountDefault", true, true),
+  route("GET", "/admin/api/v1/models", "models", false, false, ["accountId"]),
+  route("POST", "/admin/api/v1/models/refresh", "modelsRefresh", true, true),
+  route("PUT", "/admin/api/v1/models/preferred", "modelsPreferred", true, true),
+  route("GET", "/admin/api/v1/config", "configGet"),
+  route("PUT", "/admin/api/v1/config", "configPut", true, true),
+  route("GET", "/admin/api/v1/history", "historyGet"),
+  route("DELETE", "/admin/api/v1/history", "historyDelete", true, true),
+  route("GET", "/admin/api/v1/events", "events", false, false, ["from", "to", "limit", "cursor", "kind", "severity"]),
+  route("GET", "/admin/api/v1/events/stream", "eventStream"),
+]);
+
+function route(
+  method: string,
+  path: string,
+  id: RouteId,
+  body = false,
+  mutation = false,
+  query: readonly string[] = [],
+): [string, Omit<MatchedRoute, "parameter">] {
+  return [`${method} ${path}`, { id, body, mutation, query: new Set(query) }];
+}
+
+async function readJsonObject(request: Request, limit: number, signal: AbortSignal): Promise<Record<string, unknown>> {
+  validateJsonMedia(request.headers);
+  const bytes = await readBoundedBody(request, limit, signal);
+  if (bytes.byteLength === 0) {
+    throw new AdminApiError("validation_failed");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    throw new AdminApiError("validation_failed");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new AdminApiError("validation_failed");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+async function requireNoBody(request: Request, signal: AbortSignal): Promise<void> {
+  const reader = request.body?.getReader();
+  if (reader === undefined) {
+    return;
+  }
+  const onAbort = (): void => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    for (;;) {
+      const next = await reader.read();
+      signal.throwIfAborted();
+      if (next.done) {
+        return;
+      }
+      if (next.value.byteLength > 0) {
+        await reader.cancel().catch(() => undefined);
+        throw new AdminApiError("validation_failed");
+      }
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    reader.releaseLock();
+  }
+}
+
+async function readBoundedBody(request: Request, limit: number, signal: AbortSignal): Promise<Uint8Array> {
+  const reader = request.body?.getReader();
+  if (reader === undefined) {
+    return new Uint8Array();
+  }
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  const onAbort = (): void => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    for (;;) {
+      const next = await reader.read();
+      signal.throwIfAborted();
+      if (next.done) {
+        break;
+      }
+      if (next.value.byteLength > limit - length) {
+        await reader.cancel().catch(() => undefined);
+        throw new AdminApiError("validation_failed");
+      }
+      chunks.push(next.value);
+      length += next.value.byteLength;
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    reader.releaseLock();
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
   }
   return result;
 }
 
-function parseEventQuery(url: URL): AdminEventQuery {
-  rejectUnknownQuery(url, new Set(["from", "to", "limit", "cursor", "kind", "severity"]));
-  const kind = parseSet(url, "kind", EVENT_KINDS);
-  const severity = parseSet(url, "severity", EVENT_SEVERITIES);
+function validateJsonMedia(headers: Headers): void {
+  const contentType = headers.get("content-type");
+  if (contentType === null || !isJsonContentType(contentType)) {
+    throw new AdminApiError("validation_failed");
+  }
+  const encoding = headers.get("content-encoding");
+  if (encoding !== null && encoding.trim().toLowerCase() !== "identity") {
+    throw new AdminApiError("validation_failed");
+  }
+}
+
+function isJsonContentType(value: string): boolean {
+  const parts = value.split(";").map((part) => part.trim());
+  if (parts.shift()?.toLowerCase() !== "application/json") {
+    return false;
+  }
+  if (parts.length === 0) {
+    return true;
+  }
+  if (parts.length !== 1) {
+    return false;
+  }
+  const match = /^charset\s*=\s*(?:"utf-8"|utf-8)$/iu.exec(parts[0] ?? "");
+  return match !== null;
+}
+
+function checked<Schema extends TSchema>(schema: Schema, value: unknown): Static<Schema> {
+  if (!Value.Check(schema, value)) {
+    throw new AdminApiError("validation_failed");
+  }
+  return structuredClone(value) as Static<Schema>;
+}
+
+function rejectQuery(url: URL, allowed: ReadonlySet<string>): void {
+  const seen = new Set<string>();
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || seen.has(key)) {
+      throw new AdminApiError("validation_failed");
+    }
+    seen.add(key);
+  }
+}
+
+function optionalQuery(url: URL, key: string): string | null {
+  const value = url.searchParams.get(key);
+  if (value !== null && value.length === 0) {
+    throw new AdminApiError("validation_failed");
+  }
+  return value;
+}
+
+function parseUsageQuery(url: URL, now: number): AdminUsageQuery {
+  const fromMs = parseUtc(url, "from") ?? now - 86_400_000;
+  const toMs = parseUtc(url, "to") ?? now;
+  if (fromMs >= toMs || fromMs < now - 90 * 86_400_000 || toMs > now + 60_000) {
+    throw new AdminApiError("validation_failed");
+  }
+  const accountId = optionalQuery(url, "accountId");
+  const protocol = setQuery(url, "protocol", PROTOCOLS);
+  const resolvedModel = optionalQuery(url, "resolvedModel");
+  const outcome = setQuery(url, "outcome", OUTCOMES);
   return {
-    fromMs: parseOptionalUtc(url, "from"),
-    toMs: parseOptionalUtc(url, "to"),
+    fromMs,
+    toMs,
     limit: parseLimit(url),
     cursor: parseCursor(url),
-    ...(kind === null ? {} : { kind }),
-    ...(severity === null ? {} : { severity: severity as "info" | "warning" | "error" }),
+    ...(accountId === null ? {} : { accountId }),
+    ...(protocol === null ? {} : { protocol: protocol as Exclude<AdminUsageQuery["protocol"], undefined> }),
+    ...(resolvedModel === null ? {} : { resolvedModel }),
+    ...(outcome === null ? {} : { outcome: outcome as Exclude<AdminUsageQuery["outcome"], undefined> }),
   };
 }
 
-function rejectUnknownQuery(url: URL, allowed: ReadonlySet<string>): void {
-  for (const key of url.searchParams.keys()) {
-    if (!allowed.has(key)) {
-      throw new AdminApiError("validation_failed", "validation failed");
-    }
+function parseEventQuery(url: URL): AdminEventQuery {
+  const fromMs = parseUtc(url, "from");
+  const toMs = parseUtc(url, "to");
+  if (fromMs !== null && toMs !== null && fromMs >= toMs) {
+    throw new AdminApiError("validation_failed");
   }
+  const kind = setQuery(url, "kind", EVENT_KINDS);
+  const severity = setQuery(url, "severity", SEVERITIES);
+  return {
+    fromMs,
+    toMs,
+    limit: parseLimit(url),
+    cursor: parseCursor(url),
+    ...(kind === null ? {} : { kind: kind as Exclude<AdminEventQuery["kind"], undefined> }),
+    ...(severity === null ? {} : { severity: severity as Exclude<AdminEventQuery["severity"], undefined> }),
+  };
 }
 
-function parseOptionalUtc(url: URL, key: string): number | null {
-  const value = singleQueryValue(url, key);
+function parseUtc(url: URL, key: string): number | null {
+  const value = url.searchParams.get(key);
   if (value === null) {
     return null;
   }
-  if (!value.endsWith("Z")) {
-    throw new AdminApiError("validation_failed", "validation failed");
-  }
   const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
-    throw new AdminApiError("validation_failed", "validation failed");
+  if (!value.endsWith("Z") || !Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new AdminApiError("validation_failed");
   }
   return parsed;
 }
 
 function parseLimit(url: URL): number {
-  const value = singleQueryValue(url, "limit");
+  const value = url.searchParams.get("limit");
   if (value === null) {
     return 100;
   }
-  if (!/^[0-9]+$/u.test(value)) {
-    throw new AdminApiError("validation_failed", "validation failed");
+  if (!/^(?:[1-9]|[1-9][0-9]|[1-4][0-9]{2}|500)$/u.test(value)) {
+    throw new AdminApiError("validation_failed");
   }
-  const parsed = Number.parseInt(value, 10);
-  if (parsed < 1 || parsed > 500) {
-    throw new AdminApiError("validation_failed", "validation failed");
-  }
-  return parsed;
+  return Number(value);
 }
 
 function parseCursor(url: URL): string | null {
-  const value = singleQueryValue(url, "cursor");
-  if (value === null) {
-    return null;
-  }
-  if (value.length === 0 || value.length > 1024) {
-    throw new AdminApiError("validation_failed", "validation failed");
+  const value = url.searchParams.get("cursor");
+  if (value !== null && (value.length === 0 || value.length > 16_384)) {
+    throw new AdminApiError("validation_failed");
   }
   return value;
 }
 
-function parseSet(url: URL, key: string, allowed: ReadonlySet<string>): string | null {
-  const value = singleQueryValue(url, key);
-  if (value === null) {
-    return null;
-  }
-  if (!allowed.has(value)) {
-    throw new AdminApiError("validation_failed", "validation failed");
+function setQuery(url: URL, key: string, allowed: ReadonlySet<string>): string | null {
+  const value = url.searchParams.get(key);
+  if (value !== null && !allowed.has(value)) {
+    throw new AdminApiError("validation_failed");
   }
   return value;
 }
 
-function nonempty(url: URL, key: string): string | null {
-  const value = singleQueryValue(url, key);
-  if (value === null) {
-    return null;
+function requireOrigin(headers: Headers, origin: string): void {
+  if (headers.get("origin") !== origin) {
+    throw new AdminApiError("forbidden");
   }
-  if (value.length === 0) {
-    throw new AdminApiError("validation_failed", "validation failed");
-  }
-  return value;
 }
 
-function singleQueryValue(url: URL, key: string): string | null {
-  const values = url.searchParams.getAll(key);
-  if (values.length > 1) {
-    throw new AdminApiError("validation_failed", "validation failed");
+function mapRouteError(error: unknown): AdminApiError {
+  if (error instanceof AdminAuthError) {
+    return new AdminApiError(error.code === "capacity" ? "capacity_exceeded" : "unauthenticated");
   }
-  return values[0] ?? null;
+  return mapAdminError(error);
+}
+
+function success(data: unknown, requestId: string, status = 200): Response {
+  return json(status, { data }, responseHeaders(requestId));
+}
+
+function failure(error: AdminApiError, requestId: string): Response {
+  return json(statusFor(error.code), {
+    error: { code: error.code, message: error.code.replaceAll("_", " "), requestId },
+  }, responseHeaders(requestId));
+}
+
+function statusFor(code: AdminApiError["code"]): number {
+  return {
+    validation_failed: 400,
+    unauthenticated: 401,
+    forbidden: 403,
+    not_found: 404,
+    revision_conflict: 409,
+    capacity_exceeded: 503,
+    internal_error: 500,
+  }[code];
+}
+
+function responseHeaders(requestId: string, jsonContent = true): Headers {
+  const headers = new Headers({ "Cache-Control": "no-store", "x-request-id": requestId });
+  if (jsonContent) {
+    headers.set("Content-Type", "application/json; charset=utf-8");
+  }
+  return headers;
+}
+
+function json(status: number, body: unknown, headers: Headers): Response {
+  return new Response(JSON.stringify(body), { status, headers });
 }
