@@ -45,19 +45,29 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
       return await runServe(command.startup, parsed.json, stdout, options);
     }
     if (command.kind === "lifecycle") {
-      const context = { dataDir: parsed.dataDir, ...(command.startup === undefined ? {} : { startup: command.startup }) };
+      const context = {
+        dataDir: parsed.dataDir,
+        ...(command.startup === undefined ? {} : { startup: command.startup }),
+        ...(options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal }),
+      };
       const result = await client.lifecycle(command.action, context);
       writeSuccess(stdout, parsed.json, result);
       return lifecycleExitCode(command.action, result);
     }
     if (command.kind === "admin.open") {
-      writeSuccess(stdout, parsed.json, await client.adminOpen({ dataDir: parsed.dataDir }));
+      writeSuccess(stdout, parsed.json, await client.adminOpen({
+        dataDir: parsed.dataDir,
+        ...(options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal }),
+      }));
       return 0;
     }
     if (command.operation === "auth.login.start" && !parsed.json) {
       return await runInteractiveLogin(client, command.args as { readonly host?: string }, { dataDir: parsed.dataDir }, stdout, options);
     }
-    writeSuccess(stdout, parsed.json, await client.request(command.operation, command.args, { dataDir: parsed.dataDir }));
+    writeSuccess(stdout, parsed.json, await client.request(command.operation, command.args, {
+      dataDir: parsed.dataDir,
+      ...(options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal }),
+    }));
     return 0;
   } catch (error: unknown) {
     const cliError = error instanceof CliError ? error : new CliError("internal_error");

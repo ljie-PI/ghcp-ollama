@@ -343,7 +343,7 @@ export class HttpControlClient implements ControlClient {
     let response: Response;
     const timeout = controlTimeout(context.signal, context.timeoutMs ?? 30_000);
     try {
-      response = await this.fetchImpl(`http://127.0.0.1:${endpoint.port}${pathPart}`, {
+      response = await Promise.race([this.fetchImpl(`http://127.0.0.1:${endpoint.port}${pathPart}`, {
         method,
         headers: {
           "content-type": "application/json",
@@ -352,11 +352,14 @@ export class HttpControlClient implements ControlClient {
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: timeout.signal,
-      });
+      }), timeout.promise]);
     } catch (_error: unknown) {
       timeout.clear();
       if (timeout.timedOut()) {
         throw new CliError("timeout");
+      }
+      if (timeout.parentAborted()) {
+        throw new CliError("interrupted");
       }
       throw new CliError("daemon_unreachable");
     }
@@ -368,6 +371,9 @@ export class HttpControlClient implements ControlClient {
     }
     if (timeout.timedOut()) {
       throw new CliError("timeout");
+    }
+    if (timeout.parentAborted()) {
+      throw new CliError("interrupted");
     }
     if (response.ok && isObject(payload) && "data" in payload) {
       return payload.data;
@@ -381,6 +387,7 @@ function controlTimeout(parent: AbortSignal | undefined, ms: number): {
   readonly promise: Promise<never>;
   readonly clear: () => void;
   readonly timedOut: () => boolean;
+  readonly parentAborted: () => boolean;
 } {
   const controller = new AbortController();
   const signal = parent === undefined ? controller.signal : AbortSignal.any([parent, controller.signal]);
@@ -399,6 +406,7 @@ function controlTimeout(parent: AbortSignal | undefined, ms: number): {
     promise,
     clear: () => clearTimeout(timer),
     timedOut: () => timedOut,
+    parentAborted: () => parent?.aborted === true,
   };
 }
 

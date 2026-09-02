@@ -246,6 +246,26 @@ describe("RM-18 CLI commands", () => {
     await expect(foreground.lifecycle("stop", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
   });
 
+  it("maps control timeout and caller abort without leaking as daemon failures", async () => {
+    const endpoint = async () => ({
+      managed: true,
+      controlToken: "control-token",
+      instanceNonce: "nonce",
+      port: 31_400,
+    });
+    const never = new HttpControlClient(async (_url, init) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }), endpoint);
+    await expect(never.request("config.get", {}, { dataDir: "selected", timeoutMs: 1 })).rejects.toMatchObject({ code: "timeout" });
+
+    const abort = new AbortController();
+    const aborted = new HttpControlClient(async (_url, init) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      abort.abort();
+    }), endpoint);
+    await expect(aborted.request("config.get", {}, { dataDir: "selected", signal: abort.signal })).rejects.toMatchObject({ code: "interrupted" });
+  });
+
   it("foreground serve emits one running result and closes on shutdown", async () => {
     const abort = new AbortController();
     let listened = false;
