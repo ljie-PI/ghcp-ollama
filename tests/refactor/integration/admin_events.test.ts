@@ -82,14 +82,21 @@ describe("RM-20 Admin event stream", () => {
     }
   });
 
-  it("pulls every retained replay event beyond the live queue cap", async () => {
+  it("loads retained replay lazily in bounded batches beyond the live queue cap", async () => {
     const dependencies = adminDependencies();
-    dependencies.telemetry.replayEvents = async (_after, signal) => {
+    const calls: string[] = [];
+    dependencies.telemetry.replayEvents = async (after, signal) => {
       signal.throwIfAborted();
+      calls.push(after);
+      const start = Number(after) + 1;
+      const items = Array.from(
+        { length: Math.min(128, Math.max(0, 513 - start + 1)) },
+        (_, index) => operationalEvent(String(start + index)),
+      );
       return {
         found: true,
-        latestEventId: "130",
-        items: Array.from({ length: 129 }, (_, index) => operationalEvent(String(index + 2))),
+        latestEventId: "513",
+        items,
       };
     };
     const harness = await createHarness(dependencies);
@@ -97,15 +104,93 @@ describe("RM-20 Admin event stream", () => {
       const session = await login(harness.gateway, harness.admin);
       const response = await open(harness.gateway, session.cookie, "1");
       expect(response.status).toBe(200);
+      expect(calls).toEqual(["1"]);
       const reader = response.body!.getReader();
       let text = "";
-      for (let index = 0; index < 130; index += 1) {
+      text += decode((await reader.read()).value);
+      harness.dependencies.emitted.publish({ kind: "operational", event: operationalEvent("129") });
+      harness.dependencies.emitted.publish({ kind: "operational", event: operationalEvent("514") });
+      for (let index = 1; index < 514; index += 1) {
         text += decode((await reader.read()).value);
       }
+      expect(calls).toEqual(["1", "33", "65", "97", "129", "161", "193", "225", "257", "289", "321", "353", "385", "417", "449", "481"]);
       expect(text).toContain("id: 2\n");
-      expect(text).toContain("id: 130\n");
+      expect(text).toContain("id: 513\n");
       expect(text).toContain("event: performance\n");
+      expect(text.match(/id: 129\n/gu)).toHaveLength(1);
+      expect(text.indexOf("id: 513\n")).toBeLessThan(text.indexOf("event: performance\n"));
+      expect(text.indexOf("event: performance\n")).toBeLessThan(text.indexOf("id: 514\n"));
       await reader.cancel();
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("closes authenticated streams on logout, idle expiry, and caller abort", async () => {
+    const now = { value: 1_800_000_000_000 };
+    const timers = fakeTimeouts(now);
+    const dependencies = {
+      ...adminDependencies(now),
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const firstSession = await login(harness.gateway, harness.admin);
+      const logoutStream = await open(harness.gateway, firstSession.cookie);
+      const logoutReader = logoutStream.body!.getReader();
+      await logoutReader.read();
+      const logout = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/logout`, {
+        method: "POST",
+        headers: {
+          cookie: firstSession.cookie,
+          origin: ORIGIN,
+          "x-ghcg-csrf": firstSession.csrf,
+        },
+      }));
+      expect(logout.status).toBe(204);
+      expect((await logoutReader.read()).done).toBe(true);
+
+      const secondSession = await login(harness.gateway, harness.admin);
+      const idleStream = await open(harness.gateway, secondSession.cookie);
+      const idleReader = idleStream.body!.getReader();
+      await idleReader.read();
+      timers.advance(30 * 60_000);
+      expect((await idleReader.read()).done).toBe(true);
+
+      const thirdSession = await login(harness.gateway, harness.admin);
+      const caller = new AbortController();
+      const abortedStream = await open(harness.gateway, thirdSession.cookie, undefined, caller.signal);
+      const abortedReader = abortedStream.body!.getReader();
+      await abortedReader.read();
+      caller.abort();
+      expect((await abortedReader.read()).done).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("keeps an SSE watcher across idle refreshes and closes it at absolute expiry", async () => {
+    const now = { value: 1_800_000_000_000 };
+    const timers = fakeTimeouts(now);
+    const harness = await createHarness({
+      ...adminDependencies(now),
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout,
+    });
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = await open(harness.gateway, session.cookie);
+      const reader = response.body!.getReader();
+      await reader.read();
+      for (let interval = 1; interval < 36; interval += 1) {
+        timers.advance(20 * 60_000);
+        expect((await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/session`, {
+          headers: { cookie: session.cookie },
+        }))).status).toBe(200);
+      }
+      timers.advance(20 * 60_000);
+      expect((await reader.read()).done).toBe(true);
     } finally {
       await harness.close();
     }
@@ -126,12 +211,52 @@ async function createHarness(dependencies = adminDependencies()): Promise<{
   return { gateway, admin, dependencies, close: async () => gateway.close() };
 }
 
-async function open(gateway: Gateway, cookie: string, lastEventId?: string): Promise<Response> {
+async function open(
+  gateway: Gateway,
+  cookie: string,
+  lastEventId?: string,
+  signal?: AbortSignal,
+): Promise<Response> {
   const headers = new Headers({ cookie });
   if (lastEventId !== undefined) headers.set("last-event-id", lastEventId);
-  return await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/events/stream`, { headers }));
+  return await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/events/stream`, {
+    headers,
+    ...(signal === undefined ? {} : { signal }),
+  }));
 }
 
 function decode(value: Uint8Array | undefined): string {
   return new TextDecoder().decode(value);
+}
+
+function fakeTimeouts(now: { value: number }): {
+  readonly setTimeout: typeof setTimeout;
+  readonly clearTimeout: typeof clearTimeout;
+  readonly advance: (milliseconds: number) => void;
+} {
+  let nextId = 0;
+  const timers = new Map<number, { readonly due: number; readonly handler: () => void }>();
+  return {
+    setTimeout: ((handler: () => void, delay?: number) => {
+      const id = ++nextId;
+      timers.set(id, { due: now.value + (delay ?? 0), handler });
+      return id as unknown as NodeJS.Timeout;
+    }) as typeof setTimeout,
+    clearTimeout: ((timer: NodeJS.Timeout | number | string | undefined) => {
+      timers.delete(Number(timer));
+    }) as typeof clearTimeout,
+    advance(milliseconds: number): void {
+      now.value += milliseconds;
+      for (;;) {
+        const due = [...timers.entries()]
+          .filter(([, timer]) => timer.due <= now.value)
+          .sort((left, right) => left[1].due - right[1].due)[0];
+        if (due === undefined) {
+          return;
+        }
+        timers.delete(due[0]);
+        due[1].handler();
+      }
+    },
+  };
 }

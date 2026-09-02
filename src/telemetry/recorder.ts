@@ -87,6 +87,7 @@ interface PendingEvent {
   json: string;
   kind: OperationalEventKind | "config_updated";
   observerKind: OperationalEventKind;
+  observerMetadata: Readonly<Record<string, string | number | boolean>>;
 }
 
 type Pending = PendingUsage | PendingEvent;
@@ -139,9 +140,8 @@ export class TelemetryRecorder {
   }
 
   recordEvent(input: OperationalEventInput): void {
-    const sanitized = sanitizeMetadata(input.metadata);
-    const encoded = metadataJsonOrRejected(sanitized);
     const requestedKind = input.kind === "config_updated" ? "runtime_config_changed" : input.kind;
+    const encoded = metadataJsonOrRejected(sanitizeMetadata(input.metadata));
     const kind: OperationalEventKind = encoded.kind === "metadata_rejected"
       ? "metadata_rejected"
       : requestedKind;
@@ -160,7 +160,18 @@ export class TelemetryRecorder {
       this.droppedEvents = saturate(this.droppedEvents + 1);
     }
     const persistedKind = encoded.kind === "metadata_rejected" ? "metadata_rejected" : input.kind;
-    this.pending.push({ type: "event", seq: this.nextSeq(), event, json: encoded.json, kind: persistedKind, observerKind: kind });
+    const observerMetadata = kind === "metadata_rejected"
+      ? { reason: "metadata_rejected" }
+      : sanitizeOperationalEventMetadata(kind, input.metadata);
+    this.pending.push({
+      type: "event",
+      seq: this.nextSeq(),
+      event,
+      json: encoded.json,
+      kind: persistedKind,
+      observerKind: kind,
+      observerMetadata,
+    });
   }
 
   async flush(signal?: AbortSignal): Promise<void> {
@@ -258,7 +269,7 @@ export class TelemetryRecorder {
       occurredAtMs: item.event.occurredAtMs,
       kind: item.observerKind,
       severity: item.event.severity,
-      metadata: sanitizeOperationalEventMetadata(item.observerKind, parseRecordedMetadata(item.json)),
+      metadata: item.observerMetadata,
     };
   }
 
@@ -336,9 +347,4 @@ function mergeUsage(left: UsageUpdate, right: UsageUpdate): UsageUpdate {
 
 function saturate(value: number): number {
   return Math.min(value, Number.MAX_SAFE_INTEGER);
-}
-
-function parseRecordedMetadata(json: string): Readonly<Record<string, string | number | boolean | null>> {
-  const parsed = JSON.parse(json) as Record<string, string | number | boolean | null>;
-  return parsed;
 }

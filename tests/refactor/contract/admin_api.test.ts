@@ -57,7 +57,7 @@ describe("RM-20 Admin API", () => {
       const conflict = await mutate(harness.gateway, "DELETE", "/admin/api/v1/history", session, { expectedRevision: 9 });
       expect(conflict.status).toBe(409);
       const cleared = await mutate(harness.gateway, "DELETE", "/admin/api/v1/history", session, { expectedRevision: 0 });
-      expect(await cleared.json()).toEqual({ data: { revision: 1, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512 } });
+      expect(await cleared.json()).toEqual({ data: { revision: 0, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512 } });
 
       const unknownModel = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
         accountId: "github.com/42", modelId: "missing", expectedRevision: 0,

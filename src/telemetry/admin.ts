@@ -37,6 +37,8 @@ const EVENT_KINDS: ReadonlySet<string> = new Set([
   "metadata_rejected",
   "daemon_start_failed",
 ]);
+// A batch stays below 1 MiB even when every retained event is near the 16 KiB metadata cap.
+export const ADMIN_EVENT_REPLAY_BATCH_SIZE = 32;
 
 export type AdminOperationalEventKind = RecordedOperationalEvent["kind"];
 
@@ -288,7 +290,7 @@ export class SqliteAdminTelemetry implements AdminTelemetry {
        WHERE event_id > ?
        ORDER BY event_id
        LIMIT ?`,
-    ).all(eventId, EVENT_ROW_CAP) as EventRow[];
+    ).all(eventId, ADMIN_EVENT_REPLAY_BATCH_SIZE) as EventRow[];
     signal.throwIfAborted();
     return { found: true, latestEventId: latest, items: rows.map(eventDto) };
   }

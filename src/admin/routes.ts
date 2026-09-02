@@ -49,11 +49,18 @@ export interface AdminModuleDependencies extends AdminApiDependencies {
   readonly createToken?: () => string;
   readonly setInterval?: typeof setInterval;
   readonly clearInterval?: typeof clearInterval;
+  readonly setTimeout?: typeof setTimeout;
+  readonly clearTimeout?: typeof clearTimeout;
 }
 
 export function createAdminModule(dependencies: Readonly<AdminModuleDependencies>): AdminModule {
   const api = new AdminManagementApi(dependencies);
-  const auth = new AdminAuth(dependencies.nowMs ?? Date.now, dependencies.createToken);
+  const auth = new AdminAuth(
+    dependencies.nowMs ?? Date.now,
+    dependencies.createToken,
+    dependencies.setTimeout,
+    dependencies.clearTimeout,
+  );
   const eventHub = new AdminEventStreamHub(
     dependencies.telemetry,
     api,
@@ -202,7 +209,12 @@ async function dispatch(
     response = success(await api.events(parseEventQuery(url), context.signal), context.requestId);
     break;
   case "eventStream":
-    response = await events.open(request.headers.get("last-event-id"), context.signal, context.activity);
+    response = await events.open(
+      request.headers.get("last-event-id"),
+      context.signal,
+      context.activity,
+      (listener) => auth.watchSession(session.sessionId, listener),
+    );
     response.headers.set("x-request-id", context.requestId);
     break;
   default:

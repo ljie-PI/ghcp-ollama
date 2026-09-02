@@ -4,6 +4,7 @@ import type {
   AdminOperationalEvent,
   AdminTelemetry,
 } from "../telemetry/admin.js";
+import { ADMIN_EVENT_REPLAY_BATCH_SIZE } from "../telemetry/admin.js";
 import { AdminApiError, type AdminManagementApi } from "./api.js";
 
 export const ADMIN_EVENT_SUBSCRIBER_CAP = 8;
@@ -14,29 +15,35 @@ export const ADMIN_EVENT_HEARTBEAT_MS = 15_000;
 const encoder = new TextEncoder();
 
 interface Subscriber {
-  readonly replay: Uint8Array[];
-  readonly queue: Array<{ readonly bytes: Uint8Array; readonly counted: boolean }>;
+  readonly queue: Array<{
+    readonly bytes: Uint8Array;
+    readonly counted: boolean;
+    readonly eventId: bigint | null;
+  }>;
+  readonly abortController: AbortController;
+  readonly callerSignal: AbortSignal;
   readonly signal: AbortSignal;
   readonly activity: GatewayActivity;
   readonly onAbort: () => void;
   readonly wake: () => void;
   readonly heartbeat: ReturnType<typeof setInterval>;
+  unsubscribeSession: (() => void) | undefined;
+  replay: Uint8Array[];
+  replayCursor: string | null;
+  replayThrough: bigint | null;
+  replayStarted: boolean;
+  replayDone: boolean;
+  initialFrame: Uint8Array | undefined;
+  performancePending: boolean;
   queuedBytes: number;
   queuedEvents: number;
   waiting: (() => void) | undefined;
-  latestEventId: bigint | null;
+  latestLiveEventId: bigint | null;
   closed: boolean;
-}
-
-interface OpeningSubscriber {
-  readonly operational: Array<{ readonly eventId: bigint; readonly frame: Uint8Array }>;
-  queuedBytes: number;
-  overflowed: boolean;
 }
 
 export class AdminEventStreamHub {
   private readonly subscribers = new Set<Subscriber>();
-  private readonly openingSubscribers = new Set<OpeningSubscriber>();
   private readonly unsubscribe: () => void;
   private closed = false;
 
@@ -57,36 +64,19 @@ export class AdminEventStreamHub {
     lastEventId: string | null,
     signal: AbortSignal,
     activity: GatewayActivity,
+    watchSession: (listener: () => void) => () => void,
   ): Promise<Response> {
-    if (this.closed || this.subscribers.size + this.openingSubscribers.size >= ADMIN_EVENT_SUBSCRIBER_CAP) {
+    if (this.closed || this.subscribers.size >= ADMIN_EVENT_SUBSCRIBER_CAP) {
       throw new AdminApiError("capacity_exceeded");
     }
-    if (lastEventId !== null && !/^(?:0|[1-9][0-9]*)$/u.test(lastEventId)) {
+    if (lastEventId !== null && (!/^(?:0|[1-9][0-9]*)$/u.test(lastEventId)
+      || !Number.isSafeInteger(Number(lastEventId)))) {
       throw new AdminApiError("validation_failed");
     }
     signal.throwIfAborted();
-    const opening: OpeningSubscriber = { operational: [], queuedBytes: 0, overflowed: false };
-    this.openingSubscribers.add(opening);
-    let initial: { readonly frames: readonly Uint8Array[]; readonly latestEventId: bigint | null };
-    try {
-      initial = await this.initialFrames(lastEventId, signal, activity);
-      signal.throwIfAborted();
-      if (this.closed) {
-        throw new DOMException("closed", "AbortError");
-      }
-    } finally {
-      this.openingSubscribers.delete(opening);
-    }
-    if (opening.overflowed) {
-      throw new AdminApiError("capacity_exceeded");
-    }
-    const pendingFrames = opening.operational
-      .filter((pending) => initial.latestEventId === null || pending.eventId > initial.latestEventId)
-      .map((pending) => pending.frame);
-    const frames = [...initial.frames];
-    const latestEventId = opening.operational.at(-1)?.eventId ?? initial.latestEventId;
 
     let subscriber: Subscriber | undefined;
+    const unsubscribeSession = watchSession(() => this.closeSubscriber(subscriber));
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         const wake = (): void => {
@@ -97,25 +87,32 @@ export class AdminEventStreamHub {
           }
         };
         const onAbort = (): void => this.closeSubscriber(subscriber);
+        const abortController = new AbortController();
         subscriber = {
           queue: [],
-          replay: frames,
-          signal,
+          abortController,
+          callerSignal: signal,
+          replay: [],
+          replayCursor: lastEventId,
+          replayThrough: null,
+          replayStarted: false,
+          replayDone: lastEventId === null,
+          initialFrame: undefined,
+          performancePending: true,
+          signal: abortController.signal,
           activity,
           onAbort,
           wake,
-          heartbeat: this.setTimer(() => this.enqueue(subscriber, encoder.encode(": keep-alive\n\n"), false), ADMIN_EVENT_HEARTBEAT_MS),
+          heartbeat: this.setTimer(() => this.enqueue(subscriber, encoder.encode(": keep-alive\n\n"), false, null), ADMIN_EVENT_HEARTBEAT_MS),
+          unsubscribeSession,
           queuedBytes: 0,
           queuedEvents: 0,
           waiting: undefined,
-          latestEventId,
+          latestLiveEventId: null,
           closed: false,
         };
         signal.addEventListener("abort", onAbort, { once: true });
         this.subscribers.add(subscriber);
-        for (const frame of pendingFrames) {
-          this.enqueue(subscriber, frame, true);
-        }
         if (subscriber.closed) {
           controller.close();
         }
@@ -126,9 +123,27 @@ export class AdminEventStreamHub {
           controller.close();
           return;
         }
-        const replayFrame = current.replay.shift();
+        let replayFrame: Uint8Array | undefined;
+        try {
+          replayFrame = await this.nextInitialFrame(current);
+        } catch (error: unknown) {
+          if (current.closed || current.signal.aborted) {
+            controller.close();
+            return;
+          }
+          throw error;
+        }
+        if (current.closed || current.signal.aborted) {
+          controller.close();
+          return;
+        }
         if (replayFrame !== undefined) {
           controller.enqueue(replayFrame);
+          return;
+        }
+        if (current.performancePending) {
+          current.performancePending = false;
+          controller.enqueue(performanceFrame(this.api.status(current.activity)));
           return;
         }
         if (current.queue.length === 0) {
@@ -171,57 +186,31 @@ export class AdminEventStreamHub {
     }
   }
 
-  private async initialFrames(
-    lastEventId: string | null,
-    signal: AbortSignal,
-    activity: GatewayActivity,
-  ): Promise<{ readonly frames: readonly Uint8Array[]; readonly latestEventId: bigint | null }> {
-    const frames: Uint8Array[] = [];
-    let latestEventId: bigint | null = null;
-    if (lastEventId !== null) {
-      const replay = await this.telemetry.replayEvents(lastEventId, signal);
-      if (replay.found) {
-        frames.push(...replay.items.map(operationalFrame));
-      } else {
-        frames.push(resetFrame(replay.latestEventId));
-      }
-      latestEventId = replay.latestEventId === null ? BigInt(lastEventId) : BigInt(replay.latestEventId);
-    }
-    frames.push(performanceFrame(this.api.status(activity)));
-    return { frames, latestEventId };
-  }
-
   private publish(event: Readonly<AdminMonitorEvent>): void {
-    if (event.kind === "operational") {
-      const eventId = BigInt(event.event.eventId);
-      const frame = operationalFrame(event.event);
-      for (const opening of this.openingSubscribers) {
-        if (opening.operational.length >= ADMIN_EVENT_QUEUE_CAP
-          || opening.queuedBytes + frame.byteLength > ADMIN_EVENT_QUEUE_BYTES) {
-          opening.overflowed = true;
-          continue;
-        }
-        opening.operational.push({ eventId, frame });
-        opening.queuedBytes += frame.byteLength;
-      }
-    }
     for (const subscriber of [...this.subscribers]) {
       let frame: Uint8Array;
+      let eventId: bigint | null = null;
       if (event.kind === "operational") {
-        const eventId = BigInt(event.event.eventId);
-        if (subscriber.latestEventId !== null && eventId <= subscriber.latestEventId) {
+        eventId = BigInt(event.event.eventId);
+        if ((subscriber.replayThrough !== null && eventId <= subscriber.replayThrough)
+          || (subscriber.latestLiveEventId !== null && eventId <= subscriber.latestLiveEventId)) {
           continue;
         }
-        subscriber.latestEventId = eventId;
+        subscriber.latestLiveEventId = eventId;
         frame = operationalFrame(event.event);
       } else {
         frame = performanceFrame(this.api.status(subscriber.activity));
       }
-      this.enqueue(subscriber, frame, true);
+      this.enqueue(subscriber, frame, true, eventId);
     }
   }
 
-  private enqueue(subscriber: Subscriber | undefined, frame: Uint8Array, counted: boolean): void {
+  private enqueue(
+    subscriber: Subscriber | undefined,
+    frame: Uint8Array,
+    counted: boolean,
+    eventId: bigint | null,
+  ): void {
     if (subscriber === undefined || subscriber.closed) {
       return;
     }
@@ -233,7 +222,7 @@ export class AdminEventStreamHub {
       this.closeSubscriber(subscriber);
       return;
     }
-    subscriber.queue.push({ bytes: frame, counted });
+    subscriber.queue.push({ bytes: frame, counted, eventId });
     if (counted) {
       subscriber.queuedEvents += 1;
       subscriber.queuedBytes += frame.byteLength;
@@ -247,13 +236,87 @@ export class AdminEventStreamHub {
     }
     subscriber.closed = true;
     this.clearTimer(subscriber.heartbeat);
-    subscriber.signal.removeEventListener("abort", subscriber.onAbort);
+    subscriber.callerSignal.removeEventListener("abort", subscriber.onAbort);
+    if (!subscriber.signal.aborted) {
+      subscriber.abortController.abort();
+    }
+    subscriber.unsubscribeSession?.();
+    subscriber.unsubscribeSession = undefined;
     subscriber.queue.length = 0;
     subscriber.replay.length = 0;
     subscriber.queuedBytes = 0;
     subscriber.queuedEvents = 0;
     this.subscribers.delete(subscriber);
     subscriber.wake();
+  }
+
+  private async nextInitialFrame(subscriber: Subscriber): Promise<Uint8Array | undefined> {
+    const buffered = subscriber.replay.shift();
+    if (buffered !== undefined) {
+      return buffered;
+    }
+    if (subscriber.initialFrame !== undefined) {
+      const frame = subscriber.initialFrame;
+      subscriber.initialFrame = undefined;
+      return frame;
+    }
+    if (subscriber.replayDone || subscriber.replayCursor === null) {
+      return undefined;
+    }
+
+    const replay = await this.telemetry.replayEvents(subscriber.replayCursor, subscriber.signal);
+    subscriber.signal.throwIfAborted();
+    if (subscriber.closed) {
+      return undefined;
+    }
+    if (!subscriber.replayStarted) {
+      subscriber.replayStarted = true;
+      subscriber.replayThrough = replay.latestEventId === null
+        ? BigInt(subscriber.replayCursor)
+        : BigInt(replay.latestEventId);
+      this.discardReplayedLiveEvents(subscriber);
+      if (!replay.found) {
+        subscriber.replayDone = true;
+        subscriber.initialFrame = resetFrame(replay.latestEventId);
+        return this.nextInitialFrame(subscriber);
+      }
+    } else if (!replay.found) {
+      subscriber.replayDone = true;
+      return undefined;
+    }
+
+    const through = subscriber.replayThrough;
+    const items = through === null
+      ? []
+      : replay.items
+        .slice(0, ADMIN_EVENT_REPLAY_BATCH_SIZE)
+        .filter((event) => BigInt(event.eventId) <= through);
+    subscriber.replay = items.map(operationalFrame);
+    const last = items.at(-1);
+    if (last !== undefined) {
+      subscriber.replayCursor = last.eventId;
+    }
+    if (last === undefined || through === null || BigInt(last.eventId) >= through) {
+      subscriber.replayDone = true;
+    }
+    return subscriber.replay.shift();
+  }
+
+  private discardReplayedLiveEvents(subscriber: Subscriber): void {
+    const through = subscriber.replayThrough;
+    if (through === null) {
+      return;
+    }
+    for (let index = subscriber.queue.length - 1; index >= 0; index -= 1) {
+      const pending = subscriber.queue[index];
+      if (pending !== undefined && pending.eventId !== null && pending.eventId <= through) {
+        subscriber.queue.splice(index, 1);
+        if (pending.counted) {
+          subscriber.queuedEvents -= 1;
+          subscriber.queuedBytes -= pending.bytes.byteLength;
+        }
+      }
+    }
   }
 }
 

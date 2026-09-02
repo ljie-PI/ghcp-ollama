@@ -35,11 +35,15 @@ interface BootstrapToken {
 export class AdminAuth {
   private readonly bootstrapTokens = new Map<string, BootstrapToken>();
   private readonly sessions = new Map<string, AdminSession>();
+  private readonly sessionTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly sessionWatchers = new Map<string, Set<() => void>>();
   private closed = false;
 
   constructor(
     private readonly nowMs: () => number = Date.now,
     private readonly createToken: () => string = randomToken,
+    private readonly setTimer: typeof setTimeout = setTimeout,
+    private readonly clearTimer: typeof clearTimeout = clearTimeout,
   ) {}
 
   mintBootstrap(): AdminBootstrapResult {
@@ -79,6 +83,7 @@ export class AdminAuth {
       absoluteExpiresAtMs: now + ADMIN_ABSOLUTE_TIMEOUT_MS,
     };
     this.sessions.set(session.sessionId, session);
+    this.scheduleExpiry(session);
     return session;
   }
 
@@ -99,7 +104,29 @@ export class AdminAuth {
       idleExpiresAtMs: Math.min(now + ADMIN_IDLE_TIMEOUT_MS, current.absoluteExpiresAtMs),
     };
     this.sessions.set(current.sessionId, refreshed);
+    this.scheduleExpiry(refreshed);
     return refreshed;
+  }
+
+  watchSession(sessionId: string, listener: () => void): () => void {
+    this.requireOpen();
+    if (!this.sessions.has(sessionId)) {
+      throw new AdminAuthError("unauthenticated");
+    }
+    const watchers = this.sessionWatchers.get(sessionId) ?? new Set<() => void>();
+    watchers.add(listener);
+    this.sessionWatchers.set(sessionId, watchers);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) {
+        return;
+      }
+      subscribed = false;
+      watchers.delete(listener);
+      if (watchers.size === 0) {
+        this.sessionWatchers.delete(sessionId);
+      }
+    };
   }
 
   verifyCsrf(session: AdminSession, candidate: string | null): boolean {
@@ -112,7 +139,7 @@ export class AdminAuth {
     }
     const key = findMatchingKey(this.sessions, sessionId);
     if (key !== undefined) {
-      this.sessions.delete(key);
+      this.invalidateSession(key);
     }
   }
 
@@ -130,7 +157,9 @@ export class AdminAuth {
     }
     this.closed = true;
     this.bootstrapTokens.clear();
-    this.sessions.clear();
+    for (const sessionId of [...this.sessions.keys()]) {
+      this.invalidateSession(sessionId);
+    }
   }
 
   private requireOpen(): void {
@@ -148,7 +177,47 @@ export class AdminAuth {
     }
     for (const [sessionId, session] of this.sessions) {
       if (session.idleExpiresAtMs <= now || session.absoluteExpiresAtMs <= now) {
-        this.sessions.delete(sessionId);
+        this.invalidateSession(sessionId);
+      }
+    }
+  }
+
+  private scheduleExpiry(session: AdminSession): void {
+    const previous = this.sessionTimers.get(session.sessionId);
+    if (previous !== undefined) {
+      this.clearTimer(previous);
+    }
+    const expiresAtMs = Math.min(session.idleExpiresAtMs, session.absoluteExpiresAtMs);
+    const timer = this.setTimer(() => {
+      const current = this.sessions.get(session.sessionId);
+      if (current === undefined) {
+        return;
+      }
+      if (current.idleExpiresAtMs <= this.nowMs() || current.absoluteExpiresAtMs <= this.nowMs()) {
+        this.invalidateSession(session.sessionId);
+      } else {
+        this.scheduleExpiry(current);
+      }
+    }, Math.max(0, expiresAtMs - this.nowMs()));
+    this.sessionTimers.set(session.sessionId, timer);
+  }
+
+  private invalidateSession(sessionId: string): void {
+    this.sessions.delete(sessionId);
+    const timer = this.sessionTimers.get(sessionId);
+    if (timer !== undefined) {
+      this.clearTimer(timer);
+      this.sessionTimers.delete(sessionId);
+    }
+    const watchers = this.sessionWatchers.get(sessionId);
+    this.sessionWatchers.delete(sessionId);
+    if (watchers !== undefined) {
+      for (const watcher of watchers) {
+        try {
+          watcher();
+        } catch {
+          // One watcher cannot prevent invalidation of the others.
+        }
       }
     }
   }

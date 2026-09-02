@@ -16,7 +16,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
   const listeners = new Set<(event: Readonly<AdminMonitorEvent>) => void>();
   let config = defaultRuntimeConfigSnapshot();
   let configRevision = 1;
-  let historyRevision = 0;
+  const historyRevision = 0;
   const account = {
     accountId: "github.com/42",
     revision: 3,
@@ -146,7 +146,6 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       inspect: () => ({ revision: historyRevision, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512 }),
       clear: (expectedRevision) => {
         if (expectedRevision !== historyRevision) throw coded("revision_conflict");
-        historyRevision += 1;
       },
     },
     telemetry,

@@ -140,6 +140,27 @@ describe("RM-20 AdminTelemetry", () => {
     expect(unsafe.items[0]?.metadata).toEqual({});
   });
 
+  it("replays persisted events in bounded ascending batches", async () => {
+    const db = await database();
+    const insert = db.prepare(
+      "INSERT INTO operational_events (occurred_at_ms, kind, severity, metadata_json) VALUES (?, ?, ?, ?)",
+    );
+    for (let index = 0; index < 130; index += 1) {
+      insert.run(NOW + index, "gateway_started", "info", "{}");
+    }
+    const telemetry = new SqliteAdminTelemetry(db);
+    const signal = new AbortController().signal;
+
+    const first = await telemetry.replayEvents("1", signal);
+    expect(first.latestEventId).toBe("130");
+    expect(first.items).toHaveLength(32);
+    expect(first.items[0]?.eventId).toBe("2");
+    expect(first.items.at(-1)?.eventId).toBe("33");
+
+    const second = await telemetry.replayEvents("129", signal);
+    expect(second.items.map((event) => event.eventId)).toEqual(["130"]);
+  });
+
   it("reports storage, drops, pending work, performance, and sanitized live transitions", async () => {
     const db = await database();
     const recorder = new TelemetryRecorder(db, () => NOW, 100, 512, 1, (event) => {
@@ -156,7 +177,7 @@ describe("RM-20 AdminTelemetry", () => {
       occurredAtMs: NOW,
       kind: "request_failed",
       severity: "warning",
-      metadata: { protocol: "openai_chat", token: "gho_secret" },
+      metadata: { requestId: "req_live", protocol: "openai_chat", category: "upstream_error", token: "gho_secret" },
     });
     recorder.recordUsage(usage({ requestCount: 7 }));
     expect(telemetry.snapshot().pendingMutations).toBe(1);
@@ -177,7 +198,16 @@ describe("RM-20 AdminTelemetry", () => {
     expect(snapshot.droppedOperationalEvents).toBe(0);
     expect(snapshot.performance.status).toBe("degraded");
     expect(observed.map((event) => event.kind)).toEqual(["operational", "performance"]);
+    expect(observed[0]).toMatchObject({
+      kind: "operational",
+      event: { metadata: { requestId: "req_live", protocol: "openai_chat", category: "upstream_error" } },
+    });
     expect(JSON.stringify(observed)).not.toContain("gho_secret");
+
+    const persisted = db.prepare("SELECT metadata_json FROM operational_events ORDER BY event_id LIMIT 1").get() as {
+      metadata_json: string;
+    };
+    expect(persisted.metadata_json).toBe(JSON.stringify({ protocol: "openai_chat" }));
 
     unsubscribe();
     recorder.recordEvent({ occurredAtMs: NOW, kind: "gateway_started", severity: "info" });
