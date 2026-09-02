@@ -1,27 +1,38 @@
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { CredentialStore } from "../accounts/credential_store.js";
 import { copilotHeaders } from "./identity.js";
+import { TokenRefreshError } from "./token_refresh.js";
 
 export async function refreshCopilotToken(
   githubToken: string,
   signal?: AbortSignal,
 ): Promise<{ readonly token: string; readonly expiresAtMs: number }> {
-  const response = await fetch("https://api.github.com/copilot_internal/v2/token", {
-    method: "GET",
-    headers: {
-      authorization: `Bearer ${githubToken}`,
-      accept: "application/json",
-      ...copilotHeaders(),
-    },
-    ...(signal === undefined ? {} : { signal }),
-  });
+  let response: Response;
+  try {
+    response = await fetch("https://api.github.com/copilot_internal/v2/token", {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${githubToken}`,
+        accept: "application/json",
+        ...copilotHeaders(),
+      },
+      ...(signal === undefined ? {} : { signal }),
+    });
+  } catch (error: unknown) {
+    throw new TokenRefreshError(isAbortError(error) ? "timeout" : "network", "copilot token refresh failed");
+  }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new Error("copilot token refresh failed");
+    throw new TokenRefreshError(response.status === 401 ? "unauthorized" : "network", "copilot token refresh failed");
   }
-  const body = await response.json() as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
+  let body: { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
+  try {
+    body = await response.json() as { readonly token?: unknown; readonly expires_at?: unknown; readonly expires_in?: unknown };
+  } catch (error: unknown) {
+    throw new TokenRefreshError(isAbortError(error) ? "timeout" : "network", "copilot token refresh failed");
+  }
   if (typeof body.token !== "string") {
-    throw new Error("copilot token refresh failed");
+    throw new TokenRefreshError("network", "copilot token refresh failed");
   }
   return {
     token: body.token,
@@ -106,4 +117,8 @@ function tokenExpiry(body: { readonly expires_at?: unknown; readonly expires_in?
     return Date.now() + body.expires_in * 1000;
   }
   return Date.now() + 30 * 60 * 1000;
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }

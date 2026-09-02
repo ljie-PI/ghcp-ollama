@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import path from "node:path";
 import type { AccountDirectory } from "./accounts/account_directory.js";
 import { FileCredentialStore, type CredentialStore } from "./accounts/credential_store.js";
@@ -23,7 +22,6 @@ import { AccountDirectory as SqliteAccountDirectory } from "./accounts/account_d
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { createModelCatalogRoutes } from "./protocols/model_catalog/routes.js";
 import type { OllamaTokenCounter } from "./protocols/ollama_chat/bridge.js";
-import { defaultOllamaTokenCounter } from "./protocols/ollama_chat/token_counter.js";
 import { createOpenAiChatRoute } from "./protocols/openai_chat/endpoint.js";
 import { createOllamaChatRoutes } from "./protocols/ollama_chat/endpoint.js";
 import { createAnthropicMessagesRoute } from "./protocols/anthropic_messages/endpoint.js";
@@ -120,7 +118,7 @@ export async function createProductionApplicationContext(
   startup: StartupConfig,
   env: NodeJS.ProcessEnv = {},
 ): Promise<ApplicationContext> {
-  mkdirSync(startup.dataDir, { recursive: true });
+  const credentials = new FileCredentialStore(path.join(startup.dataDir, "credentials.json"));
   const database = openDatabase({
     path: path.join(startup.dataDir, "state.db"),
     migrations: [
@@ -132,7 +130,6 @@ export async function createProductionApplicationContext(
   });
   const runtime = new RuntimeConfigStore(database);
   const snapshot = runtime.seedIfEmpty(env);
-  const credentials = new FileCredentialStore(path.join(startup.dataDir, "credentials.json"));
   const directory = new SqliteAccountDirectory(database, credentials, Date.now, snapshot.accounts.maxAuthenticated);
   await directory.reconcile();
   const fetchDiscovery = createCopilotEndpointDiscovery(credentials);
@@ -162,11 +159,29 @@ export async function createProductionApplicationContext(
     telemetry,
     modelsSource,
     runtime,
-    tokenCounter: defaultOllamaTokenCounter,
+    tokenCounter: litellmStyleTokenCounter,
     async close() {
       await telemetry.flush();
       await catalog.close();
       closeDatabase(database);
     },
   };
+}
+
+function litellmStyleTokenCounter(input: { readonly messages?: unknown; readonly text?: string }): number {
+  const text = input.text ?? flattenTokenCounterInput(input.messages);
+  return text.match(/[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu)?.length ?? 0;
+}
+
+function flattenTokenCounterInput(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(flattenTokenCounterInput).join("\n");
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value).map(flattenTokenCounterInput).join("\n");
+  }
+  return "";
 }

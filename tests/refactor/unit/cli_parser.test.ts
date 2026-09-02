@@ -79,6 +79,26 @@ describe("RM-18 CLI parser", () => {
     });
   });
 
+  it("renders group help from the canonical registry", () => {
+    expect(parseCli(["auth", "--help"], { homedir: home }).command).toEqual({
+      kind: "help",
+      text: [
+        "Usage: ghcg [--data-dir <path>] [--json] auth <command>",
+        "",
+        "Commands:",
+        "  auth login [--host <domain>]",
+        "  auth login poll <flow-id>",
+        "  auth logout [--account <account-id>]",
+        "  auth status",
+        "",
+      ].join("\n"),
+    });
+    expect(parseCli(["accounts", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
+    expect(parseCli(["models", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
+    expect(parseCli(["config", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
+    expect(parseCli(["admin", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
+  });
+
   it("parses every management command to a control operation", () => {
     expect(parseCli(["auth", "login"], { homedir: home }).command).toEqual({ kind: "control", operation: "auth.login.start", args: {} });
     expect(parseCli(["auth", "login", "--host", "ghe.example.com"], { homedir: home }).command).toEqual({ kind: "control", operation: "auth.login.start", args: { host: "ghe.example.com" } });
