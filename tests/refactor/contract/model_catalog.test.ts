@@ -36,10 +36,46 @@ describe("RM-08 CAPI parse and cache", () => {
   it("keeps picker-enabled models in upstream order including duplicates", () => {
     const models = parseCapiModels(CAPI);
     expect(models.map((model) => model.id)).toEqual(["keep", "keep"]);
+    expect(models[0]?.routing).toEqual({
+      mode: "chat",
+      supportedEndpoints: ["/v1/chat/completions"],
+    });
   });
 
   it("rejects incomplete CAPI items", () => {
     expect(() => parseCapiModels({ data: [{ id: "x" }] })).toThrow(/invalid/u);
+  });
+
+  it("captures private routing metadata and ignores malformed routing values", () => {
+    const models = parseCapiModels({
+      data: [
+        {
+          id: "native",
+          name: "Native",
+          vendor: "openai",
+          model_picker_enabled: true,
+          model_info: {
+            mode: "responses",
+            supported_endpoints: ["/v1/responses", 1, null, "/v1/chat/completions"],
+          },
+        },
+        {
+          id: "malformed",
+          name: "Malformed",
+          vendor: "openai",
+          model_picker_enabled: true,
+          model_info: {
+            mode: false,
+            supported_endpoints: "nope",
+          },
+        },
+      ],
+    });
+    expect(models[0]?.routing).toEqual({
+      mode: "responses",
+      supportedEndpoints: ["/v1/responses", "/v1/chat/completions"],
+    });
+    expect(models[1]?.routing).toBeUndefined();
   });
 
   it("does not write cache after invalidate generation change", async () => {
@@ -334,7 +370,22 @@ describe("RM-08 serializers", () => {
     };
     const openai = JSON.parse(serializeOpenAiModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
     expect(openai.data[0]?.supported_endpoints).toBeUndefined();
-    expect(JSON.parse(serializeAnthropicModels(catalog, new Map())).data[0].display_name).toBe("m");
-    expect(JSON.parse(serializeOllamaTags(catalog)).models[0].modified_at).toBe("2026-08-30T05:00:00Z");
+    expect(openai.data[0]?.supportedEndpoints).toBeUndefined();
+    expect(openai.data[0]?.routing).toBeUndefined();
+    expect(openai.data[0]?.mode).toBeUndefined();
+
+    const anthropic = JSON.parse(serializeAnthropicModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
+    expect(anthropic.data[0]?.display_name).toBe("m");
+    expect(anthropic.data[0]?.supported_endpoints).toBeUndefined();
+    expect(anthropic.data[0]?.supportedEndpoints).toBeUndefined();
+    expect(anthropic.data[0]?.routing).toBeUndefined();
+    expect(anthropic.data[0]?.mode).toBeUndefined();
+
+    const ollama = JSON.parse(serializeOllamaTags(catalog)) as { models: Array<Record<string, unknown>> };
+    expect(ollama.models[0]?.modified_at).toBe("2026-08-30T05:00:00Z");
+    expect(ollama.models[0]?.supported_endpoints).toBeUndefined();
+    expect(ollama.models[0]?.supportedEndpoints).toBeUndefined();
+    expect(ollama.models[0]?.routing).toBeUndefined();
+    expect(ollama.models[0]?.mode).toBeUndefined();
   });
 });
