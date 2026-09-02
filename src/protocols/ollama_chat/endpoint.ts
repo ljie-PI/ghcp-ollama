@@ -428,20 +428,24 @@ function toolParameters(parameters: WireJsonObject): WireJsonObject {
   if (required !== undefined && (!isWireJsonArray(required) || required.items.some((item) => typeof item !== "string"))) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
-  const members: Array<{ key: string; value: WireJson }> = [{ key: "type", value: type }];
-  const defs = memberValues(parameters, "$defs")[0];
-  if (defs !== undefined) {
-    members.push({ key: "$defs", value: defs });
-  }
-  const items = memberValues(parameters, "items")[0];
-  if (items !== undefined) {
-    members.push({ key: "items", value: items });
-  }
-  if (required !== undefined) {
-    members.push({ key: "required", value: required });
-  }
-  members.push({ key: "properties", value: toolProperties(properties) });
-  return { kind: "object", members };
+  return {
+    kind: "object",
+    members: parameters.members.flatMap((member) => {
+      if (member.key === "type") {
+        return [{ key: member.key, value: type }];
+      }
+      if (member.key === "$defs" || member.key === "items") {
+        return [member];
+      }
+      if (member.key === "required" && required !== undefined) {
+        return [{ key: member.key, value: required }];
+      }
+      if (member.key === "properties") {
+        return [{ key: member.key, value: toolProperties(properties) }];
+      }
+      return [];
+    }),
+  };
 }
 
 function toolProperties(properties: WireJsonObject): WireJsonObject {
@@ -456,54 +460,60 @@ function toolProperty(value: WireJson): WireJsonObject {
   if (!isWireJsonObject(value)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
-  const members: Array<{ key: string; value: WireJson }> = [];
+  const mapped = new Map<string, WireJson>();
   const anyOf = memberValues(value, "anyOf")[0];
   if (anyOf !== undefined) {
     if (!isWireJsonArray(anyOf)) {
       throw new GatewayFailureError({ kind: "invalid_request" });
     }
-    members.push({ key: "anyOf", value: { kind: "array", items: anyOf.items.map(toolProperty) } });
+    mapped.set("anyOf", { kind: "array", items: anyOf.items.map(toolProperty) });
   }
   const type = memberValues(value, "type")[0];
   if (type !== undefined && typeof type !== "string" && (!isWireJsonArray(type) || type.items.some((item) => typeof item !== "string"))) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   if (type !== undefined) {
-    members.push({ key: "type", value: type });
+    mapped.set("type", type);
   }
   const items = memberValues(value, "items")[0];
   if (items !== undefined) {
-    members.push({ key: "items", value: items });
+    mapped.set("items", items);
   }
   const description = memberValues(value, "description")[0];
   if (description !== undefined && typeof description !== "string") {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   if (description !== undefined) {
-    members.push({ key: "description", value: description });
+    mapped.set("description", description);
   }
   const enumValues = memberValues(value, "enum")[0];
   if (enumValues !== undefined && !isWireJsonArray(enumValues)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   if (enumValues !== undefined) {
-    members.push({ key: "enum", value: enumValues });
+    mapped.set("enum", enumValues);
   }
   const nestedProperties = memberValues(value, "properties")[0];
   if (nestedProperties !== undefined) {
     if (!isWireJsonObject(nestedProperties)) {
       throw new GatewayFailureError({ kind: "invalid_request" });
     }
-    members.push({ key: "properties", value: toolProperties(nestedProperties) });
+    mapped.set("properties", toolProperties(nestedProperties));
   }
   const required = memberValues(value, "required")[0];
   if (required !== undefined && (!isWireJsonArray(required) || required.items.some((item) => typeof item !== "string"))) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   if (required !== undefined) {
-    members.push({ key: "required", value: required });
+    mapped.set("required", required);
   }
-  return { kind: "object", members };
+  return {
+    kind: "object",
+    members: value.members.flatMap((member) => {
+      const mappedValue = mapped.get(member.key);
+      return mappedValue === undefined ? [] : [{ key: member.key, value: mappedValue }];
+    }),
+  };
 }
 
 function hasOllamaImages(messages: WireJsonArray): boolean {
@@ -533,6 +543,9 @@ function mappedOptions(value: WireJson | undefined): Array<{ key: string; value:
   const mapped: Array<{ key: string; value: WireJson }> = [];
   const numPredict = memberValues(value, "num_predict")[0];
   if (numPredict !== undefined) {
+    if (!isWireJsonNumber(numPredict)) {
+      throw new GatewayFailureError({ kind: "invalid_request" });
+    }
     if (!isPositiveInteger(numPredict)) {
       throw new GatewayFailureError({ kind: "unsupported_semantics" });
     }
