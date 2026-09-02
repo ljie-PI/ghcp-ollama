@@ -370,7 +370,22 @@ describe("RM-08 serializers", () => {
     };
     const openai = JSON.parse(serializeOpenAiModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
     expect(openai.data[0]?.supported_endpoints).toBeUndefined();
-    expect(JSON.parse(serializeAnthropicModels(catalog, new Map())).data[0].display_name).toBe("m");
-    expect(JSON.parse(serializeOllamaTags(catalog)).models[0].modified_at).toBe("2026-08-30T05:00:00Z");
+    expect(openai.data[0]?.supportedEndpoints).toBeUndefined();
+    expect(openai.data[0]?.routing).toBeUndefined();
+    expect(openai.data[0]?.mode).toBeUndefined();
+
+    const anthropic = JSON.parse(serializeAnthropicModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
+    expect(anthropic.data[0]?.display_name).toBe("m");
+    expect(anthropic.data[0]?.supported_endpoints).toBeUndefined();
+    expect(anthropic.data[0]?.supportedEndpoints).toBeUndefined();
+    expect(anthropic.data[0]?.routing).toBeUndefined();
+    expect(anthropic.data[0]?.mode).toBeUndefined();
+
+    const ollama = JSON.parse(serializeOllamaTags(catalog)) as { models: Array<Record<string, unknown>> };
+    expect(ollama.models[0]?.modified_at).toBe("2026-08-30T05:00:00Z");
+    expect(ollama.models[0]?.supported_endpoints).toBeUndefined();
+    expect(ollama.models[0]?.supportedEndpoints).toBeUndefined();
+    expect(ollama.models[0]?.routing).toBeUndefined();
+    expect(ollama.models[0]?.mode).toBeUndefined();
   });
 });
