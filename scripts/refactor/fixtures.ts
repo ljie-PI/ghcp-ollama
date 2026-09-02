@@ -1,14 +1,26 @@
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { AccountDirectory, type BoundAccount } from "../../src/accounts/account_directory.js";
+import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { assertNode24 } from "./node_version.js";
-import { outboundHeaders } from "../../src/copilot/backend.js";
+import { outboundHeaders, type BoundCopilot, type CopilotBackend, type CopilotTarget } from "../../src/copilot/backend.js";
 import { parseChatSse } from "../../src/copilot/chat_sse.js";
+import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
+import { parseStartupConfig } from "../../src/config/startup_config.js";
+import { createGateway } from "../../src/gateway/create_gateway.js";
+import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
+import { embedMigration } from "../../src/persistence/migrations.js";
+import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
+import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { decodeOpenAiChatRequest, prepareOpenAiChatRequest } from "../../src/protocols/openai_chat/endpoint.js";
+import { createOllamaChatRoutes } from "../../src/protocols/ollama_chat/endpoint.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "../../src/protocols/openai_chat/wire.js";
 import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
+import type { ChatRequest, ChatResponse, NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../../src/protocols/chat_completions/types.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 export interface FixtureManifestEntry {
@@ -78,6 +90,7 @@ export async function verifyFixtureManifests(root = FIXTURE_ROOT, verifyExpected
 
   if (verifyExpectedBytes) {
     await verifyOpenAiChatFixtures(entries);
+    await verifyOllamaFixtures(entries);
   }
   return entries;
 }
@@ -128,6 +141,10 @@ async function main(): Promise<void> {
       await generateOpenAiChatFixture(entry);
       return;
     }
+    if (entry?.owner === "RM-10") {
+      await generateOllamaFixture(entry);
+      return;
+    }
     assertFixtureGeneratorAvailable(caseId, entries);
   }
 
@@ -150,11 +167,128 @@ async function verifyOpenAiChatFixtures(entries: readonly FixtureManifestEntry[]
     if (expected === undefined) {
       throw new Error(`fixture case ${entry.caseId} does not have an RM-09 generator`);
     }
+
     const actual = await readFile(path.join(FIXTURE_ROOT, "openai-chat", entry.expected), "utf8");
     if (actual !== expected) {
       throw new Error(`fixture case ${entry.caseId} expected bytes are stale; run fixtures:generate -- --case ${entry.caseId} --accept`);
     }
   }
+}
+
+async function generateOllamaFixture(entry: FixtureManifestEntry): Promise<void> {
+  const expected = await expectedOllamaFixture(entry);
+  if (expected === undefined) {
+    assertFixtureGeneratorAvailable(entry.caseId, [entry]);
+  }
+  await writeFile(path.join(FIXTURE_ROOT, "ollama", entry.expected), expected, "utf8");
+}
+
+async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): Promise<void> {
+  for (const entry of entries.filter((candidate) => candidate.owner === "RM-10")) {
+    const expected = await expectedOllamaFixture(entry);
+    if (expected === undefined) {
+      throw new Error(`fixture case ${entry.caseId} does not have an RM-10 generator`);
+    }
+    const actual = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.expected), "utf8");
+    if (actual !== expected) {
+      throw new Error(`fixture case ${entry.caseId} expected bytes are stale; run fixtures:generate -- --case ${entry.caseId} --accept`);
+    }
+  }
+}
+
+async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
+  if (entry.caseId !== "ollama.request.capture") {
+    return undefined;
+  }
+  const input = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.input), "utf8");
+  const backend = new FixtureOllamaBackend();
+  const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-fixture-"));
+  const database = openDatabase({
+    path: path.join(dir, "state.db"),
+    migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+    nowMs: () => 0,
+  });
+  const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => 0);
+  await accounts.upsertAuthenticated({
+    host: "github.com",
+    userId: "1",
+    secret: { generation: 0, githubToken: "fixture" },
+  });
+  const gateway = await createGateway({
+    startup: parseStartupConfig([], {}, { homedir: dir }),
+    runtime: defaultRuntimeConfigSnapshot(),
+  }, createOllamaChatRoutes({
+    directory: accounts,
+    copilot: backend,
+    now: () => new Date(0),
+  }), {
+    createRequestId: () => "req_fixture",
+  });
+  try {
+    const response = await gateway.fetch(new Request("http://127.0.0.1:31400/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: input,
+    }));
+    await response.arrayBuffer();
+  } finally {
+    await gateway.close();
+    closeDatabase(database);
+  }
+  const request = backend.requests[0];
+  if (request === undefined) {
+    throw new Error("ollama.request.capture did not call Chat upstream");
+  }
+  const headers = outboundHeaders("fixture-token", new Headers({ "content-type": "application/json" }));
+  return JSON.stringify({
+    upstreamUrl: "https://api.githubcopilot.com/chat/completions",
+    headers: {
+      "content-type": headers.get("content-type"),
+      "copilot-integration-id": headers.get("copilot-integration-id"),
+      "editor-version": headers.get("editor-version"),
+      "editor-plugin-version": headers.get("editor-plugin-version"),
+      "user-agent": headers.get("user-agent"),
+      "x-github-api-version": headers.get("x-github-api-version"),
+    },
+    hasVisionInput: request.hasVisionInput,
+    chatCallCount: 1,
+    body: decodeBytes(request.body),
+  });
+}
+
+class FixtureOllamaBackend implements CopilotBackend {
+  readonly requests: ChatRequest[] = [];
+
+  async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
+    const target: CopilotTarget = { endpoint: "https://api.githubcopilot.com", token: "fixture-token" };
+    return {
+      accountId: account.accountId,
+      target,
+      completeChat: async (request): Promise<ChatResponse> => {
+        this.requests.push(request);
+        return { status: 200, headers: new Headers(), body: new TextEncoder().encode("{}") };
+      },
+      openChatStream: async (request): Promise<UpstreamByteStream> => {
+        this.requests.push(request);
+        return {
+          status: 200,
+          headers: new Headers({ "content-type": "text/event-stream" }),
+          bytes: streamFixtureBytes("data: [DONE]\n\n"),
+          cancel: async () => undefined,
+        };
+      },
+      completeResponses: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteResponse> => {
+        throw new Error("Responses must not be called by Ollama fixture");
+      },
+      openResponsesStream: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteStream> => {
+        throw new Error("Responses stream must not be called by Ollama fixture");
+      },
+    };
+  }
+}
+
+async function* streamFixtureBytes(text: string): AsyncIterable<Uint8Array> {
+  yield new TextEncoder().encode(text);
 }
 
 async function expectedOpenAiChatFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
