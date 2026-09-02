@@ -183,6 +183,8 @@ flowchart LR
     GitHub[GitHub.com or GHES]
     CAPI[GitHub Copilot CAPI]
     History[Responses history module]
+    Accounts[Accounts module]
+    Telemetry[Telemetry module]
     State[(SQLite state.db)]
     Admin[Admin module]
 
@@ -197,9 +199,12 @@ flowchart LR
     History --> State
     AdminBrowser --> Host
     Host --> Admin
+    Admin --> Accounts
     Admin --> Catalog
     Admin --> History
-    Admin --> State
+    Admin --> Telemetry
+    Accounts --> State
+    Telemetry --> State
 ```
 
 OpenAI Chat、Anthropic、Ollama 以及 Responses 的 bridge plan 调用 Chat Completions upstream；
@@ -225,6 +230,8 @@ flowchart TD
     History[Responses history module]
     Persistence[Persistence module]
     Admin[Admin module]
+    Accounts[Accounts module]
+    Telemetry[Telemetry module]
 
     Main --> Gateway
     Gateway --> Http
@@ -243,7 +250,12 @@ flowchart TD
     Models --> Copilot
     Copilot --> Stream
     History --> Persistence
-    Admin --> Persistence
+    Accounts --> Persistence
+    Telemetry --> Persistence
+    Admin --> Accounts
+    Admin --> Models
+    Admin --> History
+    Admin --> Telemetry
 ```
 
 依赖只能沿箭头方向。Protocol modules 不 import Hono、SQLite、`process.env` 或具体 HTTP client。
@@ -278,6 +290,79 @@ export async function createGateway(
 
 `close()` 幂等。它停止接收新请求、取消在途 upstream、等待有界 grace period，然后关闭 HTTP pool、
 SQLite 和日志资源。
+
+Gateway Foundation 通过 additive optional mount 接入管理面，而不修改协议 `RouteRegistration`：
+
+```ts
+export interface AdminRequestContext {
+  readonly requestId: string;
+  readonly signal: AbortSignal;
+  readonly listenerOrigin: LoopbackOrigin;
+  readonly activity: GatewayActivity;
+}
+
+export type LoopbackOrigin = `http://127.0.0.1:${number}`;
+
+export interface AdminModule {
+  handle(request: Request, context: Readonly<AdminRequestContext>): Promise<Response>;
+  mintBootstrap(): AdminBootstrapResult;
+  close(): void;
+}
+
+export type AdminBootstrapResult =
+  | { readonly kind: "issued"; readonly token: string; readonly expiresAt: string }
+  | { readonly kind: "capacity" }
+  | { readonly kind: "closed" };
+
+export interface AdminStaticModule {
+  handle(request: Request, signal: AbortSignal): Promise<Response>;
+}
+
+export interface LocalControlModule {
+  handle(
+    request: Request,
+    context: Readonly<{
+      requestId: string;
+      signal: AbortSignal;
+      listenerOrigin: LoopbackOrigin;
+    }>,
+  ): Promise<Response>;
+  close(): void;
+}
+
+export interface AdminRuntimeStatus {
+  snapshot(): Readonly<{
+    version: string;
+    uptimeMs: number;
+    daemon: { readonly managed: boolean; readonly pid?: number; readonly startedAt?: string };
+  }>;
+}
+```
+
+`GatewayDependencies` 可选接受 `admin?: AdminModule`、`control?: LocalControlModule` 与
+`adminStatic?: AdminStaticModule`。现有 callers 省略它们时行为不变；`RouteRegistration.body` 仍只有
+`"none" | "wire-json-object"`，已实现 protocol factories
+与 wire behavior 不变。
+
+Host 在 protocol route matching 前把 exact `/__ghcg/control/v1/*` 交给 RM-19 `LocalControlModule`，并把
+exact `/admin/api/v1` 与 `/admin/api/v1/*` 交给
+`AdminModule.handle`。RM-21 的 `adminStatic` 只在 Admin API matching 后处理 `GET /admin/*`；未匹配的
+`/admin/api/v1/*` 永远不能变成 SPA HTML。Host 拥有 Admin request ID、caller/shutdown abort 和 active
+listener Origin；Admin module 从 `RuntimeConfigStore` 捕获当前 body limit，并拥有管理 JSON parsing、TypeBox
+validation、authentication、error envelope 与 SSE lifecycle。
+
+`LocalControlModule` 独占 control authentication、identity handshake、command JSON validation 与 control error
+envelope。它不使用 protocol `RouteRegistration`、inference admission 或 Admin browser authentication。RM-19
+把同一个 `AdminModule` instance 注入 LocalControlModule，`admin-bootstrap` 只调用其 `mintBootstrap()`。
+Control request body 使用固定 1 MiB hard cap；status/stop/bootstrap 拒绝 nonempty body，command body 读到第一个
+超限 byte 时取消 reader 并返回 control `400 invalid_command`。Client abort 取消 body/use case 且不追加 bytes。
+
+`createAdminModule` 接收 `AdminRuntimeStatus`。RM-19 production adapter 组合 build version、process uptime 与
+verified daemon identity；RM-20 tests 使用 scripted adapter。Admin 不读取 process globals 或 daemon file。
+
+Gateway close 顺序固定为：停止 mounted admission → abort mounted in-flight requests →
+`LocalControlModule.close()` → `AdminModule.close()` → existing `onClose` persistence/transport cleanup。两个
+`close()` 都幂等；control 先关闭，保证它不能在 Admin teardown 后继续 mint bootstrap 或 dispatch command。
 
 ### 7.2 Protocol endpoint modules
 
@@ -923,6 +1008,56 @@ Semantic Checkpoint 同步等待 transaction commit。Usage Buckets 和 Operatio
 构建产物随 npm package 发布，由 Hono 提供 `/admin/*`。浏览器内存不计入 gateway daemon RSS；
 关闭页面后后台不新增持久状态；Admin Session 仍按 idle/absolute timeout 管理。
 
+### 16.1.1 管理面 module seam
+
+管理面是同一进程中的独立纵向 module，不是 inference protocol，也不是第二个 server。`web/` 只调用
+`/admin/api/v1/*`，不读取 SQLite、secret file 或 daemon identity。
+
+`AdminModule.handle` 后隐藏 Admin Hono sub-app、bounded JSON body read、TypeBox no-coercion validation、Session/
+CSRF/Origin、Admin envelope 和 monitoring SSE。Admin 不 import inference `WireJson`、protocol presenters、
+protocol converters 或 `better-sqlite3`。
+
+管理 use cases 只调用 Accounts、PreferredModelManager、RuntimeConfigStore、ResponsesHistoryAdmin、
+AdminTelemetry 与 AdminRuntimeStatus 的窄 interface。Gateway 通过每次 `AdminRequestContext.activity` 提供
+GatewayActivity，避免 Admin/Gateway composition cycle：
+
+```ts
+export interface AdminTelemetry {
+  queryUsage(query: Readonly<AdminUsageQuery>, signal: AbortSignal): Promise<AdminUsagePage>;
+  queryEvents(query: Readonly<AdminEventQuery>, signal: AbortSignal): Promise<AdminEventPage>;
+  replayEvents(afterEventId: string, signal: AbortSignal): Promise<AdminEventReplay>;
+  snapshot(): AdminTelemetrySnapshot;
+  subscribe(listener: (event: Readonly<AdminMonitorEvent>) => void): () => void;
+}
+
+export interface GatewayActivity {
+  snapshot(): Readonly<{
+    activeRequests: number;
+    activeStreams: number;
+    queuedRequests: number;
+  }>;
+}
+
+export interface AdminRuntimeStatus {
+  snapshot(): Readonly<{
+    version: string;
+    uptimeMs: number;
+    daemon: { readonly managed: boolean; readonly pid?: number; readonly startedAt?: string };
+  }>;
+}
+```
+
+`AdminTelemetry` 是 telemetry module 内的只读 adapter，复用 RM-05 已实现 schema、retention、sanitizer 与
+performance state，不改变写入、batch 或 cleanup 行为。RM-20 给 `TelemetryRecorder` 与
+`PerformanceWindows` 增加可选 in-process observer；无 observer 时 write/evaluate 路径与结果不变。
+`subscribe` 只发布 sanitized Operational Event 与 performance transition；browser replay、queue 和
+backpressure 仍由 `AdminModule` 拥有。
+
+`GatewayActivity` 是 RM-20 在 Gateway 内增加的只读 instrumentation。它从既有 admission counts 读取 active/
+queued request，并只在 response lifecycle 上增加 active-stream counter；无 Admin mount 时不创建 observer、
+不增加 timer/queue，也不改变 response bytes、admission、abort 或 cleanup。Admin 只获得 snapshot，不获得
+mutation capability。
+
 ### 16.2 功能
 
 - GitHub.com/GHES device login；
@@ -947,6 +1082,25 @@ response body、Authorization、OAuth token、Copilot token 或完整 upstream e
 - Bootstrap exchange 不要求已有 Admin Session/CSRF，但要求精确 Origin 与 valid one-use token；其他所有
   Admin 写请求同时验证 Admin Session、CSRF token 和精确 Origin。
 - Static catch-all 只能位于 `/admin/*`，不能吞掉 `/v1/*`、`/api/*`、`/healthz` 或 `/readyz`。
+
+Admin HTTP closure：
+
+- `listenerOrigin` 由 active listener 在 validated startup port 上构造为 `LoopbackOrigin`，精确为
+  `http://127.0.0.1:<startup-port>`，不能固定为默认 port 或接受调用方任意 string。
+- JSON mutations 只接受 `application/json` 或显式 UTF-8 charset，以及缺失/单个 `identity`
+  Content-Encoding；empty、malformed、non-object、unknown fields、unsupported media 或 body over-limit 都返回
+  `400 validation_failed`。
+- Admin module 在 request handling 开始时从 `RuntimeConfigStore.readSnapshot()` 捕获
+  `limits.requestBodyBytes`，读到第一个超限 byte 时取消 reader；后续 config CAS 只影响后续请求。
+- No-body routes 拒绝 nonempty body；每个 route 拒绝 unknown 或 duplicate query fields。
+- 每个 Admin JSON/SSE response 设置 `Cache-Control: no-store` 与 gateway-generated `x-request-id`；JSON 使用
+  `application/json; charset=utf-8`。入站 request ID 不回显。
+- Client abort 和 Gateway close 取消 body reader、use case、catalog/device-flow operation 或 SSE subscription，
+  且不再追加 bytes。Admin 不进入 inference admission，不使用 protocol presenter。
+- `AdminModule.close()` 清 sessions/bootstrap tokens、subscribers 与 heartbeat。RM-19 control route 和 Admin HTTP
+  必须引用同一个 `AdminModule` instance。`close()` 幂等；closed 后 `handle` fail closed，`mintBootstrap`
+  返回 `kind:"closed"`。第九个 outstanding bootstrap 返回 `kind:"capacity"`；RM-19 把这两种结果映射为
+  control `503 not_ready`，不泄露内部计数。
 
 ## 17. Error ownership
 
@@ -1161,10 +1315,15 @@ src/
     canonical_json.ts
 
   admin/
+    routes.ts
     api.ts
     auth.ts
-    metrics.ts
+    events.ts
+    static.ts
     contracts.ts
+
+  telemetry/
+    admin.ts
 
 web/
   src/
@@ -1188,8 +1347,8 @@ validator 可以保留在同一文件；只有状态机或 serializer 足够复�
 3. 创建 credential store、Copilot backend 和 model catalog；
 4. 创建 Responses history；
 5. 创建四个 protocol endpoints；
-6. 显式注册 public/admin routes；
-7. 加载静态 Web assets；
+6. 显式注册 public protocol routes，并可选 mount `AdminModule`；
+7. RM-21 后可选 mount `AdminStaticModule` assets；
 8. 注册 graceful shutdown。
 
 Protocol modules 接收 dependencies，不自行读取 `process.env`、打开 database 或创建 HTTP client。
