@@ -40,12 +40,12 @@ export function ollamaNonstreamResponse(
     message: {
       role: "assistant",
       content: reduced.content,
-      ...(reduced.thinking === undefined ? {} : { thinking: reduced.thinking }),
+      ...(reduced.thinking === undefined || reduced.thinking.length === 0 ? {} : { thinking: reduced.thinking }),
       ...(toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
     },
     done: true,
     done_reason: doneReason,
-    ...(logprobs === undefined ? {} : { logprobs }),
+    ...(logprobs === undefined || logprobs.length === 0 ? {} : { logprobs }),
     ...(usage.promptEvalCount === 0 ? {} : { prompt_eval_count: usage.promptEvalCount }),
     ...(usage.evalCount === 0 ? {} : { eval_count: usage.evalCount }),
   };
@@ -206,14 +206,18 @@ function logprobItem(value: WireJson, allowTop: boolean): Record<string, unknown
     if (!isWireJsonArray(bytes) || bytes.items.some((item) => !isByteInteger(item))) {
       throw new GatewayFailureError({ kind: "invalid_logprobs" });
     }
-    result.bytes = bytes.items.map((item) => numberValue(item));
+    if (bytes.items.length > 0) {
+      result.bytes = bytes.items.map((item) => numberValue(item));
+    }
   }
   const top = memberValues(value, "top_logprobs")[0];
   if (top !== undefined && top !== null) {
     if (!allowTop || !isWireJsonArray(top)) {
       throw new GatewayFailureError({ kind: "invalid_logprobs" });
     }
-    result.top_logprobs = top.items.map((item) => logprobItem(item, false));
+    if (top.items.length > 0) {
+      result.top_logprobs = top.items.map((item) => logprobItem(item, false));
+    }
   }
   return result;
 }

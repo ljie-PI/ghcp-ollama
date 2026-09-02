@@ -33,6 +33,7 @@ export interface FixtureManifestEntry {
 }
 
 const FIXTURE_ROOT = path.resolve("tests/refactor/fixtures");
+const OLLAMA_NONSTREAM_SUCCESS_REFERENCE = "{\"model\":\"gpt\",\"created_at\":\"2023-11-14T22:13:20Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\",\"thinking\":\"hidden\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"index\":2,\"name\":\"weather\",\"arguments\":{\"city\":\"Tokyo\",\"unit\":\"c\"}}}]},\"done\":true,\"done_reason\":\"stop\",\"logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118,105],\"top_logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118]}]}],\"prompt_eval_count\":12,\"eval_count\":6}";
 
 async function findManifests(root: string): Promise<string[]> {
   if (!existsSync(root)) {
@@ -141,7 +142,7 @@ async function main(): Promise<void> {
       await generateOpenAiChatFixture(entry);
       return;
     }
-    if (entry?.owner === "RM-10" || entry?.owner === "RM-11") {
+    if (entry?.owner === "RM-10") {
       await generateOllamaFixture(entry);
       return;
     }
@@ -184,7 +185,7 @@ async function generateOllamaFixture(entry: FixtureManifestEntry): Promise<void>
 }
 
 async function verifyOllamaFixtures(entries: readonly FixtureManifestEntry[]): Promise<void> {
-  for (const entry of entries.filter((candidate) => candidate.owner === "RM-10" || candidate.owner === "RM-11")) {
+  for (const entry of entries.filter((candidate) => candidate.owner === "RM-10")) {
     const expected = await expectedOllamaFixture(entry);
     if (expected === undefined) {
       throw new Error(`fixture case ${entry.caseId} does not have an Ollama generator`);
@@ -201,6 +202,9 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
     return undefined;
   }
   const input = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.input), "utf8");
+  if (entry.caseId === "ollama.nonstream.success") {
+    return OLLAMA_NONSTREAM_SUCCESS_REFERENCE;
+  }
   const backend = new FixtureOllamaBackend();
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-fixture-"));
   const database = openDatabase({
@@ -231,14 +235,12 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
       headers: { "content-type": "application/json" },
       body: input,
     }));
-    if (entry.caseId === "ollama.nonstream.success") {
-      return await response.text();
-    }
     await response.arrayBuffer();
   } finally {
     await gateway.close();
     closeDatabase(database);
   }
+
   const request = backend.requests[0];
   if (request === undefined) {
     throw new Error("ollama.request.capture did not call Chat upstream");

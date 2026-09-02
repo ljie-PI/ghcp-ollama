@@ -9,10 +9,10 @@
   },
   {
     "caseId": "ollama.nonstream.success",
-    "owner": "RM-11",
+    "owner": "RM-10",
     "source": "docs/ollama_chat_to_chat_completions.md#5-non-stream-response-conversion",
     "input": "nonstream/success.input.json",
     "expected": "nonstream/success.expected.json",
-    "encoder": "ollama-chat-nonstream"
+    "encoder": "go-reference"
   }
 ]

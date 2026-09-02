@@ -222,6 +222,40 @@ describe("RM-10 Ollama non-stream", () => {
     }
   });
 
+  it("applies Go omitempty to empty optional thinking and logprob slices", async () => {
+    const backend = new NonstreamBackend();
+    backend.responseBody = new TextEncoder().encode(JSON.stringify({
+      choices: [{
+        index: 0,
+        message: { content: "visible", reasoning_content: "" },
+        finish_reason: "stop",
+        logprobs: {
+          content: [{
+            token: "visible",
+            logprob: -0.5,
+            bytes: [],
+            top_logprobs: [],
+          }],
+        },
+      }],
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+    }));
+    const { gw, close } = await ollamaGateway(backend);
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt", stream: false, messages: [{ role: "user", content: "hi" }] }),
+      }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(
+        "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\"},\"done\":true,\"done_reason\":\"stop\",\"logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5}]}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
   it("maps finish reason matrix", async () => {
     const cases = [
       { finish: "stop", expected: "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\"}" },
