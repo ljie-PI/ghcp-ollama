@@ -18,7 +18,8 @@ import { migration as runtimeConfigMigration } from "../../../src/persistence/mi
 import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
 import { migration as telemetryMigration } from "../../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../../src/persistence/migrations/030_responses_history.js";
-import { bootstrapGateway, createPublicRouteRegistrations, litellmStyleTokenCounter } from "../../../src/main.js";
+import { bootstrapGateway, createPublicRouteRegistrations } from "../../../src/main.js";
+import { litellmStyleTokenCounter } from "../../../src/protocols/ollama_chat/token_counter.js";
 import { SqliteResponsesHistory } from "../../../src/protocols/responses/history.js";
 
 const encoder = new TextEncoder();
