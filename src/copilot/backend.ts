@@ -32,8 +32,8 @@ export interface CopilotBackend {
 export interface ScriptedCopilotHandlers {
   chat?: ChatResponse | ((request: ChatRequest) => ChatResponse | Promise<ChatResponse>);
   chatStream?: Uint8Array[] | AsyncIterable<Uint8Array> | ((request: ChatRequest) => Uint8Array[] | AsyncIterable<Uint8Array>);
-  responses?: UpstreamByteResponse;
-  responsesStream?: Uint8Array[];
+  responses?: UpstreamByteResponse | ((request: NativeResponsesUpstreamRequest) => UpstreamByteResponse | Promise<UpstreamByteResponse>);
+  responsesStream?: Uint8Array[] | AsyncIterable<Uint8Array> | ((request: NativeResponsesUpstreamRequest) => Uint8Array[] | AsyncIterable<Uint8Array>);
 }
 
 export class ScriptedCopilotBackend implements CopilotBackend {
@@ -75,19 +75,26 @@ export class ScriptedCopilotBackend implements CopilotBackend {
           cancel: async () => undefined,
         };
       },
-      async completeResponses() {
+      async completeResponses(request) {
         captured.push({ accountId: account.accountId, kind: "responses" });
-        if (handlers.responses === undefined) {
+        const handler = handlers.responses;
+        if (typeof handler === "function") {
+          return handler(request);
+        }
+        if (handler === undefined) {
           throw new Error("scripted responses missing");
         }
-        return handlers.responses;
+        return handler;
       },
-      async openResponsesStream() {
+      async openResponsesStream(request) {
         captured.push({ accountId: account.accountId, kind: "responses-stream" });
+        const stream = typeof handlers.responsesStream === "function"
+          ? handlers.responsesStream(request)
+          : handlers.responsesStream;
         return {
           status: 200,
           headers: new Headers({ "content-type": "text/event-stream" }),
-          bytes: asAsync(handlers.responsesStream ?? []),
+          bytes: asAsync(stream ?? []),
           cancel: async () => undefined,
         };
       },
