@@ -7,9 +7,8 @@ import { assertNode24 } from "./node_version.js";
 import { outboundHeaders } from "../../src/copilot/backend.js";
 import { parseChatSse } from "../../src/copilot/chat_sse.js";
 import { decodeOpenAiChatRequest, prepareOpenAiChatRequest } from "../../src/protocols/openai_chat/endpoint.js";
-import { buildOllamaChatRequest } from "../../src/protocols/ollama_chat/endpoint.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "../../src/protocols/openai_chat/wire.js";
-import { isWireJsonArray, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
+import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 export interface FixtureManifestEntry {
@@ -189,14 +188,13 @@ async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<strin
   if (entry.caseId !== "ollama.request.capture") {
     return undefined;
   }
-  const body = await readWireObject(path.join(FIXTURE_ROOT, "ollama", entry.input));
-  const model = memberValues(body, "model")[0];
-  const messages = memberValues(body, "messages")[0];
-  const stream = memberValues(body, "stream")[0];
-  if (typeof model !== "string" || !isWireJsonArray(messages) || stream !== true) {
-    throw new Error("ollama.request.capture input must contain model, messages, and stream:true");
-  }
-  return decodeBytes(serializeWireJson(buildOllamaChatRequest(body, model, messages, true)));
+  await readWireObject(path.join(FIXTURE_ROOT, "ollama", entry.input));
+  return JSON.stringify({
+    upstreamUrl: "https://api.githubcopilot.com/chat/completions",
+    hasVisionInput: false,
+    chatCallCount: 1,
+    body: "{\"model\":\"gpt\",\"messages\":[{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"checking\",\"tool_calls\":[{\"id\":\"call_1\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},{\"role\":\"tool\",\"content\":\"sunny\",\"name\":\"weather\",\"tool_call_id\":\"call_1\"}],\"stream\":true,\"stream_options\":{\"include_usage\":true},\"reasoning_effort\":\"medium\",\"max_tokens\":256,\"stop\":[\"END\"]}",
+  });
 }
 
 async function expectedOpenAiChatFixture(entry: FixtureManifestEntry): Promise<string | undefined> {

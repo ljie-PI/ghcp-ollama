@@ -178,7 +178,7 @@ function asNonEmptyString(value: WireJson | undefined): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export function buildOllamaChatRequest(
+function buildOllamaChatRequest(
   body: WireJsonObject,
   model: string,
   messages: WireJsonArray,
@@ -250,9 +250,9 @@ function ollamaMessageToChat(value: WireJson): WireJsonObject {
   if (!isWireJsonObject(value)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
-  const role = asNonEmptyString(memberValues(value, "role")[0]);
+  const role = memberValues(value, "role")[0];
   const content = memberValues(value, "content")[0];
-  if (role === undefined || typeof content !== "string") {
+  if (typeof role !== "string" || typeof content !== "string") {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   const members: Array<{ key: string; value: WireJson }> = [
@@ -403,12 +403,12 @@ function ollamaToolToChat(value: WireJson): WireJsonObject {
   if (typeof name !== "string" || (description !== undefined && typeof description !== "string") || !isWireJsonObject(parameters)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
-  validateToolParameters(parameters);
+  const mappedParameters = toolParameters(parameters);
   const functionMembers: Array<{ key: string; value: WireJson }> = [{ key: "name", value: name }];
   if (description !== undefined) {
     functionMembers.push({ key: "description", value: description });
   }
-  functionMembers.push({ key: "parameters", value: parameters });
+  functionMembers.push({ key: "parameters", value: mappedParameters });
   const members: Array<{ key: string; value: WireJson }> = [{ key: "type", value: type }];
   const items = memberValues(value, "items")[0];
   if (items !== undefined) {
@@ -418,7 +418,7 @@ function ollamaToolToChat(value: WireJson): WireJsonObject {
   return { kind: "object", members };
 }
 
-function validateToolParameters(parameters: WireJsonObject): void {
+function toolParameters(parameters: WireJsonObject): WireJsonObject {
   const type = memberValues(parameters, "type")[0];
   const properties = memberValues(parameters, "properties")[0];
   const required = memberValues(parameters, "required")[0];
@@ -428,53 +428,82 @@ function validateToolParameters(parameters: WireJsonObject): void {
   if (required !== undefined && (!isWireJsonArray(required) || required.items.some((item) => typeof item !== "string"))) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
-  for (const property of properties.members) {
-    validateToolProperty(property.value);
+  const members: Array<{ key: string; value: WireJson }> = [{ key: "type", value: type }];
+  const defs = memberValues(parameters, "$defs")[0];
+  if (defs !== undefined) {
+    members.push({ key: "$defs", value: defs });
   }
+  const items = memberValues(parameters, "items")[0];
+  if (items !== undefined) {
+    members.push({ key: "items", value: items });
+  }
+  if (required !== undefined) {
+    members.push({ key: "required", value: required });
+  }
+  members.push({ key: "properties", value: toolProperties(properties) });
+  return { kind: "object", members };
 }
 
-function validateToolProperty(value: WireJson): void {
+function toolProperties(properties: WireJsonObject): WireJsonObject {
+  const members: Array<{ key: string; value: WireJson }> = [];
+  for (const property of properties.members) {
+    members.push({ key: property.key, value: toolProperty(property.value) });
+  }
+  return { kind: "object", members };
+}
+
+function toolProperty(value: WireJson): WireJsonObject {
   if (!isWireJsonObject(value)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+  const members: Array<{ key: string; value: WireJson }> = [];
   const anyOf = memberValues(value, "anyOf")[0];
   if (anyOf !== undefined) {
     if (!isWireJsonArray(anyOf)) {
       throw new GatewayFailureError({ kind: "invalid_request" });
     }
-    for (const item of anyOf.items) {
-      validateToolProperty(item);
-    }
+    members.push({ key: "anyOf", value: { kind: "array", items: anyOf.items.map(toolProperty) } });
   }
   const type = memberValues(value, "type")[0];
   if (type !== undefined && typeof type !== "string" && (!isWireJsonArray(type) || type.items.some((item) => typeof item !== "string"))) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+  if (type !== undefined) {
+    members.push({ key: "type", value: type });
+  }
   const items = memberValues(value, "items")[0];
-  if (items !== undefined && !isWireJsonObject(items) && !isWireJsonArray(items)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
+  if (items !== undefined) {
+    members.push({ key: "items", value: items });
   }
   const description = memberValues(value, "description")[0];
   if (description !== undefined && typeof description !== "string") {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+  if (description !== undefined) {
+    members.push({ key: "description", value: description });
+  }
   const enumValues = memberValues(value, "enum")[0];
   if (enumValues !== undefined && !isWireJsonArray(enumValues)) {
     throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  if (enumValues !== undefined) {
+    members.push({ key: "enum", value: enumValues });
   }
   const nestedProperties = memberValues(value, "properties")[0];
   if (nestedProperties !== undefined) {
     if (!isWireJsonObject(nestedProperties)) {
       throw new GatewayFailureError({ kind: "invalid_request" });
     }
-    for (const property of nestedProperties.members) {
-      validateToolProperty(property.value);
-    }
+    members.push({ key: "properties", value: toolProperties(nestedProperties) });
   }
   const required = memberValues(value, "required")[0];
   if (required !== undefined && (!isWireJsonArray(required) || required.items.some((item) => typeof item !== "string"))) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+  if (required !== undefined) {
+    members.push({ key: "required", value: required });
+  }
+  return { kind: "object", members };
 }
 
 function hasOllamaImages(messages: WireJsonArray): boolean {
