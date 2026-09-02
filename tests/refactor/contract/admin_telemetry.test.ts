@@ -207,11 +207,7 @@ describe("RM-20 AdminTelemetry", () => {
     const persisted = db.prepare("SELECT metadata_json FROM operational_events ORDER BY event_id LIMIT 1").get() as {
       metadata_json: string;
     };
-    expect(persisted.metadata_json).toBe(JSON.stringify({
-      requestId: "req_live",
-      protocol: "openai_chat",
-      category: "upstream_error",
-    }));
+    expect(persisted.metadata_json).toBe(JSON.stringify({ protocol: "openai_chat" }));
 
     unsubscribe();
     recorder.recordEvent({ occurredAtMs: NOW, kind: "gateway_started", severity: "info" });

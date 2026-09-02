@@ -126,7 +126,10 @@ export class AccountDirectory {
       const generation = (existing?.credential_generation ?? 0) + 1;
       const secret = { ...input.secret, generation };
       await this.credentials.putGeneration(accountId, generation, secret);
-      throwIfAborted(signal);
+      if (signal?.aborted === true) {
+        await this.credentials.prune(this.activeCredentialReferences());
+        throw new DOMException("aborted", "AbortError");
+      }
 
       const now = this.nowMs();
       try {
