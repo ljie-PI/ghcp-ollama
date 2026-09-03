@@ -1,5 +1,5 @@
 import type { IncomingHttpHeaders } from "node:http";
-import { Agent, errors as undiciErrors, request as undiciRequest } from "undici";
+import type * as Undici from "undici";
 import type { Dispatcher } from "undici";
 import { copilotHeaders } from "./identity.js";
 import { capiModelsUrl, type CapiModelsResponse, type CopilotModelsSource } from "./model_catalog.js";
@@ -30,6 +30,15 @@ const DEFAULT_CAPI_LIMITS: CapiTransportLimits = {
 
 const CAPI_DISPATCHER_CONNECTIONS = 8;
 
+type UndiciModule = typeof Undici;
+
+let undiciModulePromise: Promise<UndiciModule> | undefined;
+
+function loadUndici(): Promise<UndiciModule> {
+  undiciModulePromise ??= import("undici");
+  return undiciModulePromise;
+}
+
 export class CapiFetchError extends Error {
   constructor(
     readonly status: number,
@@ -43,6 +52,7 @@ export class CapiFetchError extends Error {
 
 export class HttpCopilotModelsSource implements CopilotModelsSource {
   private dispatcher: Dispatcher | undefined;
+  private dispatcherPromise: Promise<Dispatcher> | undefined;
   private closingDispatcher: Dispatcher | undefined;
   private closed = false;
   readonly modelMetadata = new Map<string, NormalizedModelInfo>();
@@ -51,7 +61,7 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
     private readonly resolve: (accountId: string, signal: AbortSignal) => Promise<{ token: string; endpoint: string }>,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly limits: CapiTransportLimits = DEFAULT_CAPI_LIMITS,
-    private readonly createDispatcher: (limits: CapiTransportLimits) => Dispatcher = defaultCapiDispatcher,
+    private readonly createDispatcher: (limits: CapiTransportLimits) => Dispatcher | Promise<Dispatcher> = defaultCapiDispatcher,
     private readonly modelInfo?: ModelInfoLookup,
   ) {}
 
@@ -88,7 +98,7 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
       signal,
       deadlineMs,
       this.limits,
-      this.fetchImpl === fetch ? this.sharedDispatcher() : undefined,
+      this.fetchImpl === fetch ? await this.sharedDispatcher() : undefined,
     );
     if (response.status < 200 || response.status >= 300) {
       await response.cancel();
@@ -116,7 +126,9 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
 
   async close(): Promise<void> {
     this.closed = true;
-    const dispatcher = this.dispatcher;
+    const pendingDispatcher = this.dispatcherPromise;
+    this.dispatcherPromise = undefined;
+    const dispatcher = this.dispatcher ?? await pendingDispatcher?.catch(() => undefined);
     this.dispatcher = undefined;
     if (dispatcher !== undefined) {
       this.closingDispatcher = dispatcher;
@@ -132,19 +144,37 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
 
   forceClose(): void {
     this.closed = true;
+    const pendingDispatcher = this.dispatcherPromise;
+    this.dispatcherPromise = undefined;
     const dispatcher = this.dispatcher ?? this.closingDispatcher;
     this.dispatcher = undefined;
     this.closingDispatcher = undefined;
     if (dispatcher !== undefined) {
       void dispatcher.destroy().catch(() => undefined);
     }
+    if (pendingDispatcher !== undefined) {
+      void pendingDispatcher.then(async (created) => created.destroy()).catch(() => undefined);
+    }
   }
 
-  private sharedDispatcher(): Dispatcher {
+  private async sharedDispatcher(): Promise<Dispatcher> {
     if (this.closed) {
       throw new DOMException("closed", "AbortError");
     }
-    this.dispatcher ??= this.createDispatcher(this.limits);
+    if (this.dispatcher !== undefined) {
+      return this.dispatcher;
+    }
+    const pending = this.dispatcherPromise
+      ?? Promise.resolve().then(async () => this.createDispatcher(this.limits));
+    this.dispatcherPromise = pending;
+    const dispatcher = await pending;
+    if (this.dispatcherPromise === pending) {
+      this.dispatcherPromise = undefined;
+    }
+    if (this.closed) {
+      throw new DOMException("closed", "AbortError");
+    }
+    this.dispatcher ??= dispatcher;
     return this.dispatcher;
   }
 
@@ -193,7 +223,8 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
   }
 }
 
-function defaultCapiDispatcher(limits: CapiTransportLimits): Dispatcher {
+async function defaultCapiDispatcher(limits: CapiTransportLimits): Promise<Dispatcher> {
+  const { Agent } = await loadUndici();
   return new Agent({
     connectTimeout: limits.connectTimeoutMs,
     connections: CAPI_DISPATCHER_CONNECTIONS,
@@ -278,7 +309,8 @@ async function undiciWithTimeout(
   deadlineMs: number,
   dispatcher: Dispatcher,
 ): Promise<CapiHttpResponse> {
-  const timeout = timeoutPromise<Awaited<ReturnType<typeof undiciRequest>>>(remainingMs(deadlineMs), signal);
+  const { errors: undiciErrors, request: undiciRequest } = await loadUndici();
+  const timeout = timeoutPromise<Awaited<ReturnType<UndiciModule["request"]>>>(remainingMs(deadlineMs), signal);
   try {
     const response = await Promise.race([undiciRequest(url, {
       method: "GET",
@@ -298,7 +330,7 @@ async function undiciWithTimeout(
       },
     };
   } catch (error: unknown) {
-    if (timeout.timedOut() || isUndiciTimeout(error)) {
+    if (timeout.timedOut() || isUndiciTimeout(error, undiciErrors)) {
       throw new CapiFetchError(502, undefined, "upstream_timeout");
     }
     if (isAbortError(error)) {
@@ -512,7 +544,7 @@ function incomingHeadersToHeaders(headers: IncomingHttpHeaders): Headers {
   return result;
 }
 
-function isUndiciTimeout(error: unknown): boolean {
+function isUndiciTimeout(error: unknown, undiciErrors: UndiciModule["errors"]): boolean {
   return error instanceof undiciErrors.ConnectTimeoutError
     || error instanceof undiciErrors.HeadersTimeoutError
     || error instanceof undiciErrors.BodyTimeoutError;

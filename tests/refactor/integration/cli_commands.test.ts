@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { AccountDirectory } from "../../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
 import { DeviceFlowService, type DeviceOAuthClient } from "../../../src/accounts/device_flow.js";
@@ -6,7 +10,7 @@ import { ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
 import { createCopilotEndpointDiscovery, refreshCopilotToken } from "../../../src/copilot/credential_provider.js";
 import { CopilotModelCatalog } from "../../../src/copilot/model_catalog.js";
 import type { TokenRefreshError } from "../../../src/copilot/token_refresh.js";
-import { runCli } from "../../../src/cli/main.js";
+import { isMainModule, runCli } from "../../../src/cli/main.js";
 import { CliError, HttpControlClient, ScriptedControlClient } from "../../../src/cli/control_client.js";
 import { CommandDispatcher, DispatcherControlClient } from "../../../src/cli/commands/dispatcher.js";
 import { exitCodeForError } from "../../../src/cli/output.js";
@@ -38,6 +42,18 @@ class CaptureStream {
 }
 
 describe("RM-18 CLI commands", () => {
+  it("recognizes an executable symlink as the CLI main module", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ghcg-bin-link-"));
+    const target = path.join(directory, "main.js");
+    const link = path.join(directory, "ghcg");
+    await writeFile(target, "");
+    try {
+      await symlink(target, link, "file");
+      expect(isMainModule(pathToFileURL(target).href, link)).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it("separates human stdout/stderr, JSON envelopes, and exit codes", async () => {
     const client = new ScriptedControlClient({
       "accounts.list": [{ defaultRevision: 1, defaultAccountId: null, items: [] }],
