@@ -1,0 +1,21 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { errorMessage, type AdminClient } from "../api.js";
+  import type { AdminOperationalEvent } from "../types.js";
+  let { client, liveEvents, resetVersion }: { client: AdminClient; liveEvents: AdminOperationalEvent[]; resetVersion: number } = $props();
+  let persisted: AdminOperationalEvent[] = $state([]); let cursor: string | null = $state(null); let loading = $state(true); let failure = $state(""); let severity = $state("all"); let seenReset = $state(0);
+  let all = $derived.by(() => {
+    if (resetVersion !== seenReset) { seenReset = resetVersion; void load(false); }
+    const merged = new Map([...persisted, ...liveEvents].map((event) => [event.eventId, event]));
+    return [...merged.values()].sort((a, b) => Number(b.eventId) - Number(a.eventId)).slice(0, 512).filter((e) => severity === "all" || e.severity === severity);
+  });
+  onMount(() => load(false));
+  async function load(more: boolean): Promise<void> { loading = true; failure = ""; try { const page = await client.events(more && cursor ? cursor : undefined); persisted = more ? [...persisted, ...page.items].slice(-512) : [...page.items].slice(-512); cursor = page.nextCursor; } catch (e) { failure = errorMessage(e); } finally { loading = false; } }
+  function metadata(event: AdminOperationalEvent): string { return Object.entries(event.metadata).map(([key, value]) => `${key}: ${String(value)}`).join(" · ") || "No additional metadata"; }
+</script>
+<header class="page-head"><div><p class="eyebrow">SANITIZED OPERATIONS</p><h1>Events</h1><p>Persisted diagnostics joined with the bounded live SSE feed.</p></div><div class="live-badge"><span class="status-dot"></span>LIVE</div></header>
+<section class="toolbar"><label for="severity">Severity</label><select id="severity" bind:value={severity}><option value="all">All severities</option><option value="info">Info</option><option value="warning">Warning</option><option value="error">Error</option></select><span class="subtle">Showing {all.length} · maximum 512 in memory</span></section>
+{#if failure}<p class="notice error" role="alert">{failure}</p>{/if}
+{#if loading && persisted.length === 0}<p class="loading-line" aria-busy="true">Loading operational events...</p>
+{:else if all.length === 0}<section class="empty"><span>00</span><h2>No matching events</h2><p>Operational events contain sanitized metadata only.</p></section>
+{:else}<ol class="timeline" aria-label="Operational events">{#each all as event}<li class="severity-{event.severity}"><div class="timeline-mark"></div><article><header><time datetime={event.occurredAt}>{new Date(event.occurredAt).toLocaleString()}</time><span class="chip">{event.severity}</span></header><h2>{event.kind.replaceAll("_", " ")}</h2><p>{metadata(event)}</p><small>EVENT {event.eventId}</small></article></li>{/each}</ol>{#if cursor}<button class="load-more" onclick={() => load(true)} disabled={loading}>{loading ? "Loading..." : "Load older page"}</button>{/if}{/if}

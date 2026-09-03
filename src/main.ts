@@ -1,4 +1,6 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createAdminStaticModule } from "./admin/static.js";
 import { createAdminModule } from "./admin/routes.js";
 import type { AccountDirectory } from "./accounts/account_directory.js";
 import { DeviceFlowService } from "./accounts/device_flow.js";
@@ -296,6 +298,7 @@ export async function composeProductionDaemonGateway(
       dispatcher,
       requestStop: composition.requestStop,
     });
+    const adminStatic = createAdminStaticModule(fileURLToPath(new URL("../admin", import.meta.url)));
     return await bootstrapGateway({
       startup: composition.startup,
       env: composition.env,
@@ -303,6 +306,7 @@ export async function composeProductionDaemonGateway(
       dependencies: {
         admin,
         control,
+        adminStatic,
         readRuntimeConfig: () => runtime.readSnapshot(),
         onShutdownTimeout: () => composition.logger.write({
           level: "error",

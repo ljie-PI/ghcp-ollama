@@ -1,6 +1,9 @@
 # Node modules
 node_modules/
 dist/
+dist-refactor/
+playwright-report/
+test-results/
 
 # Logs
 logs
