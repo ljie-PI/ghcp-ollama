@@ -30,6 +30,7 @@ export interface AdminFixture {
     conflictConfig: boolean;
     conflictHistory: boolean;
     conflictModel: boolean;
+    failAccountRemoval: boolean;
     streamBodies: string[];
     streamDelaysMs: number[];
     streamHoldsMs: number[];
@@ -83,6 +84,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       conflictConfig: false,
       conflictHistory: false,
       conflictModel: false,
+      failAccountRemoval: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
       streamDelaysMs: [],
       streamHoldsMs: [],
@@ -204,6 +206,15 @@ async function handle(route: Route, fixture: AdminFixture): Promise<void> {
   if (path.startsWith("/accounts/") && request.method() === "DELETE") {
     const id = decodeURIComponent(path.slice("/accounts/".length));
     const found = fixture.state.accounts.items.find((item) => item.accountId === id)!;
+    if (fixture.state.failAccountRemoval) {
+      fixture.state.failAccountRemoval = false;
+      const removing: AdminAccount = { ...found, state: "removing", revision: found.revision + 1 };
+      fixture.state.accounts = {
+        ...fixture.state.accounts,
+        items: fixture.state.accounts.items.map((item) => item.accountId === id ? removing : item),
+      };
+      return failure(route, 500, "internal_error");
+    }
     const removed: AdminAccount = { ...found, state: "removed", revision: found.revision + 1 };
     fixture.state.accounts = {
       ...fixture.state.accounts,

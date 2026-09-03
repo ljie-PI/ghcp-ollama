@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ApiError, errorMessage, type AdminClient } from "../api.js";
+  import { errorMessage, type AdminClient } from "../api.js";
   import type { AdminAccounts, DeviceFlow } from "../types.js";
 
   let { client }: { client: AdminClient } = $props();
@@ -87,7 +87,7 @@
       await load();
     } catch (error: unknown) {
       failure = errorMessage(error);
-      if (error instanceof ApiError && error.status === 409) await load(true);
+      await load(true);
     } finally {
       busy = "";
     }

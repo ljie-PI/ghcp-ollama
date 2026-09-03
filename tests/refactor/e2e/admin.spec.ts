@@ -90,6 +90,15 @@ test("github-and-ghes-account-lifecycle", async ({ page }) => {
   await page.getByRole("button", { name: "Make default" }).click();
   expect(fixture.requests.find((request) => request.url().endsWith("/accounts/default"))?.headers()["x-ghcg-csrf"])
     .toBe("csrf-memory-only");
+  fixture.state.failAccountRemoval = true;
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("article")
+    .filter({ hasText: "Enterprise Admin" })
+    .getByRole("button", { name: "Remove" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText("internal error");
+  await expect(page.getByRole("article").filter({ hasText: "Enterprise Admin" }).getByText("removing"))
+    .toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("article")
     .filter({ hasText: "Enterprise Admin" })
