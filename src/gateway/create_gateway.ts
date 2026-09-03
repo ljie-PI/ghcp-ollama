@@ -9,6 +9,23 @@ import { AdmissionController, defaultDelay, type DelayFn } from "./admission.js"
 import { createHonoApp, type RouteRegistration } from "./hono_app.js";
 import type { TimeoutScheduler } from "./timeouts.js";
 
+export interface GatewayListener {
+  readonly listening: boolean;
+  once(event: "listening", listener: () => void): this;
+  once(event: "error", listener: (error: Error) => void): this;
+  off(event: "listening", listener: () => void): this;
+  off(event: "error", listener: (error: Error) => void): this;
+  close(callback: (error?: Error) => void): void;
+  closeIdleConnections?(): void;
+  closeAllConnections?(): void;
+}
+
+export type GatewayListen = (options: Readonly<{
+  fetch: (request: Request) => Response | Promise<Response>;
+  hostname: typeof LOOPBACK_HOST;
+  port: number;
+}>) => GatewayListener;
+
 export interface Gateway {
   fetch(request: Request): Promise<Response>;
   close(): Promise<void>;
@@ -73,11 +90,16 @@ export interface GatewayDependencies {
   readonly createRequestId?: () => string;
   readonly isReady?: () => boolean;
   readonly onClose?: () => Promise<void> | void;
+  readonly onForceClose?: () => Promise<void> | void;
+  readonly onShutdownTimeout?: () => void;
   readonly admin?: AdminModule;
   readonly control?: LocalControlModule;
   readonly adminStatic?: AdminStaticModule;
   readonly readRuntimeConfig?: () => RuntimeConfigSnapshot;
+  readonly listen?: GatewayListen;
 }
+
+export const GRACEFUL_SHUTDOWN_MS = 10_000;
 
 export type { RouteRegistration };
 
@@ -132,7 +154,9 @@ export async function createGateway(
   };
   const app = createHonoApp(routes, appDependencies);
 
-  let listener: ReturnType<typeof serve> | undefined;
+  let listener: GatewayListener | undefined;
+  let listenPromise: Promise<{ host: typeof LOOPBACK_HOST; port: number }> | undefined;
+  let closePromise: Promise<void> | undefined;
 
   const gateway: HostedGateway = {
     fetch(request: Request): Promise<Response> {
@@ -144,42 +168,71 @@ export async function createGateway(
     async listen(): Promise<{ host: typeof LOOPBACK_HOST; port: number }> {
       assertLoopbackBindHost(config.startup.host);
       if (listener !== undefined) {
-        return { host: LOOPBACK_HOST, port: config.startup.port };
+        return await (listenPromise ?? Promise.resolve({ host: LOOPBACK_HOST, port: config.startup.port }));
       }
-      listener = serve({
+      const listen: GatewayListen = dependencies.listen ?? ((options) => serve(options));
+      const current = listen({
         fetch: app.fetch,
         hostname: LOOPBACK_HOST,
         port: config.startup.port,
       });
-      return { host: LOOPBACK_HOST, port: config.startup.port };
+      listener = current;
+      listenPromise = current.listening
+        ? Promise.resolve({ host: LOOPBACK_HOST, port: config.startup.port })
+        : new Promise((resolve, reject) => {
+          const cleanup = (): void => {
+            current.off("listening", onListening);
+            current.off("error", onError);
+          };
+          const onListening = (): void => {
+            cleanup();
+            resolve({ host: LOOPBACK_HOST, port: config.startup.port });
+          };
+          const onError = (error: Error): void => {
+            cleanup();
+            if (listener === current) {
+              listener = undefined;
+            }
+            reject(error);
+          };
+          current.once("listening", onListening);
+          current.once("error", onError);
+        });
+      return await listenPromise;
     },
     async close(): Promise<void> {
-      if (closed) {
-        return;
-      }
-      closed = true;
-      for (const controller of mountedInflight) {
-        controller.abort();
-      }
-      mountedInflight.clear();
-      admission.close();
-      let closeError: unknown;
-      try {
-        dependencies.control?.close();
-      } catch (error: unknown) {
-        closeError ??= error;
-      }
-      try {
-        dependencies.admin?.close();
-      } catch (error: unknown) {
-        closeError ??= error;
-      }
-      for (const controller of inflight) {
-        controller.abort();
-      }
-      inflight.clear();
-      const current = listener;
-      listener = undefined;
+      closePromise ??= closeGateway();
+      return await closePromise;
+    },
+  };
+
+  async function closeGateway(): Promise<void> {
+    closed = true;
+    for (const controller of mountedInflight) {
+      controller.abort();
+    }
+    mountedInflight.clear();
+    admission.close();
+    let closeError: unknown;
+    try {
+      dependencies.control?.close();
+    } catch (error: unknown) {
+      closeError ??= error;
+    }
+    try {
+      dependencies.admin?.close();
+    } catch (error: unknown) {
+      closeError ??= error;
+    }
+    for (const controller of inflight) {
+      controller.abort();
+    }
+    inflight.clear();
+    const current = listener;
+    listener = undefined;
+    listenPromise = undefined;
+
+    const graceful = (async () => {
       if (current !== undefined) {
         try {
           await new Promise<void>((resolve, reject) => {
@@ -190,6 +243,7 @@ export async function createGateway(
               }
               resolve();
             });
+            current.closeIdleConnections?.();
           });
         } catch (error: unknown) {
           closeError ??= error;
@@ -203,10 +257,53 @@ export async function createGateway(
       if (closeError !== undefined) {
         throw closeError;
       }
-    },
-  };
+    })();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      graceful.then(
+        () => ({ timedOut: false as const }),
+        (error: unknown) => ({ timedOut: false as const, error }),
+      ),
+      new Promise<{ readonly timedOut: true }>((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true }), GRACEFUL_SHUTDOWN_MS);
+      }),
+    ]);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    if (!result.timedOut) {
+      if ("error" in result) {
+        forceCleanup(current, dependencies);
+        throw result.error;
+      }
+      return;
+    }
+    try {
+      dependencies.onShutdownTimeout?.();
+    } catch {
+      // Timeout reporting cannot prevent forced cleanup.
+    }
+    forceCleanup(current, dependencies);
+  }
 
   return gateway;
+}
+
+function forceCleanup(
+  listener: GatewayListener | undefined,
+  dependencies: Readonly<GatewayDependencies>,
+): void {
+  try {
+    listener?.closeAllConnections?.();
+  } catch {
+    // Continue forcing the remaining resources closed.
+  }
+  try {
+    void Promise.resolve(dependencies.onForceClose?.()).catch(() => undefined);
+  } catch {
+    // Shutdown must remain bounded even when forced cleanup fails.
+  }
 }
 
 function defaultRequestId(): string {

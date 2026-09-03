@@ -12,6 +12,7 @@ import {
   CopilotModelCatalog,
   parseCapiModels,
 } from "../../../src/copilot/model_catalog.js";
+import { productionModelInfoLookup } from "../../../src/copilot/model_metadata.js";
 import { CapiFetchError, HttpCopilotModelsSource } from "../../../src/copilot/models_source.js";
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
@@ -28,56 +29,97 @@ const nowMs = (): number => 1_700_000_000_000;
 
 const CAPI = {
   data: [
-    { id: "keep", name: "Keep", vendor: "x", model_picker_enabled: true, capabilities: { mode: "chat", supported_endpoints: ["/v1/chat/completions"] } },
+    { id: "keep", name: "Keep", vendor: "x", model_picker_enabled: true },
     { id: "hidden", name: "Hidden", vendor: "x", model_picker_enabled: false },
     { id: "keep", name: "Dup", vendor: "x", model_picker_enabled: true },
   ],
 };
 
 describe("RM-08 CAPI parse and cache", () => {
+  it("provides pinned production getModelInfo metadata without guessing unknown models", () => {
+    expect(productionModelInfoLookup.get("gpt-5.1-codex-max")).toEqual({
+      mode: "responses",
+      max_input_tokens: 128_000,
+      max_output_tokens: 128_000,
+      supported_endpoints: ["/v1/responses"],
+    });
+    expect(productionModelInfoLookup.get("claude-opus-4.6-fast")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 16_000,
+      supported_endpoints: ["/v1/chat/completions"],
+    });
+    expect(productionModelInfoLookup.get("gemini-3-pro-preview")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+    });
+    expect(productionModelInfoLookup.get("gpt-5.3-codex")).toEqual({
+      mode: "responses",
+      max_input_tokens: 128_000,
+      max_output_tokens: 128_000,
+      supported_endpoints: ["/v1/responses"],
+    });
+    expect(productionModelInfoLookup.get("mai-code-1-flash")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+      supported_endpoints: ["/v1/chat/completions"],
+    });
+    expect(productionModelInfoLookup.get("mai-code-1-flash-internal")).toEqual(
+      productionModelInfoLookup.get("mai-code-1-flash"),
+    );
+    expect(productionModelInfoLookup.get("unknown-model")).toBeNull();
+  });
+
   it("keeps picker-enabled models in upstream order including duplicates", () => {
     const models = parseCapiModels(CAPI);
     expect(models.map((model) => model.id)).toEqual(["keep", "keep"]);
-    expect(models[0]?.routing).toEqual({
-      mode: "chat",
-      supportedEndpoints: ["/v1/chat/completions"],
-    });
+    expect(models[0]?.routing).toBeUndefined();
   });
 
   it("rejects incomplete CAPI items", () => {
     expect(() => parseCapiModels({ data: [{ id: "x" }] })).toThrow(/invalid/u);
   });
 
-  it("captures private routing metadata and ignores malformed routing values", () => {
-    const models = parseCapiModels({
-      data: [
-        {
-          id: "native",
-          name: "Native",
-          vendor: "openai",
-          model_picker_enabled: true,
-          model_info: {
-            mode: "responses",
-            supported_endpoints: ["/v1/responses", 1, null, "/v1/chat/completions"],
-          },
-        },
-        {
-          id: "malformed",
-          name: "Malformed",
-          vendor: "openai",
-          model_picker_enabled: true,
-          model_info: {
-            mode: false,
-            supported_endpoints: "nope",
-          },
-        },
-      ],
-    });
-    expect(models[0]?.routing).toEqual({
+  it("composes injected getModelInfo metadata into catalog routing and one shared public map", async () => {
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(JSON.stringify({ data: [{
+        id: "native",
+        name: "Native",
+        vendor: "openai",
+        model_picker_enabled: true,
+        capabilities: { mode: "chat", max_input_tokens: 1 },
+      }] })),
+      { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 1_024 },
+      () => new Agent(),
+      {
+        get: () => ({
+          mode: "responses",
+          max_input_tokens: "128000",
+          max_output_tokens: 64_000.9,
+          supported_endpoints: ["/v1/responses", 1],
+        }),
+      },
+    );
+    const catalog = new CopilotModelCatalog(source);
+    const snapshot = await catalog.get("github.com/1", new AbortController().signal);
+    expect(snapshot.models[0]?.routing).toEqual({
       mode: "responses",
-      supportedEndpoints: ["/v1/responses", "/v1/chat/completions"],
+      supportedEndpoints: ["/v1/responses"],
     });
-    expect(models[1]?.routing).toBeUndefined();
+    expect(source.modelMetadata.get("native")).toEqual({
+      mode: "responses",
+      maxInputTokens: 128_000,
+      maxOutputTokens: 64_000,
+      supportedEndpoints: ["/v1/responses"],
+    });
+    expect(JSON.parse(serializeOpenAiModels(snapshot, source.modelMetadata)).data[0]).toMatchObject({
+      mode: "responses",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+    });
   });
 
   it("does not write cache after invalidate generation change", async () => {

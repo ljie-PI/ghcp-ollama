@@ -3,9 +3,18 @@ import { pathToFileURL } from "node:url";
 import { CliError, HttpControlClient, type CliLifecycleResult, type ControlClient } from "./control_client.js";
 import { parseCli } from "./parser.js";
 import { exitCodeForError, writeError, writeSuccess, type WritableCliStream } from "./output.js";
-import { bootstrapGateway, type BootstrapOptions } from "../main.js";
 import type { HostedGateway } from "../gateway/create_gateway.js";
-import type { StartupConfig } from "../config/startup_config.js";
+import { parseStartupConfig, type StartupConfig } from "../config/startup_config.js";
+import type { DaemonController } from "../daemon/controller.js";
+import {
+  createProductionDaemonController,
+  daemonRuntimeCliError,
+  runDaemonRuntime,
+  type ComposeDaemonGateway,
+  type DaemonRuntimeDependencies,
+  type RunDaemonRuntimeOptions,
+} from "../daemon/runtime.js";
+import { composeProductionDaemonGateway } from "../main.js";
 
 export interface RunCliOptions {
   readonly argv?: readonly string[];
@@ -15,6 +24,10 @@ export interface RunCliOptions {
   readonly stderr?: WritableCliStream;
   readonly controlClient?: ControlClient;
   readonly createGateway?: (startup: StartupConfig, env: NodeJS.ProcessEnv) => Promise<HostedGateway>;
+  readonly composeGateway?: ComposeDaemonGateway;
+  readonly daemonController?: Pick<DaemonController, "start" | "stop" | "restart" | "status">;
+  readonly runDaemonRuntime?: (options: Readonly<RunDaemonRuntimeOptions>) => Promise<void>;
+  readonly daemonRuntimeDependencies?: Readonly<DaemonRuntimeDependencies>;
   readonly shutdownSignal?: AbortSignal;
   readonly pollDelayMs?: number;
   readonly pid?: number;
@@ -45,12 +58,25 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
       return await runServe(command.startup, parsed.json, stdout, stderr, options);
     }
     if (command.kind === "lifecycle") {
-      const context = {
-        dataDir: parsed.dataDir,
-        ...(command.startup === undefined ? {} : { startup: command.startup }),
-        ...(options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal }),
-      };
-      const result = await client.lifecycle(command.action, context);
+      const controller = options.daemonController
+        ?? (options.controlClient === undefined ? createProductionDaemonController({ env }) : undefined);
+      const context = options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal };
+      const result = controller === undefined
+        ? await client.lifecycle(command.action, {
+          dataDir: parsed.dataDir,
+          ...(command.startup === undefined ? {} : { startup: command.startup }),
+          ...context,
+        })
+        : command.action === "start"
+          ? await controller.start(requireStartup(command.startup), context)
+          : command.action === "restart"
+            ? await controller.restart(restartStartup(parsed.dataDir, env), context)
+            : command.action === "stop"
+              ? await controller.stop(parsed.dataDir, context)
+              : await controller.status(parsed.dataDir, context);
+      if ((command.action === "stop" || command.action === "restart") && result.state === "conflict") {
+        throw new CliError("daemon_conflict");
+      }
       writeSuccess(stdout, parsed.json, result);
       return lifecycleExitCode(command.action, result);
     }
@@ -134,34 +160,42 @@ async function runServe(
   options: RunCliOptions,
 ): Promise<number> {
   const env = options.env ?? process.env;
-  const gateway = await (options.createGateway ?? defaultCreateGateway)(startup, env);
-  const startedAt = (options.now ?? (() => new Date()))().toISOString();
+  const managed = false;
+  const shutdown = options.shutdownSignal === undefined ? processSignal() : null;
+  const shutdownSignal = options.shutdownSignal ?? shutdown?.signal ?? new AbortController().signal;
+  const composeGateway: ComposeDaemonGateway = options.composeGateway
+    ?? (options.createGateway === undefined
+      ? composeProductionDaemonGateway
+      : async (context) => await options.createGateway?.(context.startup, context.env) as HostedGateway);
   try {
-    await gateway.listen();
-    const result: CliLifecycleResult = {
-      state: "running",
-      managed: false,
-      pid: options.pid ?? process.pid,
-      startedAt,
-      port: startup.port,
-      dataDir: startup.dataDir,
-    };
-    writeSuccess(stdout, json, result);
-    await waitForShutdown(options.shutdownSignal);
-    await gateway.close();
+    await (options.runDaemonRuntime ?? runDaemonRuntime)({
+      startup,
+      env,
+      managed,
+      composeGateway,
+      shutdownSignal,
+      stderr,
+      ...(options.daemonRuntimeDependencies === undefined
+        ? {}
+        : { dependencies: options.daemonRuntimeDependencies }),
+      ...(!managed
+        ? {
+          onListening: (identity) => writeSuccess(stdout, json, lifecycleFromIdentity(identity, startup.dataDir)),
+        }
+        : {}),
+    });
+    if (shutdownSignal.reason instanceof CliError && shutdownSignal.reason.code === "interrupted") {
+      throw shutdownSignal.reason;
+    }
     return 0;
   } catch (error: unknown) {
-    await gateway.close().catch(() => undefined);
     if (error instanceof CliError) {
       throw error;
     }
-    throw new CliError("internal_error");
+    throw new CliError(daemonRuntimeCliError(error));
+  } finally {
+    shutdown?.dispose();
   }
-}
-
-function defaultCreateGateway(startup: StartupConfig, env: NodeJS.ProcessEnv): Promise<HostedGateway> {
-  const options: BootstrapOptions = { startup, env };
-  return bootstrapGateway(options);
 }
 
 function lifecycleExitCode(action: string, result: CliLifecycleResult): number {
@@ -174,35 +208,34 @@ function lifecycleExitCode(action: string, result: CliLifecycleResult): number {
   return 0;
 }
 
-async function waitForShutdown(signal: AbortSignal | undefined): Promise<void> {
-  if (signal !== undefined) {
-    if (signal.aborted) {
-      return;
-    }
-    await new Promise<void>((resolve, reject) => {
-      signal.addEventListener("abort", () => {
-        const reason = signal.reason;
-        if (reason instanceof CliError) {
-          reject(reason);
-          return;
-        }
-        resolve();
-      }, { once: true });
-    });
-    return;
+function lifecycleFromIdentity(
+  identity: Readonly<{
+    managed: boolean;
+    pid: number;
+    createdAt: string;
+    port: number;
+  }>,
+  dataDir: string,
+): CliLifecycleResult {
+  return {
+    state: "running",
+    managed: identity.managed,
+    pid: identity.pid,
+    startedAt: identity.createdAt,
+    port: identity.port,
+    dataDir,
+  };
+}
+
+function requireStartup(startup: StartupConfig | undefined): StartupConfig {
+  if (startup === undefined) {
+    throw new CliError("internal_error");
   }
-  await new Promise<void>((resolve) => {
-    const cleanup = (): void => {
-      process.off("SIGINT", onSignal);
-      process.off("SIGTERM", onSignal);
-    };
-    const onSignal = (): void => {
-      cleanup();
-      resolve();
-    };
-    process.once("SIGINT", onSignal);
-    process.once("SIGTERM", onSignal);
-  });
+  return startup;
+}
+
+function restartStartup(dataDir: string, env: NodeJS.ProcessEnv): StartupConfig {
+  return parseStartupConfig([], { ...env, GHC_GATEWAY_DATA_DIR: dataDir });
 }
 
 async function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {

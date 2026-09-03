@@ -3,6 +3,7 @@ import { AccountDirectoryError, type AccountSummary } from "../../accounts/accou
 import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_flow.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import type { NormalizedModelInfo } from "../../copilot/model_metadata.js";
 import type { RuntimeConfigStore } from "../../config/runtime_config.js";
 import { isRuntimeConfigKey, readRuntimeConfigNumber, RUNTIME_CONFIG_RANGES, RuntimeConfigError, withRuntimeConfigNumber } from "../../config/runtime_config.js";
 import type { RuntimeConfigSnapshot } from "../../config/schema.js";
@@ -23,6 +24,13 @@ export interface CommandDispatcherDependencies {
   readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll">;
   readonly catalog: CopilotModelCatalog;
   readonly runtimeConfig: RuntimeConfigStore;
+  readonly updateRuntimeConfig?: (
+    candidate: RuntimeConfigSnapshot,
+    expectedRevision: number,
+    signal: AbortSignal,
+  ) => Readonly<{ revision: number; config: RuntimeConfigSnapshot }>;
+  readonly invalidateAccountCaches?: (accountId: string) => void;
+  readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
 }
 
 export class CommandDispatcher {
@@ -75,8 +83,12 @@ export class CommandDispatcher {
     case "auth.logout": {
       const input = args as ControlOperationMap["auth.logout"]["args"];
       const account = input.accountId === undefined ? this.defaultAccount() : this.requireAccount(input.accountId);
-      const removed = await this.dependencies.directory.remove(account.accountId, account.revision);
-      this.dependencies.catalog.invalidate(account.accountId);
+      const removed = await this.dependencies.directory.remove(
+        account.accountId,
+        account.revision,
+        signal,
+        () => this.invalidateAccountCaches(account.accountId),
+      );
       return this.adminAccount(removed) as ControlOperationMap[Operation]["result"];
     }
     case "auth.status": {
@@ -96,8 +108,12 @@ export class CommandDispatcher {
     case "accounts.remove": {
       const input = args as ControlOperationMap["accounts.remove"]["args"];
       const account = this.requireAccount(input.accountId);
-      const removed = await this.dependencies.directory.remove(input.accountId, account.revision);
-      this.dependencies.catalog.invalidate(input.accountId);
+      const removed = await this.dependencies.directory.remove(
+        input.accountId,
+        account.revision,
+        signal,
+        () => this.invalidateAccountCaches(input.accountId),
+      );
       return this.adminAccount(removed) as ControlOperationMap[Operation]["result"];
     }
     case "models.list": {
@@ -115,6 +131,7 @@ export class CommandDispatcher {
         accountId,
         catalog,
         this.dependencies.directory.preferences.get(accountId),
+        this.dependencies.modelMetadata,
       ) as ControlOperationMap[Operation]["result"];
     }
     case "models.current": {
@@ -146,7 +163,11 @@ export class CommandDispatcher {
       const revision = this.dependencies.runtimeConfig.readRevision();
       const current = this.dependencies.runtimeConfig.readSnapshot();
       const next = setConfigValue(current, input.key, input.value);
-      this.dependencies.runtimeConfig.update(next, revision);
+      if (this.dependencies.updateRuntimeConfig === undefined) {
+        this.dependencies.runtimeConfig.update(next, revision);
+      } else {
+        this.dependencies.updateRuntimeConfig(next, revision, signal);
+      }
       return this.adminRuntimeConfig() as ControlOperationMap[Operation]["result"];
     }
     }
@@ -159,6 +180,14 @@ export class CommandDispatcher {
       defaultAccountId: preference.defaultAccountId,
       items: this.dependencies.directory.list().map((account) => this.adminAccount(account)),
     };
+  }
+
+  private invalidateAccountCaches(accountId: string): void {
+    if (this.dependencies.invalidateAccountCaches === undefined) {
+      this.dependencies.catalog.invalidate(accountId);
+      return;
+    }
+    this.dependencies.invalidateAccountCaches(accountId);
   }
 
   private adminAccount(summary: AccountSummary) {
@@ -230,6 +259,9 @@ function setConfigValue(config: RuntimeConfigSnapshot, key: string, rawValue: st
 }
 
 function mapDispatcherError(error: unknown): CliError {
+  if (error instanceof Error && error.name === "DeviceOAuthError") {
+    return new CliError("remote_error");
+  }
   if (error instanceof CliError) {
     return error;
   }

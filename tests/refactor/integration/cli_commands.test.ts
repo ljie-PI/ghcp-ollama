@@ -9,6 +9,7 @@ import type { TokenRefreshError } from "../../../src/copilot/token_refresh.js";
 import { runCli } from "../../../src/cli/main.js";
 import { CliError, HttpControlClient, ScriptedControlClient } from "../../../src/cli/control_client.js";
 import { CommandDispatcher, DispatcherControlClient } from "../../../src/cli/commands/dispatcher.js";
+import { exitCodeForError } from "../../../src/cli/output.js";
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { RuntimeConfigStore } from "../../../src/config/runtime_config.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
@@ -202,6 +203,29 @@ describe("RM-18 CLI commands", () => {
     }
   });
 
+  it("maps device OAuth remote failures to CLI remote_error exit 5", async () => {
+    const harness = await dispatcherHarness({ device: {
+      async requestDeviceCode() {
+        const error = new Error("secret remote response");
+        error.name = "DeviceOAuthError";
+        throw error;
+      },
+      async exchangeDeviceCode() {
+        return { status: "failed" };
+      },
+    } });
+    try {
+      const client = new DispatcherControlClient(harness.dispatcher);
+      await expect(client.request("auth.login.start", {}, { dataDir: "unused" }))
+        .rejects.toMatchObject({ code: "remote_error" });
+      const error = await client.request("auth.login.start", {}, { dataDir: "unused" }).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ code: "remote_error" });
+      expect(exitCodeForError((error as CliError).code)).toBe(5);
+    } finally {
+      harness.close();
+    }
+  });
+
   it("uses the protected loopback control transport when an identity exists", async () => {
     const calls: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
     const opened: string[] = [];
@@ -233,7 +257,7 @@ describe("RM-18 CLI commands", () => {
       port: 31_400,
     }), async (url) => {
       opened.push(url);
-    });
+    }, async () => "start");
     await client.request("config.get", {}, { dataDir: "selected" });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("http://127.0.0.1:31400/__ghcg/control/v1/command");
@@ -252,10 +276,12 @@ describe("RM-18 CLI commands", () => {
 
     const foreground = new HttpControlClient(fetch, async () => ({
       managed: false,
+      pid: 123,
+      processStartIdentity: "start",
       controlToken: "control-token",
       instanceNonce: "nonce",
       port: 31_400,
-    }));
+    }), undefined, async () => "start");
     await expect(foreground.lifecycle("stop", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
     await expect(foreground.lifecycle("restart", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
 
@@ -263,31 +289,53 @@ describe("RM-18 CLI commands", () => {
       throw new TypeError("offline");
     }, async () => ({
       managed: true,
+      pid: 123,
+      processStartIdentity: "start",
       controlToken: "control-token",
       instanceNonce: "nonce",
       port: 31_400,
-    }));
+    }), undefined, async () => "start");
     await expect(unreachable.lifecycle("status", { dataDir: "selected" })).resolves.toMatchObject({ state: "unreachable" });
   });
 
   it("maps control timeout and caller abort without leaking as daemon failures", async () => {
     const endpoint = async () => ({
       managed: true,
+      pid: 123,
+      processStartIdentity: "start",
       controlToken: "control-token",
       instanceNonce: "nonce",
       port: 31_400,
     });
     const never = new HttpControlClient(async (_url, init) => await new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
-    }), endpoint);
+    }), endpoint, undefined, async () => "start");
     await expect(never.request("config.get", {}, { dataDir: "selected", timeoutMs: 1 })).rejects.toMatchObject({ code: "timeout" });
 
     const abort = new AbortController();
     const aborted = new HttpControlClient(async (_url, init) => await new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
       abort.abort();
-    }), endpoint);
+    }), endpoint, undefined, async () => "start");
     await expect(aborted.request("config.get", {}, { dataDir: "selected", signal: abort.signal })).rejects.toMatchObject({ code: "interrupted" });
+  });
+
+  it("verifies process identity before sending management or admin secrets", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: {} })));
+    const endpoint = async () => ({
+      managed: true,
+      pid: 123,
+      processStartIdentity: "windows:1",
+      controlToken: "control-token",
+      instanceNonce: "nonce",
+      port: 31_400,
+    });
+    const client = new HttpControlClient(fetchImpl, endpoint, undefined, async () => "windows:2");
+
+    await expect(client.request("config.get", {}, { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
+    await expect(client.adminOpen({ dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
+    await expect(client.lifecycle("status", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("foreground serve emits one running result and closes on shutdown", async () => {
@@ -303,6 +351,18 @@ describe("RM-18 CLI commands", () => {
       stderr,
       pid: 123,
       now: () => new Date("2026-09-02T00:00:00.000Z"),
+      daemonRuntimeDependencies: {
+        pid: 123,
+        now: () => new Date("2026-09-02T00:00:00.000Z"),
+        createSecret: () => "test-secret",
+        captureProcessIdentity: async () => "windows:1",
+        acquireIdentity: (_dataDir, identity) => ({
+          identity,
+          cleanup: () => true,
+          release() {},
+        }),
+        createLogger: () => ({ write() {} }),
+      },
       shutdownSignal: abort.signal,
       createGateway: async (startup) => ({
         fetch: async () => new Response(null, { status: 404 }),
@@ -322,6 +382,90 @@ describe("RM-18 CLI commands", () => {
     abort.abort();
     expect(await run).toBe(0);
     expect(closed).toBe(true);
+  });
+
+  it("renders foreground stop/restart conflicts as canonical errors", async () => {
+    for (const action of ["stop", "restart"] as const) {
+      const stdout = new CaptureStream();
+      const stderr = new CaptureStream();
+      const result = await runCli({
+        argv: ["--data-dir", "selected", action],
+        stdout,
+        stderr,
+        daemonController: {
+          start: async () => { throw new Error("unused"); },
+          status: async () => { throw new Error("unused"); },
+          stop: async () => ({ state: "conflict", managed: false, pid: 42, startedAt: null, port: 31400, dataDir: "selected" }),
+          restart: async () => ({ state: "conflict", managed: false, pid: 42, startedAt: null, port: 31400, dataDir: "selected" }),
+        },
+      });
+      expect(result).toBe(5);
+      expect(stdout.chunks).toBe("");
+      expect(stderr.chunks).toContain("daemon conflict");
+    }
+  });
+
+  it("returns 130 when foreground serve closes for SIGINT", async () => {
+    const abort = new AbortController();
+    const run = runCli({
+      argv: ["serve"],
+      homedir: "Q:/tmp/home",
+      stdout: new CaptureStream(),
+      stderr: new CaptureStream(),
+      shutdownSignal: abort.signal,
+      daemonRuntimeDependencies: {
+        pid: 123,
+        captureProcessIdentity: async () => "windows:1",
+        createSecret: () => "secret",
+        acquireIdentity: (_dataDir, identity) => ({ identity, cleanup: () => true, release() {} }),
+        createLogger: () => ({ write() {} }),
+      },
+      createGateway: async () => ({
+        fetch: async () => new Response(null),
+        listen: async () => {
+          abort.abort(new CliError("interrupted"));
+          return { host: "127.0.0.1", port: 31_400 };
+        },
+        close: async () => undefined,
+      }),
+    });
+    expect(await run).toBe(130);
+  });
+
+  it("routes lifecycle commands through the injected daemon controller", async () => {
+    const controller = {
+      start: vi.fn(async (startup) => ({ state: "running", managed: true, pid: 42, startedAt: "2026-09-03T00:00:00.000Z", port: startup.port, dataDir: startup.dataDir } as const)),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      status: vi.fn(),
+    };
+    const stdout = new CaptureStream();
+    expect(await runCli({
+      argv: ["--data-dir", "selected", "start", "--port", "31409"],
+      homedir: "Q:/tmp/home",
+      stdout,
+      stderr: new CaptureStream(),
+      daemonController: controller,
+    })).toBe(0);
+    expect(controller.start).toHaveBeenCalledWith(expect.objectContaining({ port: 31_409, dataDir: expect.stringContaining("selected") }), {});
+    expect(JSON.parse(stdout.chunks)).toMatchObject({ state: "running", managed: true, pid: 42 });
+  });
+
+  it("reports daemon identity security failures with exit code 4", async () => {
+    const stderr = new CaptureStream();
+    expect(await runCli({
+      argv: ["status"],
+      homedir: "Q:/tmp/home",
+      stdout: new CaptureStream(),
+      stderr,
+      daemonController: {
+        start: vi.fn(),
+        stop: vi.fn(),
+        restart: vi.fn(),
+        status: vi.fn(async () => { throw new CliError("security_error"); }),
+      },
+    })).toBe(4);
+    expect(stderr.chunks).toBe("error: security error\n");
   });
 
   it("foreground composition registers all completed public routes without legacy fallback", async () => {

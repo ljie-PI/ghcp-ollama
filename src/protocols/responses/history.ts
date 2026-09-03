@@ -119,7 +119,7 @@ interface StateRow {
 
 export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistoryAdmin {
   private readonly nowMs: () => number;
-  private readonly ttlMs: number;
+  private ttlMs: number;
   private readonly maxResponses: number;
 
   constructor(
@@ -212,6 +212,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     }
 
     return withResponsesRequestInput(request as ResponsesRequest, { kind: "array", items: enrichedItems });
+  }
+
+  setTtlDays(ttlDays: number): void {
+    this.ttlMs = ttlDays * DAY_MS;
   }
 
   async record(record: Readonly<ResponsesHistoryRecord>, signal: AbortSignal): Promise<void> {
