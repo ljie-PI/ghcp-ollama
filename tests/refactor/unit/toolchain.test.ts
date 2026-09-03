@@ -43,7 +43,7 @@ describe("RM-22 atomic package cutover", () => {
       ".": "./dist/src/main.js",
       "./cli": "./dist/src/cli/main.js",
     });
-    expect(pkg.bin).toEqual({ ghcg: "./dist/src/cli/main.js" });
+    expect(pkg.bin).toEqual({ ghcg: "dist/src/cli/main.js" });
     expect(pkg.files).toEqual(["dist/src/", "dist/admin/", "README.md", "LICENSE"]);
     expect(pkg.engines.node).toBe(">=24");
     expect(pkg.repository.url).toBe("git+https://github.com/ljie-PI/ghc-gateway.git");
