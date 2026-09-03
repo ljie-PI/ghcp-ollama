@@ -84,7 +84,7 @@ export async function inspectAdminBundle(
   ].map(async (relativePath): Promise<AdminAssetEvidence> => {
     const absolutePath = path.join(root, ...relativePath.split("/"));
     const body = await readFile(absolutePath);
-    const result: PackSmokeResult = {
+    return {
       path: packagePath(relativePath),
       bytes: (await stat(absolutePath)).size,
       sha256: createHash("sha256").update(body).digest("hex"),
@@ -172,7 +172,7 @@ export async function runPackSmoke(): Promise<PackSmokeResult> {
     const installedRoot = path.join(installDirectory, "node_modules", "@ljie-pi", "ghc-gateway");
     await verifyInstalledPackage(installedRoot, installDirectory, temporaryRoot);
 
-    return {
+    const result: PackSmokeResult = {
       packageName: entry.name,
       packageVersion: entry.version,
       sha256: createHash("sha256").update(tarball).digest("hex"),
