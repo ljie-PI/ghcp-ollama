@@ -34,7 +34,7 @@ The exact manifest, sizes, asset hashes, installed CLI result, foreground health
 - Fixture verification: 54 generated/verified entries.
 - Admin Playwright: exactly 7 offline flows passed.
 - Guarded offline official SDK suite: 13 tests passed, including native and Chat-bridge Responses plans.
-- Live official SDK suite was not run.
+- Guarded live official SDK suite: 4 tests passed at 2026-09-03T14:49Z against `github.com`, using OpenAI SDK 7.5.0, Anthropic SDK 0.120.0, and Ollama SDK 0.6.3. The selected shared Chat model was `gpt-5-mini`; the selected native Responses model was `gpt-5.3-codex`. Only sanitized status and model IDs were retained.
 - Three-run full benchmark passed all documented RSS, stream-stability, buffered, stream-event, checkpoint, and event-loop thresholds. Raw local values are in `rm_22_performance_handoff.md` and generated benchmark artifacts.
 - Fresh and partially migrated new-v1 databases passed the production migration set.
 - Official-registry `npm ci` and `npm ci --offline` passed.
@@ -49,7 +49,7 @@ The final CI matrix is:
 - macOS x64
 - macOS arm64
 
-Each platform runs default typecheck, lint, build, tests, fixtures, seven Admin E2E flows, SQLite smoke, three-run benchmark, and installed-package smoke. CI run [33761713936](https://github.com/ljie-PI/ghcp-ollama/actions/runs/33761713936) is the latest completed five-platform record before final release hardening; the final promotion PR must also pass the same matrix.
+Each platform runs default typecheck, lint, build, tests, fixtures, seven Admin E2E flows, SQLite smoke, three-run benchmark, and installed-package smoke. CI run [33769251403](https://github.com/ljie-PI/ghcp-ollama/actions/runs/33769251403) is the latest completed five-platform record before final promotion; the final promotion PR must also pass the same matrix.
 
 ## Maintainer checklist
 
