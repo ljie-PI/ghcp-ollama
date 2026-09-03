@@ -57,11 +57,11 @@ describe("RM-19 daemon identity file", () => {
   it("publishes protected daemon.json while holding an exclusive lease", async () => {
     const directory = await temporaryDirectory();
     const file = new DaemonIdentityFile(directory);
-    const lease = file.acquire(identity);
+    const lease = await file.acquire(identity);
     try {
       expect(file.read()).toEqual(identity);
       expect(JSON.parse(await readFile(path.join(directory, "daemon.json"), "utf8"))).toEqual(identity);
-      expect(() => file.acquire(otherIdentity())).toThrowError(expect.objectContaining({ code: "lease_conflict" }));
+      await expect(file.acquire(otherIdentity())).rejects.toMatchObject({ code: "lease_conflict" });
     } finally {
       expect(lease.cleanup()).toBe(true);
       lease.release();
@@ -72,7 +72,7 @@ describe("RM-19 daemon identity file", () => {
   it("never removes an identity that is no longer owned by its lease", async () => {
     const directory = await temporaryDirectory();
     const file = new DaemonIdentityFile(directory);
-    const lease = file.acquire(identity);
+    const lease = await file.acquire(identity);
     await writeFile(path.join(directory, "daemon.json"), `${JSON.stringify(otherIdentity())}\n`, { mode: 0o600 });
     expect(lease.cleanup()).toBe(false);
     lease.release();
@@ -82,12 +82,30 @@ describe("RM-19 daemon identity file", () => {
   it("does not remove a modified identity with the same process tuple", async () => {
     const directory = await temporaryDirectory();
     const file = new DaemonIdentityFile(directory);
-    const lease = file.acquire(identity);
+    const lease = await file.acquire(identity);
     const modified = { ...identity, controlToken: "replacement-token" };
     await writeFile(path.join(directory, "daemon.json"), `${JSON.stringify(modified)}\n`, { mode: 0o600 });
     expect(lease.cleanup()).toBe(false);
     lease.release();
     expect(file.read()).toEqual(modified);
+  });
+
+  it("recovers an orphan lock only after proving its recorded process is dead", async () => {
+    const directory = await temporaryDirectory();
+    let ownerAlive = true;
+    const file = new DaemonIdentityFile(directory, {
+      processIdentity: async (pid) => pid === identity.pid && ownerAlive ? identity.processStartIdentity : null,
+    });
+    const orphaned = await file.acquire(identity);
+    expect(orphaned.cleanup()).toBe(true);
+
+    await expect(file.acquire(otherIdentity())).rejects.toMatchObject({ code: "lease_conflict" });
+    ownerAlive = false;
+    const recovered = await file.acquire(otherIdentity());
+    expect(file.read()).toEqual(otherIdentity());
+    expect(recovered.cleanup()).toBe(true);
+    recovered.release();
+    orphaned.release();
   });
 
   it.skipIf(process.platform === "win32")("fails closed for symlink identity paths", async () => {

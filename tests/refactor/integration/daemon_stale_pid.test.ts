@@ -105,12 +105,13 @@ function harness(
   const controlRequest = vi.fn(async (identity: Readonly<DaemonIdentity>, method: string) => method === "GET"
     ? { state: "running", instance: instanceOf(identity) }
     : { instance: instanceOf(identity) });
-  const terminate = vi.fn(async (_identity: Readonly<DaemonIdentity>) => undefined);
+  const terminate = vi.fn(async (_identity: Readonly<{ pid: number; processStartIdentity: string }>) => undefined);
   const dependencies: DaemonControllerDependencies = {
     identityFile: { read: async () => current, remove },
     processIdentity: typeof processIdentity === "function" ? processIdentity : async () => processIdentity,
     spawn: async () => ({ pid: IDENTITY.pid, unref() {} }),
     delay: async (ms) => { elapsedMs += ms; },
+    nowMs: () => elapsedMs,
     controlRequest,
     terminate,
   };

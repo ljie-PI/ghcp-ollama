@@ -6,6 +6,7 @@ import type { CatalogSnapshot } from "../copilot/model_catalog.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import { DaemonIdentityFile, type DaemonIdentity } from "../daemon/identity_file.js";
+import { captureProcessStartIdentity } from "../daemon/process_identity.js";
 
 export type CliErrorCode =
   | "internal_error"
@@ -216,6 +217,8 @@ export interface ControlClient {
 }
 
 export interface ControlEndpoint {
+  readonly pid: number;
+  readonly processStartIdentity: string;
   readonly port: number;
   readonly controlToken: string;
   readonly instanceNonce: string;
@@ -283,6 +286,7 @@ export class HttpControlClient implements ControlClient {
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly locateEndpoint: (dataDir: string) => Promise<ControlEndpoint | null> = readControlEndpoint,
     private readonly openBrowser: (url: string) => Promise<void> | void = defaultOpenBrowser,
+    private readonly processIdentity: (pid: number) => Promise<string | null> = captureProcessStartIdentity,
   ) {}
 
   async lifecycle(action: LifecycleAction, context: CliLifecycleContext): Promise<CliLifecycleResult> {
@@ -299,6 +303,7 @@ export class HttpControlClient implements ControlClient {
     if ((action === "stop" || action === "restart") && !endpoint.managed) {
       throw new CliError("daemon_conflict");
     }
+    await this.verifyEndpoint(endpoint);
     if (action === "restart") {
       throw new CliError("unavailable");
     }
@@ -316,6 +321,7 @@ export class HttpControlClient implements ControlClient {
     context: CliLifecycleContext,
   ): Promise<ControlOperationMap[Operation]["result"]> {
     const endpoint = await this.requireEndpoint(context.dataDir);
+    await this.verifyEndpoint(endpoint);
     const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/command", {
       operation,
       arguments: args,
@@ -325,6 +331,7 @@ export class HttpControlClient implements ControlClient {
 
   async adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult> {
     const endpoint = await this.requireEndpoint(context.dataDir);
+    await this.verifyEndpoint(endpoint);
     const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/admin-bootstrap", undefined, context);
     const token = isObject(data) && typeof data.token === "string" ? data.token : null;
     if (token === null) {
@@ -340,6 +347,21 @@ export class HttpControlClient implements ControlClient {
       throw new CliError("unavailable");
     }
     return endpoint;
+  }
+
+  private async verifyEndpoint(endpoint: Readonly<ControlEndpoint>): Promise<void> {
+    let actual: string | null;
+    try {
+      actual = await this.processIdentity(endpoint.pid);
+    } catch (_error: unknown) {
+      throw new CliError("daemon_conflict");
+    }
+    if (actual === null) {
+      throw new CliError("daemon_stale");
+    }
+    if (actual !== endpoint.processStartIdentity) {
+      throw new CliError("daemon_conflict");
+    }
   }
 
   private async controlRequest(

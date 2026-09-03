@@ -181,6 +181,9 @@ async function runServe(
         }
         : {}),
     });
+    if (shutdownSignal.reason instanceof CliError && shutdownSignal.reason.code === "interrupted") {
+      throw shutdownSignal.reason;
+    }
     return 0;
   } catch (error: unknown) {
     if (error instanceof CliError) {

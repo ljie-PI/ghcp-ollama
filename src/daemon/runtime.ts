@@ -33,7 +33,10 @@ export interface DaemonRuntimeDependencies {
   readonly now?: () => Date;
   readonly createSecret?: () => string;
   readonly captureProcessIdentity?: (pid: number) => Promise<string | null>;
-  readonly acquireIdentity?: (dataDir: string, identity: DaemonIdentity) => DaemonIdentityLease;
+  readonly acquireIdentity?: (
+    dataDir: string,
+    identity: DaemonIdentity,
+  ) => DaemonIdentityLease | Promise<DaemonIdentityLease>;
   readonly createLogger?: (managed: boolean, startup: StartupConfig) => DaemonLogger;
   readonly scheduleStop?: (stop: () => void) => void;
 }
@@ -79,6 +82,7 @@ export function createProductionDaemonController(
       return { pid: child.pid, unref: () => child.unref() };
     },
     delay,
+    nowMs: Date.now,
     controlRequest: async (identity, method, requestPath, context = {}) => await authenticatedControlRequest(
       identity,
       method,
@@ -219,7 +223,7 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
   });
   const acquire = dependencies.acquireIdentity
     ?? ((dataDir: string, value: DaemonIdentity) => new DaemonIdentityFile(dataDir).acquire(value));
-  const lease = acquire(options.startup.dataDir, identity);
+  const lease = await acquire(options.startup.dataDir, identity);
   const stopping = new AbortController();
   const scheduleStop = dependencies.scheduleStop ?? ((stop: () => void) => setImmediate(stop));
   let gateway: HostedGateway | undefined;
@@ -257,7 +261,8 @@ export function daemonRuntimeCliError(error: unknown): "daemon_conflict" | "secu
     if (error.code === "lease_conflict") {
       return "daemon_conflict";
     }
-    if (error.code === "unsafe_owner" || error.code === "unsafe_path" || error.code === "unsafe_permissions") {
+    if (error.code === "invalid_identity" || error.code === "unsafe_owner"
+      || error.code === "unsafe_path" || error.code === "unsafe_permissions") {
       return "security_error";
     }
   }

@@ -25,12 +25,19 @@ export interface DaemonLogger {
   write(record: Record<string, unknown>): void;
 }
 
+export interface WindowsLogSecurity {
+  restrict(target: string, directory: boolean): void;
+  assertDirectory(target: string): void;
+  assertFile(target: string): void;
+}
+
 export class JsonlLogger implements DaemonLogger {
   private rotationSequence = 0;
 
   constructor(
     private readonly directory: string,
     private readonly nowMs: () => number = Date.now,
+    private readonly windowsSecurity: WindowsLogSecurity = DEFAULT_WINDOWS_LOG_SECURITY,
   ) {
     const existed = pathExists(directory);
     if (!existed) {
@@ -39,10 +46,10 @@ export class JsonlLogger implements DaemonLogger {
     if (process.platform !== "win32" && !existed) {
       chmodSync(directory, 0o700);
     } else if (process.platform === "win32" && !existed) {
-      restrictWindowsAcl(directory, true);
+      this.windowsSecurity.restrict(directory, true);
     }
-    assertSafeDirectory(directory);
-    this.prune(true);
+    assertSafeDirectory(directory, this.windowsSecurity);
+    this.prune();
   }
 
   write(record: Record<string, unknown>): void {
@@ -58,7 +65,7 @@ export class JsonlLogger implements DaemonLogger {
     if (fileSize(active) + utf8Bytes(encoded) > LOG_FILE_BYTES) {
       this.rotate(active, timestamp);
     }
-    appendProtected(active, encoded);
+    appendProtected(active, encoded, this.windowsSecurity);
     this.prune();
   }
 
@@ -78,12 +85,12 @@ export class JsonlLogger implements DaemonLogger {
     renameSync(active, rotated);
   }
 
-  private prune(validateWindowsSecurity = false): void {
+  private prune(): void {
     const now = this.nowMs();
     const files = readdirSync(this.directory)
       .filter((name) => /^gateway\.\d+\.\d+\.jsonl$/u.test(name))
       .map((name) => path.join(this.directory, name))
-      .map((file) => ({ file, stat: assertSafeFile(file, validateWindowsSecurity) }))
+      .map((file) => ({ file, stat: assertSafeFile(file, this.windowsSecurity) }))
       .sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs)
       .map(({ file }) => file);
     for (const file of files) {
@@ -92,8 +99,11 @@ export class JsonlLogger implements DaemonLogger {
       }
     }
     const active = this.activeFile();
-    if (pathExists(active) && now - statSync(active).mtimeMs > LOG_MAX_AGE_MS) {
-      unlinkIfExists(active);
+    if (pathExists(active)) {
+      const activeStat = assertSafeFile(active, this.windowsSecurity);
+      if (now - activeStat.mtimeMs > LOG_MAX_AGE_MS) {
+        unlinkIfExists(active);
+      }
     }
     const retained = files.filter(pathExists);
     for (const file of retained.slice(0, Math.max(0, retained.length - (LOG_FILE_COUNT - 1)))) {
@@ -113,10 +123,10 @@ export class StderrLogger implements DaemonLogger {
   }
 }
 
-function appendProtected(filePath: string, value: string): void {
+function appendProtected(filePath: string, value: string, windowsSecurity: WindowsLogSecurity): void {
   const existed = pathExists(filePath);
   if (existed) {
-    assertSafeFile(filePath, false);
+    assertSafeFile(filePath, windowsSecurity);
   }
   const noFollow = process.platform === "win32"
     ? 0
@@ -128,10 +138,10 @@ function appendProtected(filePath: string, value: string): void {
         chmodSync(filePath, 0o600);
       }
     } else if (!existed) {
-      restrictWindowsAcl(filePath, false);
+      windowsSecurity.restrict(filePath, false);
     }
     const opened = fstatSync(fd);
-    const pathStat = assertSafeFile(filePath, !existed);
+    const pathStat = assertSafeFile(filePath, windowsSecurity);
     if (!opened.isFile() || opened.dev !== pathStat.dev || opened.ino !== pathStat.ino) {
       throw new Error("log file changed during validation");
     }
@@ -150,30 +160,27 @@ function restrictWindowsAcl(target: string, directory: boolean): void {
   });
 }
 
-function assertSafeDirectory(target: string): void {
+function assertSafeDirectory(target: string, windowsSecurity: WindowsLogSecurity): void {
   const stat = lstatSync(target);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || isWindowsReparsePoint(target)) {
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error("log directory must be a regular directory");
   }
   assertOwner(stat.uid);
   if (process.platform === "win32") {
-    assertWindowsAcl(target);
+    windowsSecurity.assertDirectory(target);
   } else if ((stat.mode & 0o777) !== 0o700) {
     throw new Error("log directory permissions must be 0700");
   }
 }
 
-function assertSafeFile(target: string, validateWindowsSecurity = true): Stats {
+function assertSafeFile(target: string, windowsSecurity: WindowsLogSecurity): Stats {
   const stat: Stats = lstatSync(target);
-  if (!stat.isFile() || stat.isSymbolicLink()
-    || (validateWindowsSecurity && isWindowsReparsePoint(target))) {
+  if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error("log path must be a regular file");
   }
   assertOwner(stat.uid);
   if (process.platform === "win32") {
-    if (validateWindowsSecurity) {
-      assertWindowsAcl(target);
-    }
+    windowsSecurity.assertFile(target);
   } else if ((stat.mode & 0o777) !== 0o600) {
     throw new Error("log file permissions must be 0600");
   }
@@ -230,6 +237,22 @@ function currentWindowsIdentity(): { readonly name: string; readonly sid: string
   }
   return { name: match[1], sid: match[2] };
 }
+
+const DEFAULT_WINDOWS_LOG_SECURITY: WindowsLogSecurity = {
+  restrict: restrictWindowsAcl,
+  assertDirectory(target) {
+    if (isWindowsReparsePoint(target)) {
+      throw new Error("log directory must be a regular directory");
+    }
+    assertWindowsAcl(target);
+  },
+  assertFile(target) {
+    if (isWindowsReparsePoint(target)) {
+      throw new Error("log path must be a regular file");
+    }
+    assertWindowsAcl(target);
+  },
+};
 
 function fileSize(filePath: string): number {
   try {

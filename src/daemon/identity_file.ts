@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { captureProcessStartIdentity } from "./process_identity.js";
 
 export interface DaemonIdentity {
   readonly version: 1;
@@ -56,6 +57,14 @@ export interface DaemonIdentityLease {
 export interface DaemonIdentityFileOptions {
   readonly platform?: NodeJS.Platform;
   readonly runCommand?: (file: string, args: readonly string[]) => string;
+  readonly processIdentity?: (pid: number) => Promise<string | null>;
+}
+
+interface DaemonLockOwner {
+  readonly version: 1;
+  readonly pid: number;
+  readonly processStartIdentity: string;
+  readonly leaseToken: string;
 }
 
 const IDENTITY_KEYS = [
@@ -69,6 +78,7 @@ const IDENTITY_KEYS = [
   "createdAt",
 ] as const;
 const MAX_IDENTITY_BYTES = 64 * 1024;
+const LOCK_KEYS = ["version", "pid", "processStartIdentity", "leaseToken"] as const;
 
 export class DaemonIdentityFile {
   readonly directory: string;
@@ -76,6 +86,7 @@ export class DaemonIdentityFile {
   private readonly lockPath: string;
   private readonly platform: NodeJS.Platform;
   private readonly runCommand: (file: string, args: readonly string[]) => string;
+  private readonly processIdentity: (pid: number) => Promise<string | null>;
 
   constructor(directory: string, options: DaemonIdentityFileOptions = {}) {
     this.directory = path.resolve(directory);
@@ -83,6 +94,7 @@ export class DaemonIdentityFile {
     this.lockPath = path.join(this.directory, "daemon.lock");
     this.platform = options.platform ?? process.platform;
     this.runCommand = options.runCommand ?? defaultRunCommand;
+    this.processIdentity = options.processIdentity ?? captureProcessStartIdentity;
   }
 
   read(): DaemonIdentity | null {
@@ -93,13 +105,18 @@ export class DaemonIdentityFile {
     return decodeDaemonIdentity(this.readProtectedFile(this.path));
   }
 
-  acquire(identity: DaemonIdentity): DaemonIdentityLease {
+  async acquire(identity: DaemonIdentity): Promise<DaemonIdentityLease> {
     const canonical = decodeDaemonIdentity(JSON.stringify(identity));
     this.ensureProtectedDirectory();
     const leaseToken = randomUUID();
     let lockFd: number | undefined;
     try {
-      lockFd = this.createExclusiveLock(leaseToken);
+      lockFd = await this.createExclusiveLock({
+        version: 1,
+        pid: canonical.pid,
+        processStartIdentity: canonical.processStartIdentity,
+        leaseToken,
+      });
       if (pathExists(this.path)) {
         this.assertProtectedRegularFile(this.path);
         throw new DaemonIdentityFileError("lease_conflict", "daemon identity already exists");
@@ -134,7 +151,7 @@ export class DaemonIdentityFile {
     };
   }
 
-  remove(expected: Readonly<DaemonIdentity>): boolean {
+  async remove(expected: Readonly<DaemonIdentity>): Promise<boolean> {
     this.ensureProtectedDirectory();
     if (!pathExists(this.path)) {
       return false;
@@ -143,19 +160,22 @@ export class DaemonIdentityFile {
     if (!sameIdentity(current, expected)) {
       return false;
     }
-    // Remove a crashed owner's lock while daemon.json still prevents a new acquisition.
     if (pathExists(this.lockPath)) {
-      this.assertProtectedRegularFile(this.lockPath);
-      unlinkSync(this.lockPath);
-      this.flushDirectory();
+      const owner = this.readLockOwner();
+      if (owner.pid !== expected.pid || owner.processStartIdentity !== expected.processStartIdentity
+        || !await this.proveLockOwnerDead(owner)) {
+        return false;
+      }
+      if (!this.removeLockIfUnchanged(owner)) {
+        return false;
+      }
     }
     return this.cleanupOwned(expected);
   }
 
-  private createExclusiveLock(leaseToken: string): number {
+  private async createExclusiveLock(owner: Readonly<DaemonLockOwner>): Promise<number> {
     if (pathExists(this.lockPath)) {
-      this.assertProtectedRegularFile(this.lockPath);
-      throw new DaemonIdentityFileError("lease_conflict", "daemon identity lease is already held");
+      await this.recoverDeadLock();
     }
     let fd: number;
     try {
@@ -172,7 +192,7 @@ export class DaemonIdentityFile {
       throw error;
     }
     try {
-      writeSync(fd, leaseToken, 0, "utf8");
+      writeSync(fd, `${JSON.stringify(owner)}\n`, 0, "utf8");
       fsyncSync(fd);
       this.protectFile(this.lockPath);
       this.assertProtectedRegularFile(this.lockPath);
@@ -182,6 +202,39 @@ export class DaemonIdentityFile {
       unlinkIfExists(this.lockPath);
       throw error;
     }
+  }
+
+  private async recoverDeadLock(): Promise<void> {
+    const owner = this.readLockOwner();
+    if (!await this.proveLockOwnerDead(owner) || !this.removeLockIfUnchanged(owner)) {
+      throw new DaemonIdentityFileError("lease_conflict", "daemon identity lease is already held");
+    }
+  }
+
+  private async proveLockOwnerDead(owner: Readonly<DaemonLockOwner>): Promise<boolean> {
+    let actual: string | null;
+    try {
+      actual = await this.processIdentity(owner.pid);
+    } catch (error: unknown) {
+      throw new DaemonIdentityFileError("lease_conflict", "unable to verify daemon identity lease owner", { cause: error });
+    }
+    return actual === null || actual !== owner.processStartIdentity;
+  }
+
+  private readLockOwner(): DaemonLockOwner {
+    return decodeLockOwner(this.readProtectedFile(this.lockPath));
+  }
+
+  private removeLockIfUnchanged(expected: Readonly<DaemonLockOwner>): boolean {
+    const before = this.assertProtectedRegularFile(this.lockPath);
+    const current = this.readLockOwner();
+    const after = this.assertProtectedRegularFile(this.lockPath);
+    if (!sameFile(before, after) || !sameLockOwner(current, expected)) {
+      return false;
+    }
+    unlinkSync(this.lockPath);
+    this.flushDirectory();
+    return true;
   }
 
   private publish(identity: DaemonIdentity): void {
@@ -234,7 +287,7 @@ export class DaemonIdentityFile {
       const held = fstatSync(fd);
       if (pathExists(this.lockPath)) {
         const pathStat = this.assertProtectedRegularFile(this.lockPath);
-        if (sameFile(held, pathStat) && this.readProtectedFile(this.lockPath) === leaseToken) {
+        if (sameFile(held, pathStat) && this.readLockOwner().leaseToken === leaseToken) {
           unlinkSync(this.lockPath);
           this.flushDirectory();
         }
@@ -396,6 +449,28 @@ export function decodeDaemonIdentity(text: string): DaemonIdentity {
   };
 }
 
+function decodeLockOwner(text: string): DaemonLockOwner {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch (error: unknown) {
+    throw new DaemonIdentityFileError("invalid_identity", "invalid daemon lock JSON", { cause: error });
+  }
+  if (!isRecord(parsed) || !hasExactKeys(parsed, LOCK_KEYS)
+    || parsed.version !== 1
+    || !isPositiveSafeInteger(parsed.pid)
+    || !isCanonicalProcessIdentity(parsed.processStartIdentity)
+    || !isNonemptyString(parsed.leaseToken)) {
+    throw new DaemonIdentityFileError("invalid_identity", "invalid daemon lock schema");
+  }
+  return {
+    version: 1,
+    pid: parsed.pid,
+    processStartIdentity: parsed.processStartIdentity,
+    leaseToken: parsed.leaseToken,
+  };
+}
+
 function hasExactKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[]): boolean {
   const keys = Object.keys(value).sort();
   return keys.length === expected.length && [...expected].sort().every((key, index) => keys[index] === key);
@@ -450,6 +525,13 @@ function sameIdentity(left: DaemonIdentity, right: DaemonIdentity): boolean {
     && left.controlToken === right.controlToken
     && left.port === right.port
     && left.createdAt === right.createdAt;
+}
+
+function sameLockOwner(left: Readonly<DaemonLockOwner>, right: Readonly<DaemonLockOwner>): boolean {
+  return left.version === right.version
+    && left.pid === right.pid
+    && left.processStartIdentity === right.processStartIdentity
+    && left.leaseToken === right.leaseToken;
 }
 
 function sameFile(left: Stats, right: Stats): boolean {

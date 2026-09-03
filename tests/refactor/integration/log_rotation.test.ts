@@ -2,14 +2,20 @@ import { mkdtemp } from "node:fs/promises";
 import { readFileSync, readdirSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { JsonlLogger, LOG_FILE_BYTES } from "../../../src/daemon/logger.js";
+import { describe, expect, it, vi } from "vitest";
+import { JsonlLogger, LOG_FILE_BYTES, type WindowsLogSecurity } from "../../../src/daemon/logger.js";
+
+const testWindowsSecurity: WindowsLogSecurity = {
+  restrict() {},
+  assertDirectory() {},
+  assertFile() {},
+};
 
 describe("RM-19 daemon JSONL logger", () => {
   it("sanitizes records, caps line size, and rotates at 10 MiB", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-log-"));
     const dir = path.join(root, "logs");
-    const logger = new JsonlLogger(dir, () => 1_700_000_000_000);
+    const logger = new JsonlLogger(dir, () => 1_700_000_000_000, testWindowsSecurity);
     logger.write({ protocol: "ollama", token: "SECRET", prompt: "CANARY" });
     const active = path.join(dir, "gateway.jsonl");
     const first = readFileSync(active, "utf8");
@@ -29,6 +35,20 @@ describe("RM-19 daemon JSONL logger", () => {
     const names = readdirSync(dir);
     expect(names.some((name) => /^gateway\.\d+\.\d+\.jsonl$/u.test(name))).toBe(true);
     expect(names.length).toBeLessThanOrEqual(5);
+  });
+
+  it.runIf(process.platform === "win32")("rechecks Windows security for an existing log before every append", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-log-windows-security-"));
+    const security: WindowsLogSecurity = {
+      restrict: vi.fn(),
+      assertDirectory: vi.fn(),
+      assertFile: vi.fn(),
+    };
+    const logger = new JsonlLogger(path.join(root, "logs"), () => 1_700_000_000_000, security);
+    logger.write({ category: "first" });
+    const afterFirst = vi.mocked(security.assertFile).mock.calls.length;
+    logger.write({ category: "second" });
+    expect(vi.mocked(security.assertFile).mock.calls.length).toBeGreaterThan(afterFirst);
   });
 
   it.skipIf(process.platform === "win32")("protects JSONL files, rotates before overflow, and applies count and age retention", async () => {

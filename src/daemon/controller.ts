@@ -6,6 +6,7 @@ import type { DaemonIdentity } from "./identity_file.js";
 const POLL_INTERVAL_MS = 100;
 const START_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 10_000;
+const FORCE_STOP_TIMEOUT_MS = 10_000;
 const STATUS_PATH = "/__ghcg/control/v1/status";
 const STOP_PATH = "/__ghcg/control/v1/stop";
 
@@ -36,8 +37,14 @@ export interface DaemonControllerDependencies {
   readonly processIdentity: (pid: number) => Promise<string | null>;
   readonly spawn: (startup: Readonly<StartupConfig>) => Promise<SpawnedDaemon>;
   readonly delay: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly nowMs: () => number;
   readonly controlRequest: DaemonControlRequest;
-  readonly terminate: (identity: Readonly<DaemonIdentity>) => Promise<void>;
+  readonly terminate: (identity: Readonly<ProcessIdentityReference>) => Promise<void>;
+}
+
+export interface ProcessIdentityReference {
+  readonly pid: number;
+  readonly processStartIdentity: string;
 }
 
 export interface DaemonLifecycleContext {
@@ -47,6 +54,10 @@ export interface DaemonLifecycleContext {
 interface DaemonInspection {
   readonly result: CliLifecycleResult;
   readonly identity: DaemonIdentity | null;
+}
+
+interface InspectionContext extends DaemonLifecycleContext {
+  readonly timeoutMs?: number;
 }
 
 export class DaemonController {
@@ -60,7 +71,7 @@ export class DaemonController {
 
   private async inspect(
     dataDir: string,
-    context: Readonly<DaemonLifecycleContext>,
+    context: Readonly<InspectionContext>,
   ): Promise<DaemonInspection> {
     const resolvedDataDir = path.resolve(dataDir);
     context.signal?.throwIfAborted();
@@ -68,7 +79,7 @@ export class DaemonController {
     try {
       identity = await this.dependencies.identityFile.read(resolvedDataDir);
     } catch (_error: unknown) {
-      return { result: emptyResult("conflict", resolvedDataDir), identity: null };
+      throw new CliError("security_error");
     }
     if (identity === null) {
       return { result: emptyResult("stopped", resolvedDataDir), identity };
@@ -89,6 +100,7 @@ export class DaemonController {
     try {
       const response = await this.dependencies.controlRequest(identity, "GET", STATUS_PATH, {
         ...(context.signal === undefined ? {} : { signal: context.signal }),
+        ...(context.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
       });
       return {
         result: identityResult(validControlResponse(response, identity, true) ? "running" : "conflict", identity, resolvedDataDir),
@@ -122,26 +134,63 @@ export class DaemonController {
     startup: Readonly<StartupConfig>,
     context: Readonly<DaemonLifecycleContext>,
   ): Promise<CliLifecycleResult> {
-    const existing = await this.status(startup.dataDir, context);
+    const resolvedDataDir = path.resolve(startup.dataDir);
+    const deadline = this.dependencies.nowMs() + START_TIMEOUT_MS;
+    let existing: CliLifecycleResult;
+    try {
+      existing = (await this.inspect(startup.dataDir, {
+        ...context,
+        timeoutMs: remainingMs(deadline, this.dependencies.nowMs()),
+      })).result;
+    } catch (error: unknown) {
+      if (isDeadlineTimeout(error)) {
+        return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+      }
+      throw error;
+    }
     if (existing.state === "running" || existing.state === "conflict" || existing.state === "unreachable") {
       return existing;
     }
 
     context.signal?.throwIfAborted();
+    if (this.dependencies.nowMs() >= deadline) {
+      return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+    }
     const child = await this.dependencies.spawn(startup);
-    let spawnedStartIdentity: string | null = null;
+    let spawned: ProcessIdentityReference | null = null;
     try {
-      spawnedStartIdentity = await this.dependencies.processIdentity(child.pid);
-      for (let elapsed = 0; elapsed < START_TIMEOUT_MS; elapsed += POLL_INTERVAL_MS) {
-        await this.dependencies.delay(POLL_INTERVAL_MS, context.signal);
-        const result = await this.status(startup.dataDir, context);
-        if (result.state === "running") {
-          return result;
+      const spawnedStartIdentity = await this.dependencies.processIdentity(child.pid);
+      if (spawnedStartIdentity !== null) {
+        spawned = { pid: child.pid, processStartIdentity: spawnedStartIdentity };
+      }
+      while (this.dependencies.nowMs() < deadline) {
+        await this.dependencies.delay(
+          Math.min(POLL_INTERVAL_MS, remainingMs(deadline, this.dependencies.nowMs())),
+          context.signal,
+        );
+        const timeoutMs = remainingMs(deadline, this.dependencies.nowMs());
+        if (timeoutMs === 0) {
+          break;
+        }
+        try {
+          const inspection = await this.inspect(startup.dataDir, { ...context, timeoutMs });
+          if (inspection.result.state === "running") {
+            return inspection.result;
+          }
+        } catch (error: unknown) {
+          if (isDeadlineTimeout(error)) {
+            break;
+          }
+          throw error;
         }
       }
 
-      await this.cleanupFailedStart(startup.dataDir, child.pid, spawnedStartIdentity, context.signal);
-      return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), path.resolve(startup.dataDir));
+      await this.cleanupFailedStart(startup.dataDir, spawned);
+      return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+    } catch (error: unknown) {
+      await this.cleanupFailedStart(startup.dataDir, spawned);
+      rethrowCancellation(error, context.signal);
+      throw error;
     } finally {
       child.unref();
     }
@@ -194,7 +243,7 @@ export class DaemonController {
       return identityResult(fresh.kind === "dead" ? "stale" : "conflict", identity, resolvedDataDir);
     }
     await this.dependencies.terminate(identity);
-    const afterTerminate = await this.readProcessIdentity(identity, context.signal);
+    const afterTerminate = await this.waitForTermination(identity, undefined);
     if (afterTerminate.kind === "dead") {
       await this.dependencies.identityFile.remove(resolvedDataDir, identity);
       return emptyResult("stopped", resolvedDataDir);
@@ -215,30 +264,50 @@ export class DaemonController {
 
   private async cleanupFailedStart(
     dataDir: string,
-    childPid: number,
-    spawnedStartIdentity: string | null,
-    signal: AbortSignal | undefined,
+    spawned: Readonly<ProcessIdentityReference> | null,
   ): Promise<void> {
-    if (spawnedStartIdentity === null) {
+    if (spawned === null) {
       return;
     }
-    const identity = await this.readIdentityOrNull(dataDir);
-    if (identity === null
-      || identity.pid !== childPid
-      || identity.processStartIdentity !== spawnedStartIdentity) {
-      return;
-    }
-    const fresh = await this.readProcessIdentity(identity, signal);
+    const fresh = await this.readProcessIdentity(spawned, undefined);
     if (fresh.kind !== "same") {
-      if (fresh.kind === "dead") {
-        await this.dependencies.identityFile.remove(path.resolve(dataDir), identity);
-      }
+      await this.removeSpawnedIdentityIfOwned(dataDir, spawned);
       return;
     }
-    await this.dependencies.terminate(identity);
-    const afterTerminate = await this.readProcessIdentity(identity, signal);
+    await this.dependencies.terminate(spawned);
+    const afterTerminate = await this.waitForTermination(spawned, undefined);
     if (afterTerminate.kind === "dead") {
+      await this.removeSpawnedIdentityIfOwned(dataDir, spawned);
+    }
+  }
+
+  private async removeSpawnedIdentityIfOwned(
+    dataDir: string,
+    spawned: Readonly<ProcessIdentityReference>,
+  ): Promise<void> {
+    const identity = await this.readIdentityOrNull(dataDir);
+    if (identity !== null
+      && identity.pid === spawned.pid
+      && identity.processStartIdentity === spawned.processStartIdentity) {
       await this.dependencies.identityFile.remove(path.resolve(dataDir), identity);
+    }
+  }
+
+  private async waitForTermination(
+    identity: Readonly<ProcessIdentityReference>,
+    signal: AbortSignal | undefined,
+  ): Promise<{ readonly kind: "same" | "different" | "dead" | "unknown" }> {
+    const deadline = this.dependencies.nowMs() + FORCE_STOP_TIMEOUT_MS;
+    for (;;) {
+      const state = await this.readProcessIdentity(identity, signal);
+      if (state.kind !== "same") {
+        return state;
+      }
+      const remaining = remainingMs(deadline, this.dependencies.nowMs());
+      if (remaining === 0) {
+        return state;
+      }
+      await this.dependencies.delay(Math.min(POLL_INTERVAL_MS, remaining), signal);
     }
   }
 
@@ -246,12 +315,12 @@ export class DaemonController {
     try {
       return await this.dependencies.identityFile.read(path.resolve(dataDir));
     } catch (_error: unknown) {
-      return null;
+      throw new CliError("security_error");
     }
   }
 
   private async readProcessIdentity(
-    identity: Readonly<DaemonIdentity>,
+    identity: Readonly<ProcessIdentityReference>,
     signal: AbortSignal | undefined,
   ): Promise<{ readonly kind: "same" | "different" | "dead" | "unknown" }> {
     signal?.throwIfAborted();
@@ -265,6 +334,14 @@ export class DaemonController {
       return { kind: "unknown" };
     }
   }
+}
+
+function remainingMs(deadline: number, now: number): number {
+  return Math.max(0, deadline - now);
+}
+
+function isDeadlineTimeout(error: unknown): boolean {
+  return error instanceof CliError && error.code === "timeout";
 }
 
 function validControlResponse(value: unknown, identity: Readonly<DaemonIdentity>, requireRunning: boolean): boolean {

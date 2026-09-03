@@ -7,6 +7,7 @@ import {
   type DaemonControlRequest,
   type SpawnedDaemon,
 } from "../../../src/daemon/controller.js";
+import { CliError } from "../../../src/cli/control_client.js";
 import type { DaemonIdentity } from "../../../src/daemon/identity_file.js";
 
 const DATA_DIR = path.resolve("test-data");
@@ -54,6 +55,12 @@ describe("RM-19 DaemonController lifecycle", () => {
       pid: FIRST.pid,
     });
     expect(foreground.spawn).not.toHaveBeenCalled();
+  });
+
+  it("maps protected identity read failures to a CLI security error", async () => {
+    const fixture = harness();
+    fixture.identityReadError = new Error("unsafe daemon file");
+    await expect(fixture.controller.status(DATA_DIR)).rejects.toMatchObject({ code: "security_error" });
   });
 
   it("spawns one detached daemon and waits for its authenticated ready identity before unref", async () => {
@@ -116,9 +123,41 @@ describe("RM-19 DaemonController lifecycle", () => {
     expect(result.state).toBe("unreachable");
     expect(fixture.elapsedMs).toBe(30_000);
     expect(fixture.terminate).toHaveBeenCalledOnce();
-    expect(fixture.terminate).toHaveBeenCalledWith(FIRST);
+    expect(fixture.terminate).toHaveBeenCalledWith({
+      pid: FIRST.pid,
+      processStartIdentity: FIRST.processStartIdentity,
+    });
     expect(fixture.removed).toEqual([FIRST]);
     expect(fixture.child.unref).toHaveBeenCalledOnce();
+  });
+
+  it("terminates the captured child when readiness fails before daemon.json is published", async () => {
+    const fixture = harness();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    await expect(fixture.controller.start(STARTUP)).resolves.toMatchObject({ state: "unreachable" });
+    expect(fixture.identity).toBeNull();
+    expect(fixture.terminate).toHaveBeenCalledWith({
+      pid: FIRST.pid,
+      processStartIdentity: FIRST.processStartIdentity,
+    });
+  });
+
+  it("bounds each readiness status call by the absolute 30 second deadline", async () => {
+    const fixture = harness();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    fixture.onDelay = () => { fixture.identity = FIRST; };
+    fixture.controlRequest = async (_identity, _method, _path, context) => {
+      expect(context?.timeoutMs).toBe(29_900);
+      fixture.elapsedMs += context?.timeoutMs ?? 0;
+      throw new CliError("timeout");
+    };
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    await expect(fixture.controller.start(STARTUP)).resolves.toMatchObject({ state: "unreachable" });
+    expect(fixture.elapsedMs).toBe(30_000);
+    expect(fixture.terminate).toHaveBeenCalledOnce();
   });
 
   it("gracefully stops a managed daemon and removes identity only after process death", async () => {
@@ -151,6 +190,23 @@ describe("RM-19 DaemonController lifecycle", () => {
     expect(fixture.processReads.at(-1)).toEqual(FIRST.pid);
     expect(fixture.terminate).toHaveBeenCalledWith(FIRST);
     expect(fixture.removed).toEqual([FIRST]);
+  });
+
+  it("polls after force termination and rejects a reused PID while waiting", async () => {
+    const fixture = harness({ identity: FIRST });
+    let postTerminateReads = 0;
+    fixture.onTerminate = () => {
+      fixture.processIdentityOverride = async () => {
+        postTerminateReads += 1;
+        return postTerminateReads < 3
+          ? FIRST.processStartIdentity
+          : "linux:01234567-89ab-cdef-0123-456789abcdef:999";
+      };
+    };
+
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "conflict" });
+    expect(fixture.elapsedMs).toBe(10_200);
+    expect(fixture.removed).toEqual([]);
   });
 
   it("rejects stop for foreground serve and leaves the process untouched", async () => {
@@ -206,6 +262,8 @@ function harness(options: HarnessOptions = {}) {
     onDelayAsync: undefined as (() => Promise<void>) | undefined,
     onTerminate: undefined as (() => void) | undefined,
     controlRequest: undefined as DaemonControlRequest | undefined,
+    processIdentityOverride: undefined as ((pid: number) => Promise<string | null>) | undefined,
+    identityReadError: undefined as Error | undefined,
   };
   if (fixture.identity !== null) {
     fixture.processes.set(fixture.identity.pid, fixture.identity.processStartIdentity);
@@ -218,10 +276,15 @@ function harness(options: HarnessOptions = {}) {
     fixture.events.push("spawn");
     return child;
   });
-  const terminate = vi.fn(async (_identity: Readonly<DaemonIdentity>) => fixture.onTerminate?.());
+  const terminate = vi.fn(async (_identity: Readonly<{ pid: number; processStartIdentity: string }>) => fixture.onTerminate?.());
   const dependencies: DaemonControllerDependencies = {
     identityFile: {
-      read: async () => fixture.identity,
+      read: async () => {
+        if (fixture.identityReadError !== undefined) {
+          throw fixture.identityReadError;
+        }
+        return fixture.identity;
+      },
       remove: async (_dataDir, expected) => {
         if (fixture.identity === null || !sameIdentity(fixture.identity, expected)) {
           return false;
@@ -233,6 +296,9 @@ function harness(options: HarnessOptions = {}) {
     },
     processIdentity: async (pid) => {
       fixture.processReads.push(pid);
+      if (fixture.processIdentityOverride !== undefined) {
+        return await fixture.processIdentityOverride(pid);
+      }
       return fixture.processes.get(pid) ?? null;
     },
     spawn,
@@ -242,6 +308,7 @@ function harness(options: HarnessOptions = {}) {
       fixture.onDelay?.();
       await fixture.onDelayAsync?.();
     },
+    nowMs: () => fixture.elapsedMs,
     controlRequest: async (identity, method, requestPath, context) => {
       fixture.controlCalls.push({ identity: { ...identity }, method, path: requestPath });
       fixture.events.push(`control:${method}:${requestPath.split("/").at(-1)}`);
