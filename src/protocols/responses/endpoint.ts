@@ -24,6 +24,7 @@ import {
   serializeResponsesErrorBody,
 } from "./wire.js";
 import type { TelemetryProtocol, TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 
 export interface ResponsesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -34,6 +35,7 @@ export interface ResponsesRouteDependencies {
   readonly nowUnixSeconds?: () => number;
   readonly createUuid?: () => string;
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly nowMs?: () => number;
 }
 
@@ -84,7 +86,7 @@ async function executeResponses(
   usage.setProtocol(plan.kind === "native_responses" ? "openai_responses_native" : "openai_responses_bridge");
   if (plan.kind === "native_responses") {
     return decoded.stream
-      ? await nativeStreamResponse(bound, plan, scope, usage)
+      ? await nativeStreamResponse(bound, plan, scope, usage, dependencies.performanceObserver)
       : await nativeNonstreamResponse(bound, plan, scope, usage);
   }
   return decoded.stream
@@ -126,6 +128,7 @@ async function nativeStreamResponse(
   plan: Parameters<typeof openNativeResponsesStream>[1],
   scope: Readonly<RequestScope>,
   usage: UsageAttempt,
+  performanceObserver?: ProtocolPerformanceObserver,
 ): Promise<Response> {
   const upstream = await openNativeResponsesStream(bound, plan, nativeOptions(scope));
   if (upstream.status < 200 || upstream.status >= 300) {
@@ -135,7 +138,7 @@ async function nativeStreamResponse(
   const bytes = withStreamTimeouts(upstream.bytes, upstream, scope);
   const observed = usage.enabled ? createNativeStreamObservation(usage) : undefined;
   return await streamBytesResponse(
-    normalizeNativeResponsesStream(bytes, scope.config.limits.sseEventBytes, observed?.observe),
+    normalizeNativeResponsesStream(bytes, scope.config.limits.sseEventBytes, observed?.observe, performanceObserver),
     upstream,
     scope,
     usage.failure,
@@ -155,17 +158,20 @@ async function bridgeNonstreamResponse(
   }, scope.signal);
   const upstream = await bound.completeChat(chatRequest(prepared.body, plan.resolvedModel.upstreamModel, false, scope));
   assertUpstreamSuccess(upstream);
-  const chat = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
-  const converted = convertChatResponseToResponses(chat, {
-    originalRequest: plan.originalRequest,
-    toolContext: prepared.toolContext,
-    customLlmProvider: "github_copilot",
-    modelId: plan.resolvedModel.upstreamModel,
-    createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+  const measured = measure(dependencies.performanceObserver, "buffered", () => {
+    const chat = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+    const converted = convertChatResponseToResponses(chat, {
+      originalRequest: plan.originalRequest,
+      toolContext: prepared.toolContext,
+      customLlmProvider: "github_copilot",
+      modelId: plan.resolvedModel.upstreamModel,
+      createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+    });
+    return { converted, bytes: Buffer.from(serializeWireJson(converted.response)) };
   });
-  await dependencies.history.record(converted.historyRecord, scope.signal);
-  usage.finish("success", responsesUsage(converted.response));
-  return new Response(Buffer.from(serializeWireJson(converted.response)), {
+  await dependencies.history.record(measured.converted.historyRecord, scope.signal);
+  usage.finish("success", responsesUsage(measured.converted.response));
+  return new Response(measured.bytes, {
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
 }
@@ -196,7 +202,14 @@ async function bridgeStreamResponse(
     customLlmProvider: "github_copilot",
     modelId: plan.resolvedModel.upstreamModel,
   });
-  return await streamEmissionsResponse(emissions, dependencies.history, upstream, scope, usage);
+  return await streamEmissionsResponse(
+    emissions,
+    dependencies.history,
+    upstream,
+    scope,
+    usage,
+    dependencies.performanceObserver,
+  );
 }
 
 async function* withStreamTimeouts(
@@ -266,6 +279,7 @@ async function streamEmissionsResponse(
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
   usage: UsageAttempt,
+  performanceObserver?: ProtocolPerformanceObserver,
 ): Promise<Response> {
   const bytes = (async function* (): AsyncIterable<Uint8Array> {
     try {
@@ -275,18 +289,38 @@ async function streamEmissionsResponse(
           return;
         }
         if (emission.kind === "checkpoint") {
-          await history.record(emission.historyRecord, scope.signal);
+          await measureAsync(
+            performanceObserver,
+            "checkpoint",
+            async () => await history.record(emission.historyRecord, scope.signal),
+          );
         }
         if (usage.enabled) {
           observeBridgeEvent(usage, emission.event);
         }
-        yield encodeResponsesSseEvent(emission.event);
+        yield measure(performanceObserver, "event", () => encodeResponsesSseEvent(emission.event));
       }
     } finally {
       await upstream.cancel();
     }
   })();
   return await streamBytesResponse(bytes, upstream, scope, usage.failure);
+}
+
+function measure<T>(
+  observer: ProtocolPerformanceObserver | undefined,
+  measurement: "buffered" | "event",
+  work: () => T,
+): T {
+  return observer === undefined ? work() : observer.measure(measurement, work);
+}
+
+async function measureAsync<T>(
+  observer: ProtocolPerformanceObserver | undefined,
+  measurement: "checkpoint",
+  work: () => Promise<T>,
+): Promise<T> {
+  return observer === undefined ? await work() : await observer.measureAsync(measurement, work);
 }
 
 async function streamBytesResponse(

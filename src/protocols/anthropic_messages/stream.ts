@@ -6,6 +6,7 @@ import type { UpstreamByteStream } from "../chat_completions/types.js";
 import { anthropicStopReason, anthropicUsage } from "./bridge.js";
 import { asRecord, normalizeToolId, wireToJson } from "./common.js";
 import { encodeAnthropicSse, type AnthropicEvent } from "./wire.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 
 const STREAM_HEADERS = {
   "Content-Type": "text/event-stream; charset=utf-8",
@@ -17,6 +18,7 @@ export function createAnthropicStreamResponse(input: {
   readonly model: string;
   readonly createUuid: () => string;
   readonly scope: Readonly<RequestScope>;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly onTerminal?: (result: Readonly<
     | { readonly kind: "success"; readonly usage: { readonly inputTokens: number; readonly outputTokens: number; readonly cacheTokens: number } }
     | { readonly kind: "failure"; readonly error: unknown }
@@ -45,8 +47,10 @@ export function createAnthropicStreamResponse(input: {
           if (input.onTerminal !== undefined) {
             observedUsage = mergeObservedUsage(observedUsage, chunk);
           }
-          for (const event of converter.consume(chunk)) {
-            if (!await writer.enqueue(encodeAnthropicSse(event))) {
+          const events = measureEvents(input.performanceObserver, () => converter.consume(chunk));
+          for (const event of events) {
+            const bytes = measureEvents(input.performanceObserver, () => encodeAnthropicSse(event));
+            if (!await writer.enqueue(bytes)) {
               return;
             }
           }
@@ -85,6 +89,10 @@ export function createAnthropicStreamResponse(input: {
     observeTerminal(input.onTerminal, { kind: "failure", error: new GatewayFailureError({ kind: "aborted" }) });
   }, { once: true });
   return writer.response;
+}
+
+function measureEvents<T>(observer: ProtocolPerformanceObserver | undefined, work: () => T): T {
+  return observer === undefined ? work() : observer.measure("event", work);
 }
 
 interface ObservedUsage {

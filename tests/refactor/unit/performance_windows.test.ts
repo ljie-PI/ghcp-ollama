@@ -56,4 +56,26 @@ describe("RM-05 performance windows", () => {
     expect(result.transition).toBeNull();
     expect(result.snapshot.status).toBe("healthy");
   });
+
+  it("tracks degradation and recovery independently for each metric", () => {
+    const windows = new PerformanceWindows(() => 1_000);
+    for (let window = 0; window < 3; window += 1) {
+      for (let sample = 0; sample < MIN_OBSERVATIONS; sample += 1) {
+        windows.observeBuffered(20);
+      }
+      expect(windows.evaluateWindow().transition).toBe(window === 2 ? "enter" : null);
+    }
+
+    for (let sample = 0; sample < MIN_OBSERVATIONS; sample += 1) {
+      windows.observeEvent(1);
+    }
+    expect(windows.evaluateWindow().snapshot.status).toBe("degraded");
+
+    for (let window = 0; window < 3; window += 1) {
+      for (let sample = 0; sample < MIN_OBSERVATIONS; sample += 1) {
+        windows.observeBuffered(1);
+      }
+      expect(windows.evaluateWindow().transition).toBe(window === 2 ? "clear" : null);
+    }
+  });
 });

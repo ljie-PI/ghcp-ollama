@@ -22,6 +22,7 @@ import { ollamaNonstreamResponse, type OllamaTokenCounter } from "./bridge.js";
 import { createOllamaStreamResponse } from "./stream.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 
 export interface OllamaRouteDependencies {
   readonly directory: AccountDirectory;
@@ -30,6 +31,7 @@ export interface OllamaRouteDependencies {
   readonly nowMs?: () => number;
   readonly tokenCounter: OllamaTokenCounter;
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
 }
 
 const JSON_HEADERS = {
@@ -106,16 +108,18 @@ async function executeOllamaChat(
     if (response.status < 200 || response.status >= 300) {
       throw new GatewayFailureError({ kind: "upstream_http", status: response.status });
     }
-    const converted = ollamaNonstreamResponse(
-      response.body,
-      model,
-      chatMessagesFromRequest(chatRequest),
-      scope.config.limits.nonstreamBodyBytes,
-      dependencies.now ?? (() => new Date()),
-      dependencies.tokenCounter,
-    );
-    usage.success(ollamaUsage(converted));
-    return new Response(ollamaJsonStringify(converted), { headers: JSON_HEADERS });
+    return measureBuffered(dependencies, () => {
+      const converted = ollamaNonstreamResponse(
+        response.body,
+        model,
+        chatMessagesFromRequest(chatRequest),
+        scope.config.limits.nonstreamBodyBytes,
+        dependencies.now ?? (() => new Date()),
+        dependencies.tokenCounter,
+      );
+      usage.success(ollamaUsage(converted));
+      return new Response(ollamaJsonStringify(converted), { headers: JSON_HEADERS });
+    });
   }
   const upstream = await openChatStream(copilot, {
     model,
@@ -136,6 +140,7 @@ async function executeOllamaChat(
     model,
     createdAt: ollamaCreatedAt((dependencies.now ?? (() => new Date()))()),
     scope,
+    ...(dependencies.performanceObserver === undefined ? {} : { performanceObserver: dependencies.performanceObserver }),
     ...(dependencies.usageRecorder === undefined ? {} : { onTerminal: (result: Parameters<NonNullable<Parameters<typeof createOllamaStreamResponse>[0]["onTerminal"]>>[0]) => {
       if (result.kind === "success") {
         usage.success({ inputTokens: result.promptTokens, outputTokens: result.completionTokens, cacheTokens: 0 });
@@ -144,6 +149,12 @@ async function executeOllamaChat(
       }
     } }),
   });
+}
+
+function measureBuffered<T>(dependencies: OllamaRouteDependencies, work: () => T): T {
+  return dependencies.performanceObserver === undefined
+    ? work()
+    : dependencies.performanceObserver.measure("buffered", work);
 }
 
 function ollamaFailureStatusAndText(failure: Parameters<FailurePresenter>[0]): { readonly status: number; readonly text: string } {

@@ -35,6 +35,8 @@ import { createResponsesRoute } from "./protocols/responses/endpoint.js";
 import { PreferredModelManager } from "./protocols/model_catalog/preferred.js";
 import { SqliteResponsesHistory, type ResponsesHistory, type ResponsesHistoryAdmin } from "./protocols/responses/history.js";
 import { SqliteAdminTelemetry } from "./telemetry/admin.js";
+import { TelemetryRuntime } from "./telemetry/runtime.js";
+import type { ProtocolPerformanceObserver } from "./telemetry/runtime.js";
 import { VERSION } from "./version.js";
 import type Database from "better-sqlite3";
 
@@ -61,6 +63,8 @@ export interface ApplicationContext {
   readonly copilot: CopilotBackend;
   readonly history: ResponsesHistory;
   readonly telemetry?: TelemetryRecorder;
+  readonly telemetryRuntime?: TelemetryRuntime;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly modelsSource?: CopilotModelsSource;
   readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
   readonly runtime?: RuntimeConfigStore;
@@ -121,12 +125,14 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       preferences,
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
+      ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
     }),
     ...createOllamaChatRoutes({
       directory: context.directory,
       copilot: context.copilot,
       tokenCounter: context.tokenCounter,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
+      ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
@@ -134,6 +140,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       preferences,
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
+      ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
     }),
     createResponsesRoute({
       directory: context.directory,
@@ -142,6 +149,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       copilot: context.copilot,
       history: context.history,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
+      ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
     }),
   ];
 }
@@ -182,6 +190,7 @@ export async function createProductionApplicationContext(
     snapshot.usage.retentionDays,
     snapshot.events.retentionDays,
   );
+  const telemetryRuntime = new TelemetryRuntime(telemetry);
   const history = new SqliteResponsesHistory(database, {
     ttlDays: snapshot.history.ttlDays,
   });
@@ -200,16 +209,19 @@ export async function createProductionApplicationContext(
     copilot,
     history,
     telemetry,
+    telemetryRuntime,
+    performanceObserver: telemetryRuntime.performance,
     modelsSource,
     modelMetadata: modelsSource.modelMetadata,
     runtime,
     tokenCounter: litellmStyleTokenCounter,
     async close() {
-      await telemetry.flush();
+      await telemetryRuntime.close();
       await catalog.close();
       closeDatabaseOnce();
     },
     forceClose() {
+      telemetryRuntime.forceClose();
       modelsSource.forceClose();
       closeDatabaseOnce();
     },
@@ -222,6 +234,7 @@ export async function composeProductionDaemonGateway(
 ): Promise<HostedGateway> {
   const application = options.application
     ?? await createProductionApplicationContext(composition.startup, composition.env);
+  let supplementalTelemetryRuntime: TelemetryRuntime | undefined;
   try {
     const runtime = application.runtime;
     const database = application.database;
@@ -234,7 +247,25 @@ export async function composeProductionDaemonGateway(
     }
 
     const adminTelemetry = new SqliteAdminTelemetry(database, { recorder: telemetryRecorder });
-    telemetryRecorder.setObserver((event) => adminTelemetry.observeOperationalEvent(event));
+    const telemetryRuntime = application.telemetryRuntime ?? new TelemetryRuntime(telemetryRecorder);
+    if (application.telemetryRuntime === undefined) {
+      supplementalTelemetryRuntime = telemetryRuntime;
+    }
+    telemetryRuntime.attachAdmin(adminTelemetry);
+    const applicationWithTelemetry: ApplicationContext = application.telemetryRuntime === undefined
+      ? {
+        ...application,
+        performanceObserver: telemetryRuntime.performance,
+        async close() {
+          await telemetryRuntime.close();
+          await application.close?.();
+        },
+        forceClose() {
+          telemetryRuntime.forceClose();
+          return application.forceClose?.();
+        },
+      }
+      : application;
     const updateRuntimeConfig = createRuntimeConfigCoordinator(
       runtime,
       application.directory,
@@ -296,7 +327,7 @@ export async function composeProductionDaemonGateway(
     return await bootstrapGateway({
       startup: composition.startup,
       env: composition.env,
-      application,
+      application: applicationWithTelemetry,
       dependencies: {
         admin,
         control,
@@ -311,7 +342,11 @@ export async function composeProductionDaemonGateway(
       },
     });
   } catch (error: unknown) {
-    await application.close?.();
+    try {
+      await supplementalTelemetryRuntime?.close();
+    } finally {
+      await application.close?.();
+    }
     throw error;
   }
 }

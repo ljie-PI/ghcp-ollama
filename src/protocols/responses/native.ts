@@ -12,6 +12,7 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import type { NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../chat_completions/types.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import type { NativeResponsesPlan } from "./planner.js";
 import { encodeResponsesSseEvent } from "./wire.js";
 
@@ -112,6 +113,7 @@ export async function* normalizeNativeResponsesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
   observeEvent?: (event: Readonly<WireJsonObject>) => void,
+  performanceObserver?: ProtocolPerformanceObserver,
 ): AsyncIterable<Uint8Array> {
   const stableIds = new Map<number, string>();
   let terminal = false;
@@ -121,13 +123,16 @@ export async function* normalizeNativeResponsesStream(
     if (type === undefined || type.length === 0 || (event.eventName !== undefined && event.eventName !== type)) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response" });
     }
-    const normalized = normalizeNativeResponsesEvent(payload, stableIds, type);
-    try {
-      observeEvent?.(normalized);
-    } catch (_error: unknown) {
-      // Side observation cannot affect native Responses bytes.
-    }
-    yield encodeResponsesSseEvent(normalized);
+    const encoded = measureEvent(performanceObserver, () => {
+      const normalized = normalizeNativeResponsesEvent(payload, stableIds, type);
+      try {
+        observeEvent?.(normalized);
+      } catch (_error: unknown) {
+        // Side observation cannot affect native Responses bytes.
+      }
+      return encodeResponsesSseEvent(normalized);
+    });
+    yield encoded;
     if (TERMINAL_EVENTS.has(type)) {
       terminal = true;
       return;
@@ -136,6 +141,10 @@ export async function* normalizeNativeResponsesStream(
   if (!terminal) {
     throw new GatewayFailureError({ kind: "invalid_upstream_response" });
   }
+}
+
+function measureEvent<T>(observer: ProtocolPerformanceObserver | undefined, work: () => T): T {
+  return observer === undefined ? work() : observer.measure("event", work);
 }
 
 function normalizeNativeResponsesEvent(

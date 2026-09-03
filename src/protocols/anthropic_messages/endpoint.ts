@@ -14,6 +14,7 @@ import { convertAnthropicRequest } from "./request.js";
 import { createAnthropicStreamResponse } from "./stream.js";
 import { anthropicErrorBody, type AnthropicErrorType } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -22,6 +23,7 @@ export interface AnthropicMessagesRouteDependencies {
   readonly copilot: CopilotBackend;
   readonly createUuid?: () => string;
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly nowMs?: () => number;
 }
 
@@ -93,10 +95,12 @@ async function executeAnthropicMessages(
     if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response" });
     }
-    const body = convertChatResponse(upstream);
-    usage.success(anthropicUsageTokens(body));
-    return new Response(JSON.stringify(body), {
-      headers: { ...JSON_HEADERS, "request-id": scope.requestId },
+    return measureBuffered(dependencies, () => {
+      const body = convertChatResponse(upstream);
+      usage.success(anthropicUsageTokens(body));
+      return new Response(JSON.stringify(body), {
+        headers: { ...JSON_HEADERS, "request-id": scope.requestId },
+      });
     });
   }
 
@@ -107,12 +111,19 @@ async function executeAnthropicMessages(
     model: resolved.upstreamModel,
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     scope,
+    ...(dependencies.performanceObserver === undefined ? {} : { performanceObserver: dependencies.performanceObserver }),
     ...(dependencies.usageRecorder === undefined ? {} : {
       onTerminal: (result: Parameters<NonNullable<Parameters<typeof createAnthropicStreamResponse>[0]["onTerminal"]>>[0]) => result.kind === "success"
         ? usage.success(result.usage)
         : usage.failure(result.error),
     }),
   });
+}
+
+function measureBuffered<T>(dependencies: AnthropicMessagesRouteDependencies, work: () => T): T {
+  return dependencies.performanceObserver === undefined
+    ? work()
+    : dependencies.performanceObserver.measure("buffered", work);
 }
 
 function presentAnthropicFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
