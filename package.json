@@ -87,6 +87,6 @@
   },
   "type": "module",
   "bin": {
-    "ghcg": "./dist/src/cli/main.js"
+    "ghcg": "dist/src/cli/main.js"
   }
 }
