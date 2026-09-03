@@ -1,7 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { AdminClient, errorMessage, takeBootstrapToken } from "./api.js";
-  import type { AdminOperationalEvent, AdminSessionMetadata, AdminStatus } from "./types.js";
+  import type {
+    AdminOperationalEvent,
+    AdminSessionMetadata,
+    AdminStatus,
+    StreamState,
+  } from "./types.js";
   import Accounts from "./views/Accounts.svelte";
   import Configuration from "./views/Configuration.svelte";
   import Events from "./views/Events.svelte";
@@ -16,12 +21,13 @@
   let session: AdminSessionMetadata | null = $state(null);
   let phase: "loading" | "ready" | "signed-out" = $state("loading");
   let authError = $state("");
-  let streamState: "connecting" | "live" | "reconnecting" = $state("connecting");
+  let streamState: StreamState = $state("connecting");
   let liveStatus: AdminStatus | null = $state(null);
   let liveEvents: AdminOperationalEvent[] = $state([]);
   let resetVersion = $state(0);
   let stream: EventSource | null = null;
   let signedOutPanel: HTMLElement | null = $state(null);
+  let workspace: HTMLElement | null = $state(null);
   const client = new AdminClient(teardown);
 
   onMount(() => {
@@ -48,7 +54,9 @@
     closeStream();
     streamState = "connecting";
     stream = new EventSource("/admin/api/v1/events/stream");
-    stream.onopen = () => { streamState = "live"; };
+    stream.onopen = () => {
+      streamState = "live";
+    };
     stream.onerror = () => {
       streamState = "reconnecting";
       void client.session().catch(() => undefined);
@@ -84,12 +92,24 @@
   }
 
   async function logout(): Promise<void> {
-    try { await client.logout(); } catch { /* Local teardown is mandatory even if the daemon stopped. */ }
+    try {
+      await client.logout();
+    } catch {
+      // Local teardown is mandatory even if the daemon stopped.
+    }
     teardown();
+  }
+
+  async function navigate(next: View): Promise<void> {
+    view = next;
+    await tick();
+    workspace?.querySelector<HTMLElement>("h1")?.focus();
   }
 </script>
 
-<svelte:head><meta name="description" content="Local ghc-gateway administration" /></svelte:head>
+<svelte:head>
+  <meta name="description" content="Local ghc-gateway administration" />
+</svelte:head>
 
 {#if phase === "loading"}
   <main class="auth-stage" aria-busy="true">
@@ -111,29 +131,57 @@
 {:else}
   <div class="shell">
     <header class="topbar">
-      <div class="brand"><span class="brand-glyph">G</span><div><strong>ghc-gateway</strong><small>CONTROL ROOM</small></div></div>
+      <div class="brand">
+        <span class="brand-glyph">G</span>
+        <div><strong>ghc-gateway</strong><small>CONTROL ROOM</small></div>
+      </div>
       <div class="top-actions">
-        <span class="stream-state"><span class:reconnecting={streamState !== "live"} class="status-dot"></span>{streamState}</span>
+        <span class="stream-state" aria-live="polite">
+          <span class:reconnecting={streamState !== "live"} class="status-dot"></span>
+          {streamState}
+        </span>
         <button class="quiet" onclick={logout}>End session</button>
       </div>
     </header>
     <aside class="rail" aria-label="Primary">
       <nav>
-        {#each views as item, index}
-          <button class:active={view === item} aria-current={view === item ? "page" : undefined} onclick={() => view = item}>
-            <span class="nav-index">0{index + 1}</span><span>{item}</span>
+        {#each views as item, index (item)}
+          <button
+            class:active={view === item}
+            aria-current={view === item ? "page" : undefined}
+            onclick={() => void navigate(item)}
+          >
+            <span class="nav-index">0{index + 1}</span>
+            <span>{item}</span>
           </button>
         {/each}
       </nav>
-      <div class="rail-foot"><span>SESSION</span><time datetime={session?.idleExpiresAt}>idle until {session ? new Date(session.idleExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</time></div>
+      <div class="rail-foot">
+        <span>SESSION</span>
+        <time datetime={session?.idleExpiresAt}>
+          idle until {session
+            ? new Date(session.idleExpiresAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "-"}
+        </time>
+      </div>
     </aside>
-    <main class="workspace" tabindex="-1">
-      {#if view === "Overview"}<Overview {client} {liveStatus} />
-      {:else if view === "Accounts"}<Accounts {client} />
-      {:else if view === "Models"}<Models {client} />
-      {:else if view === "Configuration"}<Configuration {client} />
-      {:else if view === "Responses History"}<ResponsesHistory {client} />
-      {:else}<Events {client} {liveEvents} {resetVersion} />{/if}
+    <main class="workspace" bind:this={workspace}>
+      {#if view === "Overview"}
+        <Overview {client} {liveStatus} />
+      {:else if view === "Accounts"}
+        <Accounts {client} />
+      {:else if view === "Models"}
+        <Models {client} />
+      {:else if view === "Configuration"}
+        <Configuration {client} />
+      {:else if view === "Responses History"}
+        <ResponsesHistory {client} />
+      {:else}
+        <Events {client} {liveEvents} {resetVersion} {streamState} />
+      {/if}
     </main>
   </div>
 {/if}

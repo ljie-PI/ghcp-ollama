@@ -14,6 +14,7 @@ export type {
   AdminOperationalEvent,
   AdminUsagePage,
 } from "../../src/telemetry/admin.js";
+import type { AdminAccount } from "../../src/admin/api.js";
 
 export interface DeviceFlow {
   readonly flowId: string;
@@ -25,4 +26,6 @@ export interface DeviceFlow {
 
 export type DeviceFlowPoll =
   | { readonly state: "pending" | "expired" | "failed" }
-  | { readonly state: "complete"; readonly account: import("./types.js").AdminAccount };
+  | { readonly state: "complete"; readonly account: AdminAccount };
+
+export type StreamState = "connecting" | "live" | "reconnecting";

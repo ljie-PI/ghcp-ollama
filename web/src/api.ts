@@ -54,7 +54,7 @@ export class AdminClient {
   config(): Promise<AdminRuntimeConfig> { return this.request("/config"); }
   history(): Promise<AdminHistorySummary> { return this.request("/history"); }
   events(cursor?: string): Promise<AdminEventPage> {
-    return this.request(`/events?limit=100${cursor === undefined ? "" : `&cursor=${encodeURIComponent(cursor)}`}`);
+    return this.request(`/events?limit=500${cursor === undefined ? "" : `&cursor=${encodeURIComponent(cursor)}`}`);
   }
   startDeviceFlow(host: string): Promise<DeviceFlow> { return this.mutate("/device-flows", "POST", { host }); }
   pollDeviceFlow(flowId: string): Promise<DeviceFlowPoll> {
