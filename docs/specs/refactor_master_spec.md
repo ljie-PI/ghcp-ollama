@@ -1493,7 +1493,7 @@ complement rather than replace protocol byte goldens：SDK acceptance alone cann
 Canonical command：
 
 ```text
-GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor
+GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 ```
 
 The command refuses to start without `GHC_GATEWAY_SDK_TESTS=1`。No repository workflow sets that variable。
@@ -1797,7 +1797,7 @@ route。Examples fixed by `RM-09` and required for later slices：
   `.github/workflows/refactor-ci.yml`。
 - **Deliverables/interface**：Node `>=24` refactor scripts：
   `build:refactor`、`typecheck:refactor`、`lint:refactor`、`test:refactor`、
-  `test:sdk:refactor`、`test:live:sdk`、`test:e2e:refactor`、`fixtures:verify`、`fixtures:generate`、`bench:refactor`、
+  `test:sdk`、`test:live:sdk`、`test:e2e:refactor`、`fixtures:verify`、`fixtures:generate`、`bench:refactor`、
   `pack:refactor`、`smoke:legacy`；lock Hono、TypeBox、Undici、`better-sqlite3`、Svelte 5、Vite、Vitest、
   Playwright and exact versions of the official OpenAI、Anthropic and Ollama SDK dev dependencies。
   TypeScript 至少启用 `strict`、`noUncheckedIndexedAccess`、`exactOptionalPropertyTypes`、
@@ -2006,7 +2006,7 @@ route。Examples fixed by `RM-09` and required for later slices：
   `anthropic-version` presence including empty/wrong value selects Anthropic success shape；nullable limits/all models；
   Ollama RFC3339Nano；missing/preferred/explicit/unknown model matrix；`/models` 404。
 - **Manual SDK checkpoint**（excluded from implementation/review gates）：
-  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/model_listing.sdk.test.ts` uses OpenAI
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk -- tests/refactor/sdk/model_listing.sdk.test.ts` uses OpenAI
   `models.list`、Anthropic `models.list` and Ollama list against the loopback gateway。
 - **Acceptance/done**：three serializers read the same snapshot；no static list/name inference；cache isolated by
   account；catalog invalidation marks missing preferred model invalid without silent fallback；errors expose no upstream
@@ -2036,7 +2036,7 @@ route。Examples fixed by `RM-09` and required for later slices：
   upstream statuses/safe errors；usage-only/event/error/one successful `[DONE]`；all byte splits；first-byte/idle/total
   timeout；queue `503`；abort before/after commit；no aliases。
 - **Manual SDK checkpoint**（excluded from implementation/review gates）：
-  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/openai_chat.sdk.test.ts` covers official
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk -- tests/refactor/sdk/openai_chat.sdk.test.ts` covers official
   SDK non-stream/stream、error class/request ID and cancellation。
 - **Acceptance/done**：one upstream call with bound account/model；raw fast path does not instantiate Ollama/Anthropic/
   Responses state；success terminal exactly once；zero additional bytes on abort；Fetch-surface tests need no private
@@ -2070,7 +2070,7 @@ route。Examples fixed by `RM-09` and required for later slices：
   usage/logprobs、reasoning tags、sparse tools、absorbing `[DONE]`、truncation/abort/error；Go reference byte cases
   for order/omitempty/HTML/Unicode/control/final LF；queue `503`。
 - **Manual SDK checkpoint**（excluded from implementation/review gates）：
-  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/ollama.sdk.test.ts` covers official SDK
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk -- tests/refactor/sdk/ollama.sdk.test.ts` covers official SDK
   list/chat non-stream/stream and cancellation。
 - **Acceptance/done**：`stream` missing means true；source-valid unrepresentable semantics fail with zero upstream；
   exactly one terminal or post-commit error；all fields/bytes match goldens；`/api/version` matches closed HTTP fixture。
@@ -2099,7 +2099,7 @@ route。Examples fixed by `RM-09` and required for later slices：
   families、multi-choice/thinking/tool argument repair、usage aliases、block switches/signed thinking、finish-first/
   no-finish/exception；Python default `json.dumps` spaces/ASCII；queue `529`；abort。
 - **Manual SDK checkpoint**（excluded from implementation/review gates）：
-  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/anthropic.sdk.test.ts` covers official
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk -- tests/refactor/sdk/anthropic.sdk.test.ts` covers official
   SDK models/messages non-stream/stream、native error/request ID and cancellation。
 - **Acceptance/done**：request matches pinned cc-switch behavior；nonstream/events match pinned LiteLLM plus specified
   terminal closure；`message_stop` exactly once only on success path；Messages version rule is not reused by models
@@ -2256,7 +2256,7 @@ route。Examples fixed by `RM-09` and required for later slices：
   exact shared Responses SSE encoder/no `[DONE]`；abort zero additional bytes；`/responses`、
   `/openai/v1/responses`、compact aliases 404。
 - **Manual SDK checkpoint**（excluded from implementation/review gates）：
-  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/openai_responses.sdk.test.ts` covers
+  `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk -- tests/refactor/sdk/openai_responses.sdk.test.ts` covers
   official OpenAI SDK Responses non-stream/stream、native/bridge scripted plans、errors and cancellation。
 - **Acceptance/done**：all Responses fixture families pass through Fetch surface；plan cannot change mid-request；
   native and bridge ID namespaces/history remain separate；checkpoint p95 `<=5 ms` three runs。
@@ -2440,7 +2440,7 @@ Any failed item keeps `refactor` unreleased；the gate is never waived by docume
 After `RM-22` merges to `refactor`, a maintainer—not a coding agent—performs：
 
 1. rerun the signed/recorded release gate from a clean checkout；
-2. manually run `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor` against scripted remotes and attach its result；
+2. manually run `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk` against scripted remotes and attach its result；
 3. manually run `GHC_GATEWAY_LIVE_TESTS=1 npm run test:live:sdk` against the real local gateway and attach the sanitized
    result；
 4. review and merge the single promotion from `refactor` to `main` under repository policy；

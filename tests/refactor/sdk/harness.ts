@@ -86,7 +86,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       chatRequests.push(request);
       return isCancellationRequest(request.body)
         ? cancellableChatStream(request.signal, cancellation)
-        : [chatSse(chatCompletionChunk()), encoder.encode("data: [DONE]\n\n")];
+        : [chatSse(chatCompletionChunk(modelFromBody(request.body))), encoder.encode("data: [DONE]\n\n")];
     },
     responses(request) {
       responsesRequests.push(request);
@@ -207,12 +207,12 @@ function chatCompletion(): Record<string, unknown> {
   };
 }
 
-function chatCompletionChunk(): Record<string, unknown> {
+function chatCompletionChunk(model = CHAT_MODEL): Record<string, unknown> {
   return {
     id: "chatcmpl_sdk_stream",
     object: "chat.completion.chunk",
     created: 1_700_000_000,
-    model: CHAT_MODEL,
+    model,
     choices: [{ index: 0, delta: { role: "assistant", content: "pong" }, finish_reason: "stop" }],
   };
 }
@@ -293,6 +293,11 @@ async function untilAborted(signal: AbortSignal): Promise<never> {
 
 function isCancellationRequest(body: Uint8Array): boolean {
   return new TextDecoder().decode(body).includes("cancel-sdk-request");
+}
+
+function modelFromBody(body: Uint8Array): string {
+  const decoded = JSON.parse(new TextDecoder().decode(body)) as { readonly model?: unknown };
+  return typeof decoded.model === "string" ? decoded.model : CHAT_MODEL;
 }
 
 function jsonBytes(value: unknown): Uint8Array {
