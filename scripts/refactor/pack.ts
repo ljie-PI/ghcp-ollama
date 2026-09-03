@@ -204,7 +204,7 @@ async function verifyInstalledPackage(
   await access(binPath);
   const help = await runBin(binPath, ["--help"], temporaryRoot);
   if (!help.stdout.includes("Usage: ghcg") || !help.stdout.includes("serve")) {
-    throw new Error("installed ghcg --help did not return canonical help");
+    throw new Error(`installed ghcg --help did not return canonical help; stdout=${safeOutput(help.stdout)}; stderr=${safeOutput(help.stderr)}`);
   }
 
   const foregroundData = path.join(temporaryRoot, "foreground");
