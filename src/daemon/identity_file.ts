@@ -390,6 +390,7 @@ export class DaemonIdentityFile {
   private restrictWindowsAcl(target: string, directory: boolean): void {
     const current = currentWindowsIdentity(this.runCommand);
     const grant = directory ? `*${current.sid}:(OI)(CI)(F)` : `*${current.sid}:(F)`;
+    this.runCommand("icacls", [target, "/setowner", `*${current.sid}`]);
     this.runCommand("icacls", [target, "/inheritance:r", "/grant:r", grant]);
     for (const identity of windowsAclIdentities(target, this.runCommand)) {
       if (!isCurrentWindowsIdentity(identity, current)) {
