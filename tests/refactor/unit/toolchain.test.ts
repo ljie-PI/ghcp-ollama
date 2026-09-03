@@ -74,6 +74,18 @@ describe("RM-22 atomic package cutover", () => {
     expect(pkg.scripts.prepack).toBe("npm run build");
     expect(pkg.scripts.test).not.toContain("sdk");
     expect(pkg.scripts.e2e).not.toContain("sdk");
+    for (const script of ["test:sdk", "test:live:sdk", "typecheck:sdk"]) {
+      const command = pkg.scripts[script];
+      expect(command, script).toBeTypeOf("string");
+      if (command === undefined) {
+        throw new Error(`missing package script: ${script}`);
+      }
+      expect(command).toContain("require_opt_in.ts");
+      expect(command).toContain("generate_migrations.ts");
+      expect(command.indexOf("require_opt_in.ts")).toBeLessThan(
+        command.indexOf("generate_migrations.ts"),
+      );
+    }
   });
 
   it("requires Node.js 24 or newer", () => {
