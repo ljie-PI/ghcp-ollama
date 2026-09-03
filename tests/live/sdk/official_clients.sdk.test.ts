@@ -6,6 +6,7 @@ import {
   assertLiveSdkTestsEnabled,
   consumeAtLeastOne,
   expectCancelledStream,
+  isManagedBridgeResponseId,
   liveBaseUrl,
   loopbackOnlyFetch,
   recordLiveStatus,
@@ -62,6 +63,20 @@ describe("RM-22 guarded live official SDK smoke", () => {
     if (explicitNoNative && openAiModels.data.some((model) => modelMode(model) === "responses")) {
       throw new Error("native Responses is publicly available and cannot be declared unavailable");
     }
+    if (explicitNoNative) {
+      const ambiguousModels = openAiModels.data.filter((model) => modelMode(model) !== "chat");
+      const probes = await Promise.all(ambiguousModels.map(async (model) => ({
+        model: model.id,
+        response: await openai.responses.create({
+          model: model.id,
+          input: "Reply with OK.",
+          max_output_tokens: 1,
+        }),
+      })));
+      if (probes.some((probe) => !isManagedBridgeResponseId(probe.response.id))) {
+        throw new Error("native Responses is available and cannot be declared unavailable");
+      }
+    }
     responsesModel = nativeResponsesModel ?? chatModel;
     recordLiveStatus("models", "passing", [chatModel, responsesModel]);
   });
@@ -98,6 +113,7 @@ describe("RM-22 guarded live official SDK smoke", () => {
       max_output_tokens: 8,
     });
     expect(response.id.length).toBeGreaterThan(0);
+    expect(isManagedBridgeResponseId(response.id)).toBe(nativeResponsesModel === undefined);
     const stream = await openai.responses.create({
       model: responsesModel,
       input: "Reply with OK.",
