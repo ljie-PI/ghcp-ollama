@@ -48,7 +48,7 @@ function record(responseId: string, callId: string): ResponsesHistoryRecord {
 }
 
 async function dbPath(name: string): Promise<string> {
-  const dir = path.resolve("dist-refactor", "test-data", `rm-12-${process.pid}-${name}`);
+  const dir = path.resolve("artifacts", "test-data", `rm-12-${process.pid}-${name}`);
   await rm(dir, { recursive: true, force: true });
   await mkdir(dir, { recursive: true });
   return path.join(dir, "state.db");

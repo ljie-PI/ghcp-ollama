@@ -368,7 +368,7 @@ export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifac
   if (!Number.isInteger(repeat) || repeat < 1) {
     throw new Error("--repeat must be a positive integer");
   }
-  const workerPath = fileURLToPath(new URL("../../dist-refactor/scripts/refactor/bench.js", import.meta.url));
+  const workerPath = path.resolve("artifacts/bench/scripts/refactor/bench.js");
   await writeCompiledWorker(workerPath);
   const runs: BenchmarkRunResult[] = [];
   for (let run = 1; run <= repeat; run += 1) {
@@ -755,7 +755,7 @@ async function availablePort(): Promise<number> {
 }
 
 async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
-  const workerPath = fileURLToPath(new URL("../../dist-refactor/scripts/refactor/bench.js", import.meta.url));
+  const workerPath = path.resolve("artifacts/bench/scripts/refactor/bench.js");
   const { stdout, stderr } = await execFileAsync(process.execPath, [
     "--jitless",
     "--max-old-space-size=32",
@@ -780,7 +780,7 @@ async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
 }
 
 async function runCompiledIdleWorker(): Promise<IdleWorkerResult> {
-  const workerPath = fileURLToPath(new URL("../../dist-refactor/scripts/refactor/bench_idle.js", import.meta.url));
+  const workerPath = path.resolve("artifacts/bench/scripts/refactor/bench_idle.js");
   await writeFile(workerPath, idleWorkerSource(), "utf8");
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-rm22-idle-"));
   const port = await availablePort();
@@ -833,11 +833,11 @@ async function runCompiledIdleWorker(): Promise<IdleWorkerResult> {
 
 async function writeCompiledWorker(workerPath: string): Promise<void> {
   const ts = await import("typescript");
-  const productionEntry = fileURLToPath(new URL("../../dist-refactor/src/main.js", import.meta.url));
+  const productionEntry = fileURLToPath(new URL("../../dist/src/main.js", import.meta.url));
   try {
     await readFile(productionEntry);
   } catch {
-    throw new Error("compiled production gateway is missing; run npm run build:refactor before bench:refactor");
+    throw new Error("compiled production gateway is missing; run npm run build before bench");
   }
   const compilerOptions = {
     target: ts.ScriptTarget.ES2023,
@@ -856,7 +856,7 @@ async function writeCompiledWorker(workerPath: string): Promise<void> {
     fileName: guardSource,
   });
   await mkdir(path.dirname(workerPath), { recursive: true });
-  await writeFile(workerPath, output.outputText, "utf8");
+  await writeFile(workerPath, output.outputText.replaceAll("../../src/", "../../../../dist/src/"), "utf8");
   await writeFile(path.join(path.dirname(workerPath), "ci_network_guard.js"), guardOutput.outputText, "utf8");
 }
 
@@ -887,8 +887,8 @@ function idleLaunchArgs(workerPath: string): string[] {
 function idleWorkerSource(): string {
   return [
     "import \"./ci_network_guard.js\";",
-    "import { parseStartupConfig } from \"../../src/config/startup_config.js\";",
-    "import { composeProductionDaemonGateway, createProductionApplicationContext } from \"../../src/main.js\";",
+    "import { parseStartupConfig } from \"../../../../dist/src/config/startup_config.js\";",
+    "import { composeProductionDaemonGateway, createProductionApplicationContext } from \"../../../../dist/src/main.js\";",
     "const dataDir = process.argv[2];",
     "const port = Number.parseInt(process.argv[3] ?? \"\", 10);",
     "if (dataDir === undefined || !Number.isInteger(port)) throw new Error(\"invalid idle worker arguments\");",
@@ -970,7 +970,7 @@ function parseArgs(argv: readonly string[]): { readonly command: "full" | "worke
     return { command: "worker", repeat: run };
   }
   if (rawCommand !== "full" && rawCommand !== "baseline") {
-    throw new Error("usage: bench:refactor [full] [--repeat <positive integer>]");
+    throw new Error("usage: bench [full] [--repeat <positive integer>]");
   }
   const repeatIndex = rest.indexOf("--repeat");
   const repeat = repeatIndex === -1
@@ -991,7 +991,7 @@ async function main(): Promise<void> {
     return;
   }
   const artifact = await runFullBenchmark(parsed.repeat);
-  const artifactDir = path.resolve("dist-refactor", "bench");
+  const artifactDir = path.resolve("artifacts", "bench");
   await mkdir(artifactDir, { recursive: true });
   const artifactPath = path.join(artifactDir, "rm-22-full.json");
   await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");

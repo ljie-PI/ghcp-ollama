@@ -8,7 +8,7 @@ export function assertOptIn(variable: string, env: NodeJS.ProcessEnv = process.e
 
   const command = variable === "GHC_GATEWAY_LIVE_TESTS"
     ? "npm run test:live:sdk"
-    : "npm run test:sdk:refactor";
+    : "npm run test:sdk";
   throw new Error(`${command} is manual-only; set ${variable}=1 to run it.`);
 }
 

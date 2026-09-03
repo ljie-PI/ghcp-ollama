@@ -4,7 +4,7 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "outDir": "dist-refactor",
+    "outDir": "dist",
     "rootDir": ".",
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -28,7 +28,7 @@
   "exclude": [
     "node_modules",
     "dist",
-    "dist-refactor",
+    "dist",
     "tests/refactor/sdk/**",
     "tests/live/**"
   ]

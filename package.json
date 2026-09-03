@@ -1,8 +1,12 @@
 {
-  "name": "@ljie-pi/ghcp-ollama",
-  "version": "0.1.6",
-  "description": "Using LLMs provided by Github Copilot with Ollama APIs",
-  "main": "src/server.js",
+  "name": "@ljie-pi/ghc-gateway",
+  "version": "0.1.0",
+  "description": "A local gateway for GitHub Copilot-compatible APIs",
+  "main": "./dist/src/main.js",
+  "exports": {
+    ".": "./dist/src/main.js",
+    "./cli": "./dist/src/cli/main.js"
+  },
   "keywords": [
     "github-copilot",
     "ollama",
@@ -15,67 +19,45 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ljie-PI/ghcp-ollama.git"
+    "url": "git+https://github.com/ljie-PI/ghc-gateway.git"
   },
   "bugs": {
-    "url": "https://github.com/ljie-PI/ghcp-ollama/issues"
+    "url": "https://github.com/ljie-PI/ghc-gateway/issues"
   },
-  "homepage": "https://github.com/ljie-PI/ghcp-ollama#readme",
+  "homepage": "https://github.com/ljie-PI/ghc-gateway#readme",
   "author": "ljie-PI",
   "license": "MIT",
   "files": [
-    "src/",
-    "dist-refactor/admin/",
+    "dist/src/",
+    "dist/admin/",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
-    "build": "node build.js",
-    "server:start": "node src/serverctl.js start",
-    "server:stop": "node src/serverctl.js stop",
-    "server:restart": "node src/serverctl.js restart",
-    "server:status": "node src/serverctl.js status",
-    "test": "vitest",
-    "test:unit": "vitest run tests/unit/",
-    "test:integration": "vitest run tests/integration/",
-    "test:watch": "vitest watch",
-    "test:ui": "vitest --ui",
-    "test:coverage": "vitest run --coverage",
-    "test:golden": "node tests/integration/utils/golden_generator.js",
-    "build:refactor": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && tsc -p tsconfig.build.refactor.json && node scripts/refactor/bootstrap.mjs scripts/refactor/clean_admin_build.ts && vite build --config web/vite.config.ts",
-    "typecheck:refactor": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && tsc -p tsconfig.refactor.json --noEmit && svelte-check --tsconfig web/tsconfig.json",
-    "lint:refactor": "node scripts/refactor/bootstrap.mjs --check && eslint --no-error-on-unmatched-pattern --config eslint.config.js \"src/**/*.ts\" \"scripts/refactor/**/*.{ts,mjs}\" \"tests/refactor/unit/**/*.ts\" \"tests/refactor/contract/**/*.ts\" \"tests/refactor/integration/**/*.ts\" \"tests/refactor/performance/**/*.ts\" \"web/**/*.{ts,svelte}\" \"vitest.refactor.config.ts\" \"playwright.config.ts\"",
-    "test:refactor": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && vitest run --config vitest.refactor.config.ts",
-    "test:sdk:refactor": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_SDK_TESTS && vitest run --config vitest.sdk.config.ts",
+    "start": "node dist/src/cli/main.js serve",
+    "build": "node scripts/refactor/bootstrap.mjs scripts/refactor/clean_admin_build.ts all && node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && tsc -p tsconfig.json && vite build --config web/vite.config.ts",
+    "typecheck": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && tsc -p tsconfig.test.json --noEmit && svelte-check --tsconfig web/tsconfig.json",
+    "lint": "node scripts/refactor/bootstrap.mjs --check && eslint --no-error-on-unmatched-pattern --config eslint.config.js \"src/**/*.ts\" \"scripts/refactor/**/*.{ts,mjs}\" \"tests/refactor/unit/**/*.ts\" \"tests/refactor/contract/**/*.ts\" \"tests/refactor/integration/**/*.ts\" \"tests/refactor/performance/**/*.ts\" \"web/**/*.{ts,svelte}\" \"vitest.config.ts\" \"vitest.sdk.config.ts\" \"playwright.config.ts\"",
+    "test": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && vitest run --config vitest.config.ts",
+    "test:sdk": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_SDK_TESTS && vitest run --config vitest.sdk.config.ts",
     "test:live:sdk": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_LIVE_TESTS && vitest run --config vitest.sdk.config.ts",
-    "test:e2e:refactor": "node scripts/refactor/bootstrap.mjs --check && playwright test -c playwright.config.ts",
+    "e2e": "node scripts/refactor/bootstrap.mjs --check && playwright test -c playwright.config.ts",
     "fixtures:verify": "node scripts/refactor/bootstrap.mjs scripts/refactor/fixtures.ts verify",
     "fixtures:generate": "node scripts/refactor/bootstrap.mjs scripts/refactor/fixtures.ts generate",
-    "bench:refactor": "node scripts/refactor/bootstrap.mjs scripts/refactor/bench.ts",
-    "pack:refactor": "npm run build:refactor && node scripts/refactor/bootstrap.mjs scripts/refactor/pack.ts",
-    "smoke:legacy": "node scripts/refactor/bootstrap.mjs scripts/refactor/smoke_legacy.ts",
-    "smoke:refactor:sqlite": "node scripts/refactor/bootstrap.mjs scripts/refactor/sqlite_smoke.ts",
-    "typecheck:sdk:refactor": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_SDK_TESTS && tsc -p tsconfig.sdk.refactor.json --noEmit",
+    "bench": "node scripts/refactor/bootstrap.mjs scripts/refactor/bench.ts",
+    "pack": "node scripts/refactor/bootstrap.mjs scripts/refactor/pack.ts",
+    "smoke:sqlite": "node scripts/refactor/bootstrap.mjs scripts/refactor/sqlite_smoke.ts",
+    "typecheck:sdk": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_SDK_TESTS && tsc -p tsconfig.sdk.json --noEmit",
+    "prepack": "npm run build",
     "web:dev": "vite --config web/vite.config.ts",
     "web:typecheck": "svelte-check --tsconfig web/tsconfig.json",
     "web:build": "node scripts/refactor/bootstrap.mjs scripts/refactor/clean_admin_build.ts && vite build --config web/vite.config.ts"
-  },
-  "bin": {
-    "ghcpo": "./src/ghcpo.js",
-    "ghcpo-server": "./src/serverctl.js"
   },
   "dependencies": {
     "@hono/node-server": "2.1.1",
     "@sinclair/typebox": "0.34.52",
     "better-sqlite3": "13.0.3",
-    "eslint_d": "^14.3.0",
-    "express": "^4.18.2",
     "hono": "4.13.4",
-    "minimist": "^1.2.8",
     "undici": "8.10.0"
   },
   "devDependencies": {
@@ -83,16 +65,12 @@
     "@playwright/test": "1.62.1",
     "@sveltejs/vite-plugin-svelte": "7.3.0",
     "@types/better-sqlite3": "9.6.0",
-    "@types/express": "^4.17.21",
-    "@types/minimist": "^1.2.5",
     "@types/node": "24.13.3",
     "@vitest/coverage-v8": "4.1.11",
     "@vitest/ui": "4.1.11",
     "eslint": "^9.35.0",
-    "eslint-plugin-node": "^11.1.0",
     "eslint-plugin-svelte": "^3.12.4",
     "globals": "^15.9.0",
-    "nodemon": "^3.1.9",
     "ollama": "0.6.3",
     "openai": "7.5.0",
     "playwright": "1.62.1",
@@ -105,7 +83,10 @@
     "vitest": "4.1.11"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=24"
   },
-  "type": "module"
+  "type": "module",
+  "bin": {
+    "ghcg": "./dist/src/cli/main.js"
+  }
 }

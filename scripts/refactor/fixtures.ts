@@ -165,7 +165,7 @@ export async function verifyFixtureManifests(root = FIXTURE_ROOT, verifyExpected
 }
 
 export async function writeFixtureReport(entries: readonly FixtureManifestEntry[]): Promise<string> {
-  const reportPath = path.resolve("dist-refactor", "fixtures-report.json");
+  const reportPath = path.resolve("artifacts", "fixtures-report.json");
   const payload = {
     generatedAt: new Date(0).toISOString(),
     count: entries.length,

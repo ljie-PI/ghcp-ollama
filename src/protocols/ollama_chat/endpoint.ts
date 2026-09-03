@@ -1,4 +1,3 @@
-import { VERSION } from "../../version.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { AccountDirectoryError, type AccountDirectory } from "../../accounts/account_directory.js";
 import {
@@ -49,16 +48,6 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
   };
 
   return [
-    {
-      method: "GET",
-      path: "/api/version",
-      admission: "none",
-      body: "none",
-      presentFailure,
-      endpoint: async () => new Response(JSON.stringify({ version: VERSION }), {
-        headers: JSON_HEADERS,
-      }),
-    },
     {
       method: "POST",
       path: "/api/chat",

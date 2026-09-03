@@ -46,7 +46,7 @@ async function recordAccessibilityEvidence(page: Page): Promise<void> {
     };
   });
   expect(evidence).toMatchObject({ unnamedControls: [], duplicateIds: [], mainLandmarks: 1, headingOneCount: 1 });
-  const directory = path.resolve("artifacts", "refactor-ci");
+  const directory = path.resolve("artifacts", "ci");
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, "rm-21-accessibility.json"), `${JSON.stringify({
     ...evidence,

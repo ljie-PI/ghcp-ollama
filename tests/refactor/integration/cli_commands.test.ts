@@ -487,7 +487,6 @@ describe("RM-18 CLI commands", () => {
         "GET /v1/models",
         "GET /api/tags",
         "POST /v1/chat/completions",
-        "GET /api/version",
         "POST /api/chat",
         "POST /v1/messages",
         "POST /v1/responses",

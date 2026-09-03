@@ -21,7 +21,6 @@ export default [
       "node_modules/**",
       "copilot/**",
       "dist/**",
-      "dist-refactor/**",
       "coverage/**",
       "*.md",
     ],
@@ -52,7 +51,7 @@ export default [
     },
   },
   {
-    files: ["src/**/*.js", "tests/**/*.js", "scripts/**/*.{js,mjs}", "*.js"],
+    files: ["scripts/**/*.mjs", "*.js"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",

@@ -82,7 +82,7 @@ export async function anthropicGateway(options: {
   });
 
   const gw = await createGateway({
-    startup: parseStartupConfig([], {}, { homedir: "Q:\\ghcp-ollama-worktrees\\rm-11\\.test-home" }),
+    startup: parseStartupConfig([], {}, { homedir: "Q:\\ghc-gateway-tests\\anthropic\\.test-home" }),
     runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
   }, [createAnthropicMessagesRoute({
     directory: accounts,

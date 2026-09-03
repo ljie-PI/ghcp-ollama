@@ -13,7 +13,7 @@ export const RESERVED_MIGRATION_FILES: ReadonlyMap<number, string> = new Map([
 
 export const DEFAULT_MIGRATIONS_DIR = path.resolve("src/persistence/migrations");
 export const DEFAULT_MANIFEST_PATH = path.resolve("src/persistence/generated_migrations.ts");
-export const DEFAULT_COMPILED_MIGRATIONS_DIR = path.resolve("dist-refactor/src/persistence/migrations");
+export const DEFAULT_COMPILED_MIGRATIONS_DIR = path.resolve("dist/src/persistence/migrations");
 
 export class MigrationGenerateError extends Error {
   constructor(message: string) {

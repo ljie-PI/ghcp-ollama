@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { inspectAdminBundle, type NpmPackEntry } from "../../../scripts/refactor/pack.js";
+import {
+  assertExactManifest,
+  inspectAdminBundle,
+  type NpmPackEntry,
+} from "../../../scripts/refactor/pack.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -12,7 +16,7 @@ afterEach(async () => {
   }));
 });
 
-describe("RM-21 package evidence", () => {
+describe("RM-22 package evidence", () => {
   it("requires the index, Vite manifest, and hashed JavaScript and CSS in the package", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-pack-"));
     temporaryDirectories.push(root);
@@ -33,7 +37,7 @@ describe("RM-21 package evidence", () => {
       ".vite/manifest.json",
       "assets/index-AbCd1234.js",
       "assets/index-EfGh5678.css",
-    ].map((file) => ({ path: `dist-refactor/admin/${file}`, size: 1 }));
+    ].map((file) => ({ path: `dist/admin/${file}`, size: 1 }));
 
     const evidence = await inspectAdminBundle({ files }, root);
 
@@ -55,9 +59,16 @@ describe("RM-21 package evidence", () => {
       "index.html": { file: "assets/index-AbCd1234.js", css: ["assets/index-EfGh5678.css"] },
     }));
     const entry: Pick<NpmPackEntry, "files"> = {
-      files: [{ path: "dist-refactor/admin/index.html", size: 5 }],
+      files: [{ path: "dist/admin/index.html", size: 5 }],
     };
 
     await expect(inspectAdminBundle(entry, root)).rejects.toThrow("npm package omits Admin assets");
+  });
+
+  it("rejects extra and missing package files", () => {
+    expect(() => assertExactManifest(
+      ["package.json", "dist/src/main.js", "src/main.ts"],
+      ["package.json", "dist/src/main.js", "dist/admin/index.html"],
+    )).toThrow("unexpected=[src/main.ts], missing=[dist/admin/index.html]");
   });
 });

@@ -1,7 +1,7 @@
 # Node modules
 node_modules/
 dist/
-dist-refactor/
+artifacts/
 src/persistence/generated_migrations.ts
 playwright-report/
 test-results/

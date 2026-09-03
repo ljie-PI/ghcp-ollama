@@ -3,10 +3,7 @@ tests/
 coverage/
 .gitattributes
 .gitignore
-build.js
 eslint.config.js
-vitest.config.js
-nodemon.json
 AGENTS.md
 
 # IDE and editor folders
