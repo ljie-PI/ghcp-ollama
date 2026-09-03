@@ -159,7 +159,11 @@ export class DaemonController {
     const child = await this.dependencies.spawn(startup);
     let spawned: ProcessIdentityReference | null = null;
     try {
-      const spawnedStartIdentity = await this.dependencies.processIdentity(child.pid);
+      const spawnedStartIdentity = await withDeadline(
+        this.dependencies.processIdentity(child.pid),
+        remainingMs(deadline, this.dependencies.nowMs()),
+        context.signal,
+      );
       if (spawnedStartIdentity !== null) {
         spawned = { pid: child.pid, processStartIdentity: spawnedStartIdentity };
       }
@@ -393,4 +397,23 @@ function rethrowCancellation(error: unknown, signal: AbortSignal | undefined): v
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function withDeadline<T>(work: Promise<T>, timeoutMs: number, parent?: AbortSignal): Promise<T> {
+  if (timeoutMs <= 0) {
+    throw new CliError("timeout");
+  }
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(new CliError("timeout")), timeoutMs);
+  const signal = parent === undefined ? timeout.signal : AbortSignal.any([parent, timeout.signal]);
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -43,7 +43,7 @@ export interface DaemonRuntimeDependencies {
 
 export interface ProductionDaemonControllerOptions {
   readonly env?: NodeJS.ProcessEnv;
-  readonly cliEntry?: string;
+  readonly childEntry?: string;
   readonly execPath?: string;
 }
 
@@ -51,7 +51,7 @@ export function createProductionDaemonController(
   options: Readonly<ProductionDaemonControllerOptions> = {},
 ): DaemonController {
   const env = options.env ?? process.env;
-  const cliEntry = options.cliEntry ?? fileURLToPath(new URL("../cli/main.js", import.meta.url));
+  const childEntry = options.childEntry ?? fileURLToPath(new URL("./child.js", import.meta.url));
   const execPath = options.execPath ?? process.execPath;
   return new DaemonController({
     identityFile: {
@@ -61,8 +61,7 @@ export function createProductionDaemonController(
     processIdentity: captureProcessStartIdentity,
     spawn: async (startup) => {
       const child = spawn(execPath, [
-        cliEntry,
-        "serve",
+        childEntry,
         "--data-dir", startup.dataDir,
         "--port", String(startup.port),
         "--log-level", startup.logLevel,
@@ -70,7 +69,7 @@ export function createProductionDaemonController(
         detached: true,
         stdio: "ignore",
         windowsHide: true,
-        env: { ...env, GHC_GATEWAY_INTERNAL_MANAGED_CHILD: "1" },
+        env,
       });
       await new Promise<void>((resolve, reject) => {
         child.once("error", reject);
@@ -91,6 +90,10 @@ export function createProductionDaemonController(
       context,
     ),
     terminate: async (identity) => {
+      const current = await captureProcessStartIdentity(identity.pid);
+      if (current !== identity.processStartIdentity) {
+        return;
+      }
       process.kill(identity.pid, "SIGKILL");
     },
   });
@@ -153,7 +156,9 @@ export class HttpDeviceOAuthClient implements DeviceOAuthClient {
     if (typeof value.access_token !== "string" || value.access_token.length === 0) {
       return { status: "failed" } as const;
     }
-    const userResponse = await fetch(`${environment.apiBaseUrl}/user`, {
+    const userUrl = new URL(environment.apiBaseUrl);
+    userUrl.pathname = `${userUrl.pathname.replace(/\/$/u, "")}/user`;
+    const userResponse = await fetch(userUrl, {
       headers: { accept: "application/vnd.github+json", authorization: `Bearer ${value.access_token}` },
       ...(signal === undefined ? {} : { signal }),
     });

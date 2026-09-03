@@ -25,6 +25,7 @@ const DEFAULT_DEPENDENCIES: ProcessIdentityDependencies = {
   readFile: async (filePath) => await readFile(filePath, "utf8"),
   runCommand: runCommand,
 };
+const PROCESS_IDENTITY_TIMEOUT_MS = 5_000;
 
 export async function captureProcessStartIdentity(
   pid: number,
@@ -177,6 +178,7 @@ async function runCommand(
       encoding: "utf8",
       env: { ...process.env, ...env },
       windowsHide: true,
+      timeout: PROCESS_IDENTITY_TIMEOUT_MS,
     }, (error, stdout) => {
       if (error !== null) {
         reject(error);

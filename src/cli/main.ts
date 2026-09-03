@@ -157,7 +157,7 @@ async function runServe(
   options: RunCliOptions,
 ): Promise<number> {
   const env = options.env ?? process.env;
-  const managed = env.GHC_GATEWAY_INTERNAL_MANAGED_CHILD === "1";
+  const managed = false;
   const shutdown = options.shutdownSignal === undefined ? processSignal() : null;
   const shutdownSignal = options.shutdownSignal ?? shutdown?.signal ?? new AbortController().signal;
   const composeGateway: ComposeDaemonGateway = options.composeGateway

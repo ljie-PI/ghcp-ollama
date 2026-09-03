@@ -55,8 +55,21 @@ export class JsonlLogger implements DaemonLogger {
   write(record: Record<string, unknown>): void {
     this.prune();
     const sanitized = sanitizeMetadata(record);
+    const category = typeof record.category === "string" && /^[a-z0-9_]+$/u.test(record.category)
+      ? record.category
+      : undefined;
+    const managed = typeof record.managed === "boolean" ? record.managed : undefined;
+    const pid = typeof record.pid === "number" && Number.isSafeInteger(record.pid) && record.pid > 0
+      ? record.pid
+      : undefined;
     const timestamp = this.nowMs();
-    let line = JSON.stringify({ ts: timestamp, ...sanitized });
+    let line = JSON.stringify({
+      ts: timestamp,
+      ...(category === undefined ? {} : { category }),
+      ...(managed === undefined ? {} : { managed }),
+      ...(pid === undefined ? {} : { pid }),
+      ...sanitized,
+    });
     if (utf8Bytes(line) > LOG_LINE_LIMIT_BYTES) {
       line = JSON.stringify({ ts: timestamp, overflow: true, reason: "log_line_truncated" });
     }
@@ -119,7 +132,14 @@ export class StderrLogger implements DaemonLogger {
   ) {}
 
   write(record: Record<string, unknown>): void {
-    this.stream.write(`${JSON.stringify({ ts: this.nowMs(), ...sanitizeMetadata(record) })}\n`);
+    const category = typeof record.category === "string" && /^[a-z0-9_]+$/u.test(record.category)
+      ? record.category
+      : undefined;
+    this.stream.write(`${JSON.stringify({
+      ts: this.nowMs(),
+      ...(category === undefined ? {} : { category }),
+      ...sanitizeMetadata(record),
+    })}\n`);
   }
 }
 
