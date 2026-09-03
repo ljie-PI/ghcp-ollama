@@ -1,2 +1,5 @@
-/copilot/dist/** -whitespace -diff
-/dist/** -whitespace -diff
+* text=auto eol=lf
+tests/refactor/fixtures/**/*.expected.txt whitespace=-blank-at-eof
+tests/refactor/fixtures/copilot-transport/sse/done.input.txt whitespace=-blank-at-eof
+tests/refactor/fixtures/ollama/stream/success.input.txt whitespace=-blank-at-eof
+tests/refactor/fixtures/openai-chat/stream/done.input.txt whitespace=-blank-at-eof

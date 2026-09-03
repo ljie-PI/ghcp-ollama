@@ -1,0 +1,34 @@
+[
+  {
+    "caseId": "anthropic.request.tools-media-reasoning",
+    "owner": "RM-11",
+    "source": "docs/claude_messages_to_chat_completions.md#3-request-top-level-conversion",
+    "input": "request/tools-media-reasoning.input.json",
+    "expected": "request/tools-media-reasoning.expected.json",
+    "encoder": "anthropic-request-object"
+  },
+  {
+    "caseId": "anthropic.nonstream.tools-usage",
+    "owner": "RM-11",
+    "source": "docs/claude_messages_to_chat_completions.md#7-non-stream-chat-response",
+    "input": "nonstream/tools-usage.input.json",
+    "expected": "nonstream/tools-usage.expected.json",
+    "encoder": "anthropic-message-object"
+  },
+  {
+    "caseId": "anthropic.stream.lifecycle",
+    "owner": "RM-11",
+    "source": "docs/claude_messages_to_chat_completions.md#8-streaming-chat-response",
+    "input": "stream/lifecycle.input.txt",
+    "expected": "stream/lifecycle.expected.txt",
+    "encoder": "python-json-dumps-sse-bytes"
+  },
+  {
+    "caseId": "anthropic.presenter.rate-limit",
+    "owner": "RM-11",
+    "source": "docs/gateway_http_contracts.md#72-anthropic-messages",
+    "input": "presenter/rate-limit.input.txt",
+    "expected": "presenter/rate-limit.expected.json",
+    "encoder": "anthropic-error-presenter"
+  }
+]

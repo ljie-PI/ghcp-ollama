@@ -1,0 +1,17 @@
+{
+  "model": "gpt",
+  "previous_response_id": "resp_previous",
+  "input": [
+    {
+      "type": "function_call",
+      "call_id": "call_a",
+      "name": "lookup",
+      "arguments": "{}"
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call_a",
+      "output": "ok"
+    }
+  ]
+}

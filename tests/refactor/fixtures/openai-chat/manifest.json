@@ -1,0 +1,90 @@
+[
+  {
+    "caseId": "openai-chat.request.model-rewrite",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#7-request-reserialization--vision-analysis",
+    "input": "request/model-rewrite.input.json",
+    "expected": "request/model-rewrite.expected.json",
+    "encoder": "openai-chat-request"
+  },
+  {
+    "caseId": "openai-chat.stream.done",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#11-openai-downstream-sse-wire--terminal",
+    "input": "stream/done.input.txt",
+    "expected": "stream/done.expected.txt",
+    "encoder": "openai-chat-sse"
+  },
+  {
+    "caseId": "openai-chat.request.capture",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#145-stream-parser--exact-wire",
+    "input": "request/capture.input.json",
+    "expected": "request/capture.expected.json",
+    "encoder": "openai-chat-request-capture"
+  },
+  {
+    "caseId": "openai-chat.presenter.model-not-found",
+    "owner": "RM-09",
+    "source": "docs/gateway_http_contracts.md#71-openai-chat--responses",
+    "input": "presenter/model-not-found.input.txt",
+    "expected": "presenter/model-not-found.expected.json",
+    "encoder": "openai-error-presenter"
+  },
+  {
+    "caseId": "openai-chat.buffered.success",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#9-non-stream-success",
+    "input": "buffered/success.input.json",
+    "expected": "buffered/success.expected.json",
+    "encoder": "openai-chat-buffered"
+  },
+  {
+    "caseId": "openai-chat.buffered.limit-boundary",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#144-non-stream",
+    "input": "buffered/limit-boundary.input.txt",
+    "expected": "buffered/limit-boundary.expected.json",
+    "encoder": "openai-chat-limit"
+  },
+  {
+    "caseId": "openai-chat.stream.limit-boundary",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#145-stream-parser--exact-wire",
+    "input": "stream/limit-boundary.input.txt",
+    "expected": "stream/limit-boundary.expected.json",
+    "encoder": "openai-chat-limit"
+  },
+  {
+    "caseId": "openai-chat.usage.observation",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#13-usage--telemetry-ownership",
+    "input": "usage/observation.input.json",
+    "expected": "usage/observation.expected.json",
+    "encoder": "openai-chat-usage"
+  },
+  {
+    "caseId": "openai-chat.model.preferred",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#42-missing-model",
+    "input": "model/preferred.input.json",
+    "expected": "model/preferred.expected.json",
+    "encoder": "openai-chat-request"
+  },
+  {
+    "caseId": "openai-chat.stream.truncated",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#103-eof",
+    "input": "stream/truncated.input.txt",
+    "expected": "stream/truncated.expected.json",
+    "encoder": "openai-error-presenter"
+  },
+  {
+    "caseId": "openai-chat.abort.zero-bytes",
+    "owner": "RM-09",
+    "source": "docs/openai_chat_completions.md#125-client-abort",
+    "input": "abort/zero-bytes.input.txt",
+    "expected": "abort/zero-bytes.expected.txt",
+    "encoder": "openai-chat-abort"
+  }
+]

@@ -1,0 +1,10 @@
+[
+  {
+    "caseId": "model-catalog.openai.empty",
+    "owner": "RM-08",
+    "source": "docs/github_copilot_model_listing_apis.md#92-default-openai-success-response",
+    "input": "empty.input.json",
+    "expected": "empty.expected.json",
+    "encoder": "openai-models"
+  }
+]

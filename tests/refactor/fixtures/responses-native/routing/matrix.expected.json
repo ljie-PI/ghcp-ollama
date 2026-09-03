@@ -1,0 +1,1 @@
+[{"name":"mode-responses","plan":"native_responses"},{"name":"mode-chat-wins","plan":"chat_bridge"},{"name":"endpoint-fallback","plan":"native_responses"},{"name":"missing","plan":"chat_bridge"}]
