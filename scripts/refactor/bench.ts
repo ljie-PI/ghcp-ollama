@@ -461,6 +461,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
   const measuredHistory = new MeasuredHistory(database, { nowMs });
   const telemetry = new TelemetryRecorder(database, nowMs);
   const performanceObserver = new BenchmarkPerformanceObserver();
+  let uuid = 0;
   let closed = false;
   const application: ApplicationContext = {
     database,
@@ -471,6 +472,8 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     history: measuredHistory,
     telemetry,
     performanceObserver,
+    nowMs,
+    createUuid: () => `00000000-0000-4000-8000-${(++uuid).toString().padStart(12, "0")}`,
     runtime: runtimeConfig,
     tokenCounter: litellmStyleTokenCounter,
     async close() {

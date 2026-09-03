@@ -27,26 +27,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Use Node.js 24
+        id: node
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
           registry-url: https://registry.npmjs.org
-      - name: Record provenance
+      - name: Restore dependency cache
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node24-npm11-${{ hashFiles('package-lock.json') }}
+      - name: Provision dependencies and record provenance
         shell: bash
         run: |
           mkdir -p artifacts/ci
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          npm ci
+          npm ci --offline
+          npx playwright install chromium
           {
             echo "node=$(node --version)"
             echo "npm=$(npm --version)"
             echo "platform=${{ matrix.platform }}"
             echo "registry=$(npm config get registry)"
+            echo "npm_cache=$(npm config get cache)"
+            echo "cache_key=npm-${{ runner.os }}-${{ runner.arch }}-node24-npm11-${{ hashFiles('package-lock.json') }}"
+            echo "cache_hit=${{ steps.npm-cache.outputs.cache-hit }}"
             echo "lockfile_sha256=$(node -e 'const fs=require("fs");const crypto=require("crypto");console.log(crypto.createHash("sha256").update(fs.readFileSync("package-lock.json")).digest("hex"))')"
           } | tee artifacts/ci/provenance.txt
-      - run: npm ci
-      - name: Verify offline install
-        run: npm ci --offline
-      - run: npx playwright install chromium
       - name: Block outbound network
         shell: bash
         run: |

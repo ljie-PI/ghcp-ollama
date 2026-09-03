@@ -65,6 +65,8 @@ export interface ApplicationContext {
   readonly telemetry?: TelemetryRecorder;
   readonly telemetryRuntime?: TelemetryRuntime;
   readonly performanceObserver?: ProtocolPerformanceObserver;
+  readonly nowMs?: () => number;
+  readonly createUuid?: () => string;
   readonly modelsSource?: CopilotModelsSource;
   readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
   readonly runtime?: RuntimeConfigStore;
@@ -126,6 +128,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
+      ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
     }),
     ...createOllamaChatRoutes({
       directory: context.directory,
@@ -133,6 +136,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       tokenCounter: context.tokenCounter,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
+      ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
@@ -141,6 +145,8 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
+      ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
+      ...(context.createUuid === undefined ? {} : { createUuid: context.createUuid }),
     }),
     createResponsesRoute({
       directory: context.directory,
@@ -150,6 +156,8 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       history: context.history,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
+      ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
+      ...(context.createUuid === undefined ? {} : { createUuid: context.createUuid }),
     }),
   ];
 }
