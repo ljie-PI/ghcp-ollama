@@ -102,7 +102,7 @@ describe("RM-04 runtime config", () => {
         store.update(candidate, store.readRevision());
         samples.push(performance.now() - started);
       }
-      const artifactDir = path.resolve("dist-refactor", "bench");
+      const artifactDir = path.resolve("artifacts", "bench");
       await mkdir(artifactDir, { recursive: true });
       const sorted = samples.slice().sort((left, right) => left - right);
       const p95 = sorted[Math.ceil(0.95 * sorted.length) - 1];

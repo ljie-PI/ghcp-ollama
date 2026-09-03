@@ -1,5 +1,6 @@
 export const WINDOW_MS = 5 * 60 * 1000;
 export const MIN_OBSERVATIONS = 20;
+export const MAX_WINDOW_SAMPLES = 4_096;
 export const THRESHOLDS = {
   bufferedMs: 5,
   eventMs: 2,
@@ -39,8 +40,12 @@ export class PerformanceWindows {
   private readonly event: number[] = [];
   private readonly checkpoint: number[] = [];
   private readonly eventLoop: number[] = [];
-  private overWindows = 0;
-  private healthyWindows = 0;
+  private readonly consecutive = {
+    buffered: metricWindows(),
+    event: metricWindows(),
+    checkpoint: metricWindows(),
+    eventLoop: metricWindows(),
+  };
   private status: PerformanceStatus = "healthy";
   private degradedSinceMs: number | null = null;
 
@@ -50,19 +55,19 @@ export class PerformanceWindows {
   ) {}
 
   observeBuffered(ms: number): void {
-    this.buffered.push(ms);
+    addSample(this.buffered, ms);
   }
 
   observeEvent(ms: number): void {
-    this.event.push(ms);
+    addSample(this.event, ms);
   }
 
   observeCheckpoint(ms: number): void {
-    this.checkpoint.push(ms);
+    addSample(this.checkpoint, ms);
   }
 
   observeEventLoop(ms: number): void {
-    this.eventLoop.push(ms);
+    addSample(this.eventLoop, ms);
   }
 
   evaluateWindow(): PerformanceEvaluation {
@@ -75,29 +80,20 @@ export class PerformanceWindows {
     this.checkpoint.length = 0;
     this.eventLoop.length = 0;
 
-    const evaluated = [buffered, event, checkpoint, eventLoop].filter((metric) => metric.status !== "insufficient_data");
+    updateMetricWindows(this.consecutive.buffered, buffered);
+    updateMetricWindows(this.consecutive.event, event);
+    updateMetricWindows(this.consecutive.checkpoint, checkpoint);
+    updateMetricWindows(this.consecutive.eventLoop, eventLoop);
     let transition: "enter" | "clear" | null = null;
-    if (evaluated.length > 0) {
-      const over = evaluated.some((metric) => metric.status === "over");
-      if (over) {
-        this.overWindows += 1;
-        this.healthyWindows = 0;
-        if (this.status === "healthy" && this.overWindows >= 3) {
-          this.status = "degraded";
-          this.degradedSinceMs = this.nowMs();
-          transition = "enter";
-          this.overWindows = 0;
-        }
-      } else {
-        this.healthyWindows += 1;
-        this.overWindows = 0;
-        if (this.status === "degraded" && this.healthyWindows >= 3) {
-          this.status = "healthy";
-          this.degradedSinceMs = null;
-          transition = "clear";
-          this.healthyWindows = 0;
-        }
-      }
+    const degraded = Object.values(this.consecutive).some((metric) => metric.degraded);
+    if (this.status === "healthy" && degraded) {
+      this.status = "degraded";
+      this.degradedSinceMs = this.nowMs();
+      transition = "enter";
+    } else if (this.status === "degraded" && !degraded) {
+      this.status = "healthy";
+      this.degradedSinceMs = null;
+      transition = "clear";
     }
 
     const evaluation: PerformanceEvaluation = {
@@ -125,6 +121,51 @@ export class PerformanceWindows {
       // Monitoring observers cannot change performance state transitions.
     }
     return evaluation;
+  }
+}
+
+function addSample(samples: number[], value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    return;
+  }
+  if (samples.length >= MAX_WINDOW_SAMPLES) {
+    samples.shift();
+  }
+  samples.push(value);
+}
+
+interface MetricWindows {
+  over: number;
+  healthy: number;
+  degraded: boolean;
+}
+
+function metricWindows(): MetricWindows {
+  return { over: 0, healthy: 0, degraded: false };
+}
+
+function updateMetricWindows(windows: MetricWindows, metric: PerformanceMetricSnapshot): void {
+  if (metric.status === "insufficient_data") {
+    return;
+  }
+  if (metric.status === "over") {
+    windows.over += 1;
+    windows.healthy = 0;
+    if (windows.over >= 3) {
+      windows.degraded = true;
+      windows.over = 0;
+    }
+    return;
+  }
+  windows.over = 0;
+  if (!windows.degraded) {
+    windows.healthy = 0;
+    return;
+  }
+  windows.healthy += 1;
+  if (windows.healthy >= 3) {
+    windows.degraded = false;
+    windows.healthy = 0;
   }
 }
 

@@ -21,7 +21,8 @@ import {
 } from "../../serialization/wire_json.js";
 import { resolveModel, type ResolvedModel } from "../model_catalog/resolver.js";
 import type { ChatRequest, ChatStreamFrame } from "../chat_completions/types.js";
-import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { TelemetryOutcome, TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "./wire.js";
 
 export interface OpenAiChatRouteDependencies {
@@ -30,6 +31,7 @@ export interface OpenAiChatRouteDependencies {
   readonly preferences?: Pick<AccountModelPreferences, "get">;
   readonly copilot: CopilotBackend;
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly nowMs?: () => number;
 }
 
@@ -58,7 +60,22 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
     path: "/v1/chat/completions",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: presentOpenAiFailure,
+    presentFailure: (failure, requestId) => {
+      recordUsageSample(dependencies, {
+        occurredAtMs: (dependencies.nowMs ?? Date.now)(),
+        accountId: "unbound",
+        protocol: "openai_chat",
+        resolvedModel: "unresolved",
+        outcome: telemetryOutcome(failure),
+        requestCount: 1,
+        errorCount: failure.kind === "aborted" ? 0 : 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheTokens: 0,
+        latencyMs: 0,
+      });
+      return presentOpenAiFailure(failure, requestId);
+    },
     endpoint: async (request, scope) => {
       const startedAtMs = (dependencies.nowMs ?? Date.now)();
       if (request.body === undefined) {
@@ -90,25 +107,27 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
           throw new GatewayFailureError({ kind: "invalid_upstream_response" });
         }
-        const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
-        recordUsageSample(dependencies, {
-          occurredAtMs: (dependencies.nowMs ?? Date.now)(),
-          accountId: account.accountId,
-          protocol: "openai_chat",
-          resolvedModel: resolved.upstreamModel,
-          outcome: "success",
-          requestCount: 1,
-          errorCount: 0,
-          ...usageNumbers(usageObservationFromPayload(payload)),
-          latencyMs: (dependencies.nowMs ?? Date.now)() - startedAtMs,
-        });
-        return new Response(Buffer.from(serializeWireJson(payload)), {
-          status: upstream.status,
-          headers: {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-            "x-request-id": scope.requestId,
-          },
+        return measure(dependencies.performanceObserver, "buffered", () => {
+          const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+          recordUsageSample(dependencies, {
+            occurredAtMs: (dependencies.nowMs ?? Date.now)(),
+            accountId: account.accountId,
+            protocol: "openai_chat",
+            resolvedModel: resolved.upstreamModel,
+            outcome: "success",
+            requestCount: 1,
+            errorCount: 0,
+            ...usageNumbers(usageObservationFromPayload(payload)),
+            latencyMs: (dependencies.nowMs ?? Date.now)() - startedAtMs,
+          });
+          return new Response(Buffer.from(serializeWireJson(payload)), {
+            status: upstream.status,
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "Cache-Control": "no-store",
+              "x-request-id": scope.requestId,
+            },
+          });
         });
       }
 
@@ -171,6 +190,37 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       });
     },
   };
+}
+
+function telemetryOutcome(failure: Readonly<GatewayFailure>): TelemetryOutcome {
+  switch (failure.kind) {
+  case "invalid_request":
+  case "body_too_large":
+  case "unsupported_media_type":
+  case "unsupported_semantics":
+  case "model_not_found":
+    return "client_error";
+  case "authentication":
+  case "permission":
+    return "authentication_error";
+  case "queue_full":
+  case "queue_timeout":
+    return "overloaded";
+  case "upstream_timeout":
+    return "timeout";
+  case "aborted":
+    return "aborted";
+  case "upstream_http":
+  case "upstream_network":
+  case "upstream_stream_error":
+  case "upstream_stream_truncated":
+  case "invalid_upstream_response":
+  case "invalid_tool_arguments":
+  case "invalid_logprobs":
+    return "upstream_error";
+  case "internal":
+    return "internal_error";
+  }
 }
 
 export function decodeOpenAiChatRequest(body: WireJsonObject): DecodedOpenAiChatRequest {
@@ -638,12 +688,14 @@ function openAiChatStreamResponse(input: {
         const frame = pending ?? await nextFrame(input.frames);
         pending = undefined;
         if (frame.kind === "chunk") {
-          usage = mergeUsageObservation(usage, usageObservationFromPayload(frame.chunk.payload));
-          controller.enqueue(encodeOpenAiChatSseChunk(frame.chunk.payload));
+          measure(input.dependencies.performanceObserver, "event", () => {
+            usage = mergeUsageObservation(usage, usageObservationFromPayload(frame.chunk.payload));
+            controller.enqueue(encodeOpenAiChatSseChunk(frame.chunk.payload));
+          });
           return;
         }
         if (frame.kind === "done") {
-          controller.enqueue(encodeOpenAiChatDone());
+          measure(input.dependencies.performanceObserver, "event", () => controller.enqueue(encodeOpenAiChatDone()));
           recordUsageSample(input.dependencies, {
             occurredAtMs: (input.dependencies.nowMs ?? Date.now)(),
             accountId: input.accountId,
@@ -750,6 +802,14 @@ function recordUsageSample(dependencies: OpenAiChatRouteDependencies, update: Us
   } catch (_error) {
     // Telemetry is noncritical and must not change protocol bytes.
   }
+}
+
+function measure<T>(
+  observer: ProtocolPerformanceObserver | undefined,
+  measurement: "buffered" | "event",
+  work: () => T,
+): T {
+  return observer === undefined ? work() : observer.measure(measurement, work);
 }
 
 function presentOpenAiFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {

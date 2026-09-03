@@ -1,6 +1,7 @@
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { CredentialStore } from "../accounts/credential_store.js";
-import { Agent, errors as undiciErrors, request as undiciRequest } from "undici";
+import type * as Undici from "undici";
+import type { Dispatcher } from "undici";
 import type { IncomingHttpHeaders } from "node:http";
 import { discoverEndpoint, MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
 import { outboundHeaders } from "./backend.js";
@@ -8,6 +9,15 @@ import type { TokenRefreshError } from "./token_refresh.js";
 import { getValidToken } from "./token_refresh.js";
 import type { CopilotBackend, CopilotTarget, BoundCopilot } from "./backend.js";
 import type { ChatResponse, UpstreamByteResponse, UpstreamByteStream } from "../protocols/chat_completions/types.js";
+
+type UndiciModule = typeof Undici;
+
+let undiciModulePromise: Promise<UndiciModule> | undefined;
+
+function loadUndici(): Promise<UndiciModule> {
+  undiciModulePromise ??= import("undici");
+  return undiciModulePromise;
+}
 
 export class UpstreamBodyLimitError extends Error {
   constructor() {
@@ -181,6 +191,7 @@ async function undiciWithRedirects(
   firstByteTimeoutMs: number | undefined,
   extraHeaders?: Headers,
 ): Promise<TransportResponse> {
+  const { Agent, errors: undiciErrors, request: undiciRequest } = await loadUndici();
   let current = url;
   let headers = outboundHeaders(token, extraHeaders);
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
@@ -225,7 +236,7 @@ async function undiciWithRedirects(
       current = next;
     } catch (error: unknown) {
       await dispatcher.close().catch(() => undefined);
-      if (isUndiciTimeout(error)) {
+      if (isUndiciTimeout(error, undiciErrors)) {
         throw new UpstreamTimeoutError();
       }
       throw error;
@@ -407,7 +418,7 @@ async function* iterateWebBody(stream: ReadableStream<Uint8Array>): AsyncIterabl
   }
 }
 
-async function* iterateUndiciBody(body: UndiciBody, dispatcher: Agent): AsyncIterable<Uint8Array> {
+async function* iterateUndiciBody(body: UndiciBody, dispatcher: Dispatcher): AsyncIterable<Uint8Array> {
   try {
     for await (const chunk of body) {
       yield chunk instanceof Uint8Array ? chunk : Buffer.from(chunk);
@@ -443,7 +454,7 @@ function incomingHeadersToHeaders(headers: IncomingHttpHeaders): Headers {
   return result;
 }
 
-function isUndiciTimeout(error: unknown): boolean {
+function isUndiciTimeout(error: unknown, undiciErrors: UndiciModule["errors"]): boolean {
   return error instanceof undiciErrors.ConnectTimeoutError
     || error instanceof undiciErrors.HeadersTimeoutError
     || error instanceof undiciErrors.BodyTimeoutError;

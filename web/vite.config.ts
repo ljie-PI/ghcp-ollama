@@ -6,7 +6,7 @@ export default defineConfig({
   base: "/admin/",
   plugins: [svelte()],
   build: {
-    outDir: "../dist-refactor/admin",
+    outDir: "../dist/admin",
     emptyOutDir: false,
     manifest: true,
   },

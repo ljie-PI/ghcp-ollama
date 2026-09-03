@@ -6,6 +6,7 @@ import type { UpstreamByteStream } from "../chat_completions/types.js";
 import { anthropicStopReason, anthropicUsage } from "./bridge.js";
 import { asRecord, normalizeToolId, wireToJson } from "./common.js";
 import { encodeAnthropicSse, type AnthropicEvent } from "./wire.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 
 const STREAM_HEADERS = {
   "Content-Type": "text/event-stream; charset=utf-8",
@@ -17,8 +18,14 @@ export function createAnthropicStreamResponse(input: {
   readonly model: string;
   readonly createUuid: () => string;
   readonly scope: Readonly<RequestScope>;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
+  readonly onTerminal?: (result: Readonly<
+    | { readonly kind: "success"; readonly usage: { readonly inputTokens: number; readonly outputTokens: number; readonly cacheTokens: number } }
+    | { readonly kind: "failure"; readonly error: unknown }
+  >) => void;
 }): Response {
   const converter = new AnthropicStreamConverter(input.model, input.createUuid);
+  let observedUsage = { inputTokens: 0, outputTokens: 0, cacheTokens: 0 };
   const writer = createStreamResponseWriter({
     signal: input.scope.signal,
     headers: { ...STREAM_HEADERS, "request-id": input.scope.requestId },
@@ -36,8 +43,14 @@ export function createAnthropicStreamResponse(input: {
           return;
         }
         if (frame.kind === "chunk") {
-          for (const event of converter.consume(wireToJson(frame.chunk.payload))) {
-            if (!await writer.enqueue(encodeAnthropicSse(event))) {
+          const chunk = wireToJson(frame.chunk.payload);
+          if (input.onTerminal !== undefined) {
+            observedUsage = mergeObservedUsage(observedUsage, chunk);
+          }
+          const events = measureEvents(input.performanceObserver, () => converter.consume(chunk));
+          for (const event of events) {
+            const bytes = measureEvents(input.performanceObserver, () => encodeAnthropicSse(event));
+            if (!await writer.enqueue(bytes)) {
               return;
             }
           }
@@ -49,9 +62,14 @@ export function createAnthropicStreamResponse(input: {
               return;
             }
           }
+          observeTerminal(input.onTerminal, { kind: "success", usage: observedUsage });
           writer.close();
           return;
         }
+        observeTerminal(input.onTerminal, {
+          kind: "failure",
+          error: new GatewayFailureError({ kind: "upstream_stream_error" }),
+        });
         writer.close();
         return;
       }
@@ -60,12 +78,58 @@ export function createAnthropicStreamResponse(input: {
           return;
         }
       }
+      observeTerminal(input.onTerminal, { kind: "success", usage: observedUsage });
       writer.close();
-    } catch (_error: unknown) {
+    } catch (error: unknown) {
+      observeTerminal(input.onTerminal, { kind: "failure", error });
       writer.abort();
     }
   })();
+  input.scope.signal.addEventListener("abort", () => {
+    observeTerminal(input.onTerminal, { kind: "failure", error: new GatewayFailureError({ kind: "aborted" }) });
+  }, { once: true });
   return writer.response;
+}
+
+function measureEvents<T>(observer: ProtocolPerformanceObserver | undefined, work: () => T): T {
+  return observer === undefined ? work() : observer.measure("event", work);
+}
+
+interface ObservedUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheTokens: number;
+}
+
+function mergeObservedUsage(current: ObservedUsage, chunk: unknown): ObservedUsage {
+  const object = asRecord(chunk);
+  if (object?.usage === undefined) {
+    return current;
+  }
+  const usage = anthropicUsage(object.usage);
+  return {
+    inputTokens: observedInteger(usage.input_tokens) ?? current.inputTokens,
+    outputTokens: observedInteger(usage.output_tokens) ?? current.outputTokens,
+    cacheTokens: observedInteger(usage.cache_read_input_tokens) === undefined
+      && observedInteger(usage.cache_creation_input_tokens) === undefined
+      ? current.cacheTokens
+      : (observedInteger(usage.cache_read_input_tokens) ?? 0) + (observedInteger(usage.cache_creation_input_tokens) ?? 0),
+  };
+}
+
+function observedInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function observeTerminal(
+  observer: Parameters<typeof createAnthropicStreamResponse>[0]["onTerminal"],
+  result: Parameters<NonNullable<Parameters<typeof createAnthropicStreamResponse>[0]["onTerminal"]>>[0],
+): void {
+  try {
+    observer?.(result);
+  } catch (_error: unknown) {
+    // Observability cannot alter the stream lifecycle or bytes.
+  }
 }
 class AnthropicStreamConverter {
   private active: { type: "text" | "thinking" | "tool"; index: number; name?: string } | undefined;

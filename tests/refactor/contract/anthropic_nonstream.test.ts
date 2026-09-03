@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
+import type { UsageUpdate } from "../../../src/telemetry/recorder.js";
 import { anthropicGateway, anthropicRequest } from "./anthropic_harness.js";
 
 describe("RM-11 Anthropic non-stream response", () => {
   it("maps all choices, thinking blocks, repaired tools, stop reason, usage aliases, and request ID", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new ScriptedCopilotBackend({
       chat: {
         status: 200,
@@ -49,7 +51,7 @@ describe("RM-11 Anthropic non-stream response", () => {
         })),
       },
     });
-    const { gw, close } = await anthropicGateway({ backend });
+    const { gw, close } = await anthropicGateway({ backend, usageUpdates });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: false }));
       expect(response.status).toBe(200);
@@ -83,12 +85,21 @@ describe("RM-11 Anthropic non-stream response", () => {
           server_tool_use: { web_search_requests: 2 },
         },
       });
+      expect(usageUpdates).toMatchObject([{
+        protocol: "anthropic",
+        outcome: "success",
+        resolvedModel: "gpt",
+        inputTokens: 22,
+        outputTokens: 7,
+        cacheTokens: 8,
+      }]);
     } finally {
       await close();
     }
   });
 
   it("rebuilds upstream HTTP errors with Anthropic's native error shape", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new ScriptedCopilotBackend({
       chat: {
         status: 429,
@@ -96,13 +107,21 @@ describe("RM-11 Anthropic non-stream response", () => {
         body: new TextEncoder().encode("{\"leak\":\"upstream\"}"),
       },
     });
-    const { gw, close } = await anthropicGateway({ backend });
+    const { gw, close } = await anthropicGateway({ backend, usageUpdates });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 1, messages: [{ role: "user", content: "hi" }], stream: false }));
       expect(response.status).toBe(429);
       expect(response.headers.get("retry-after")).toBe("120");
       expect(response.headers.get("request-id")).toBe("req_test_1");
       expect(await response.text()).toBe("{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"upstream request failed\"},\"request_id\":\"req_test_1\"}");
+      expect(usageUpdates).toMatchObject([{
+        protocol: "anthropic",
+        outcome: "upstream_error",
+        accountId: "github.com/1",
+        resolvedModel: "gpt",
+        requestCount: 1,
+        errorCount: 1,
+      }]);
     } finally {
       await close();
     }

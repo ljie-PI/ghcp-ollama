@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  pull_request:
+    branches: ["refactor"]
+  push:
+    branches: ["refactor"]
+
+jobs:
+  platform:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-latest
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+          - platform: windows-x64
+            os: windows-latest
+          - platform: macos-x64
+            os: macos-15-intel
+          - platform: macos-arm64
+            os: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 24
+        id: node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Restore dependency cache
+        id: npm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ runner.arch }}-node24-npm11-${{ hashFiles('package-lock.json') }}
+      - name: Provision dependencies and record provenance
+        shell: bash
+        run: |
+          mkdir -p artifacts/ci
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          npm ci
+          while IFS= read -r spec; do npm cache add "$spec"; done < <(node scripts/refactor/bootstrap.mjs scripts/refactor/production_dependency_specs.ts)
+          npm ci --offline
+          npx playwright install chromium
+          {
+            echo "node=$(node --version)"
+            echo "npm=$(npm --version)"
+            echo "platform=${{ matrix.platform }}"
+            echo "registry=$(npm config get registry)"
+            echo "npm_cache=$(npm config get cache)"
+            echo "cache_key=npm-${{ runner.os }}-${{ runner.arch }}-node24-npm11-${{ hashFiles('package-lock.json') }}"
+            echo "cache_hit=${{ steps.npm-cache.outputs.cache-hit }}"
+            echo "lockfile_sha256=$(node -e 'const fs=require("fs");const crypto=require("crypto");console.log(crypto.createHash("sha256").update(fs.readFileSync("package-lock.json")).digest("hex"))')"
+          } | tee artifacts/ci/provenance.txt
+      - name: Block outbound network
+        shell: bash
+        run: |
+          {
+            echo "GHC_GATEWAY_CI_NETWORK_GUARD=1"
+            echo "NODE_OPTIONS=--import ./scripts/refactor/bootstrap.mjs"
+            echo "HTTP_PROXY=http://127.0.0.1:9"
+            echo "HTTPS_PROXY=http://127.0.0.1:9"
+            echo "ALL_PROXY=http://127.0.0.1:9"
+            echo "NO_PROXY=localhost,127.0.0.1,::1"
+          } >> "$GITHUB_ENV"
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+      - name: Test
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm test
+      - name: Verify fixtures
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run fixtures:verify
+      - name: E2E
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run e2e
+      - name: SQLite smoke
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run smoke:sqlite
+      - name: Benchmark
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run bench -- full --repeat 3
+      - name: Installed package smoke
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+        run: npm run pack
+      - uses: actions/upload-artifact@v4
+        if: always()
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: ""
+          NODE_OPTIONS: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
+          NO_PROXY: ""
+        with:
+          name: ci-${{ matrix.platform }}
+          path: artifacts/**

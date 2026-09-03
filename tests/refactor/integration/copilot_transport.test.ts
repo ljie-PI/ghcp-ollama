@@ -1,3 +1,9 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { MemoryCredentialStore } from "../../../src/accounts/credential_store.js";
 import type { BoundAccount } from "../../../src/accounts/account_directory.js";
@@ -7,6 +13,8 @@ import { discoverEndpoint, fallbackEndpoint, stripSecretsOnRedirect } from "../.
 import { copilotHeaders } from "../../../src/copilot/identity.js";
 import { HttpCopilotBackend } from "../../../src/copilot/transport.js";
 import { getValidToken, needsRefresh } from "../../../src/copilot/token_refresh.js";
+
+const execFileAsync = promisify(execFile);
 
 function account(kind: "github.com" | "ghes" = "github.com"): BoundAccount {
   const host = kind === "github.com" ? "github.com" : "ghe.example.com";
@@ -21,6 +29,37 @@ function account(kind: "github.com" | "ghes" = "github.com"): BoundAccount {
 }
 
 describe("RM-07 Copilot transport", () => {
+  it("does not load Undici while composing and closing an idle production gateway", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-undici-idle-"));
+    const source = [
+      "import Module from 'node:module';",
+      "import { parseStartupConfig } from './src/config/startup_config.ts';",
+      "import { composeProductionDaemonGateway, createProductionApplicationContext } from './src/main.ts';",
+      "const dataDir = process.argv[1];",
+      "const startup = parseStartupConfig(['--data-dir', dataDir, '--port', '31400'], {});",
+      "const application = await createProductionApplicationContext(startup, {});",
+      "const gateway = await composeProductionDaemonGateway({",
+      "  startup, env: {}, requestStop() {}, logger: { write() {} },",
+      "  identity: { version: 1, managed: false, pid: process.pid, processStartIdentity: 'test', instanceNonce: 'test', controlToken: 'test', port: 31400, createdAt: '2026-09-03T00:00:00.000Z' },",
+      "}, { application, uptimeMs: () => 0 });",
+      "await gateway.close();",
+      "const loaded = Object.keys(Module._cache).filter((file) => file.includes('node_modules') && file.includes('undici'));",
+      "if (loaded.length > 0) throw new Error(`Undici loaded while idle: ${loaded.join(', ')}`);",
+    ].join("\n");
+    try {
+      await execFileAsync(process.execPath, [
+        "--import",
+        "tsx/esm",
+        "--input-type=module",
+        "--eval",
+        source,
+        dataDir,
+      ], { cwd: process.cwd(), env: { ...process.env, NODE_OPTIONS: "" } });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("uses fixed identity headers that inbound authorization cannot override", () => {
     const headers = outboundHeaders("real-token", new Headers({
       authorization: "Bearer attacker",
@@ -144,6 +183,49 @@ describe("RM-07 Copilot transport", () => {
     expect(headers.get("content-type")).toBe("application/json");
     expect(headers.get("copilot-vision-request")).toBe("true");
     expect(headers.has("authorization")).toBe(true);
+  });
+
+  it("completes the first outbound request through the lazy Undici transport", async () => {
+    const server = createServer((request, response) => {
+      expect(request.url).toBe("/chat/completions");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"ok\":true}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    const store = new MemoryCredentialStore();
+    const bound = { ...account(), accountId: "github.com/lazy-undici" };
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      fetchDiscovery: async () => `http://127.0.0.1:${address.port}`,
+    });
+    try {
+      const copilot = await backend.bind(bound, new AbortController().signal);
+      const response = await copilot.completeChat({
+        model: "gpt",
+        body: new TextEncoder().encode("{}"),
+        stream: false,
+        hasVisionInput: false,
+        nonstreamBodyBytes: 1_000,
+        connectTimeoutMs: 1_000,
+        firstByteTimeoutMs: 1_000,
+        signal: new AbortController().signal,
+      });
+      expect(response.status).toBe(200);
+      expect(new TextDecoder().decode(response.body)).toBe("{\"ok\":true}");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("enforces captured connect timeout on injected fetch transport", async () => {

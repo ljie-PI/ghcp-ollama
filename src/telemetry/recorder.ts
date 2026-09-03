@@ -191,11 +191,11 @@ export class TelemetryRecorder {
     });
   }
 
-  async flush(signal?: AbortSignal): Promise<void> {
+  async flush(signal?: AbortSignal, maxMutations = Number.POSITIVE_INFINITY): Promise<void> {
     if (signal?.aborted) {
       return;
     }
-    const batch = this.pending.splice(0, this.pending.length);
+    const batch = this.pending.splice(0, Math.max(0, Math.floor(maxMutations)));
     const recordedEvents: RecordedOperationalEvent[] | null = this.observer === undefined ? null : [];
     const now = this.nowMs();
     const tx = this.database.transaction(() => {
@@ -212,7 +212,12 @@ export class TelemetryRecorder {
       this.persistDrops(now);
       this.cleanup(now);
     });
-    tx();
+    try {
+      tx();
+    } catch (error: unknown) {
+      this.pending.unshift(...batch);
+      throw error;
+    }
     if (recordedEvents !== null) {
       for (const event of recordedEvents) {
         try {

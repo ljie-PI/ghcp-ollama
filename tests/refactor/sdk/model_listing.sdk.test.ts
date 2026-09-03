@@ -1,7 +1,33 @@
-import { describe, it } from "vitest";
+import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
+import { Ollama } from "ollama";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { CHAT_MODEL, type OfflineSdkHarness, startOfflineSdkHarness } from "./harness.js";
 
 describe("RM-08 official SDK model listing", () => {
-  it.skip("manual-only: OpenAI, Anthropic, and Ollama list against loopback", () => {
-    // GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk:refactor -- tests/refactor/sdk/model_listing.sdk.test.ts
+  let harness: OfflineSdkHarness;
+
+  beforeAll(async () => {
+    harness = await startOfflineSdkHarness();
+  });
+  afterAll(async () => {
+    await harness.close();
+  });
+
+  it("deserializes the shared catalog with OpenAI, Anthropic, and Ollama clients", async () => {
+    const openai = new OpenAI({ apiKey: "local", baseURL: harness.openAiBaseUrl, fetch: harness.fetch, maxRetries: 0 });
+    const anthropic = new Anthropic({ apiKey: "local", baseURL: harness.baseUrl, fetch: harness.fetch, maxRetries: 0 });
+    const ollama = new Ollama({ host: harness.baseUrl, fetch: harness.fetch });
+
+    const [openAiModels, anthropicModels, ollamaModels] = await Promise.all([
+      openai.models.list(),
+      anthropic.models.list(),
+      ollama.list(),
+    ]);
+
+    expect(openAiModels.data.map((model) => model.id)).toContain(CHAT_MODEL);
+    expect(anthropicModels.data.map((model) => model.id)).toContain(CHAT_MODEL);
+    expect(ollamaModels.models.map((model) => model.model)).toContain(CHAT_MODEL);
+    expect(harness.backendKinds).toEqual([]);
   });
 });

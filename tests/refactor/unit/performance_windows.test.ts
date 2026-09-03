@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIN_OBSERVATIONS, nearestRankP95, PerformanceWindows } from "../../../src/telemetry/performance.js";
+import { MAX_WINDOW_SAMPLES, MIN_OBSERVATIONS, nearestRankP95, PerformanceWindows } from "../../../src/telemetry/performance.js";
 
 describe("RM-05 performance windows", () => {
   it("uses nearest-rank p95", () => {
@@ -55,5 +55,43 @@ describe("RM-05 performance windows", () => {
     expect(result.snapshot.metrics.bufferedMs.samples).toBeUndefined();
     expect(result.transition).toBeNull();
     expect(result.snapshot.status).toBe("healthy");
+  });
+
+  it("bounds every pending metric window", () => {
+    let observed: ReturnType<PerformanceWindows["evaluateWindow"]> | undefined;
+    const windows = new PerformanceWindows(Date.now, (evaluation) => { observed = evaluation; });
+    for (let index = 0; index < MAX_WINDOW_SAMPLES + 100; index += 1) {
+      windows.observeBuffered(index);
+      windows.observeEvent(index);
+      windows.observeCheckpoint(index);
+      windows.observeEventLoop(index);
+    }
+    windows.evaluateWindow();
+    expect(observed?.snapshot.metrics.bufferedMs.samples).toBe(MAX_WINDOW_SAMPLES);
+    expect(observed?.snapshot.metrics.eventMs.samples).toBe(MAX_WINDOW_SAMPLES);
+    expect(observed?.snapshot.metrics.checkpointMs.samples).toBe(MAX_WINDOW_SAMPLES);
+    expect(observed?.snapshot.metrics.eventLoopMs.samples).toBe(MAX_WINDOW_SAMPLES);
+  });
+
+  it("tracks degradation and recovery independently for each metric", () => {
+    const windows = new PerformanceWindows(() => 1_000);
+    for (let window = 0; window < 3; window += 1) {
+      for (let sample = 0; sample < MIN_OBSERVATIONS; sample += 1) {
+        windows.observeBuffered(20);
+      }
+      expect(windows.evaluateWindow().transition).toBe(window === 2 ? "enter" : null);
+    }
+
+    for (let sample = 0; sample < MIN_OBSERVATIONS; sample += 1) {
+      windows.observeEvent(1);
+    }
+    expect(windows.evaluateWindow().snapshot.status).toBe("degraded");
+
+    for (let window = 0; window < 3; window += 1) {
+      for (let sample = 0; sample < MIN_OBSERVATIONS; sample += 1) {
+        windows.observeBuffered(1);
+      }
+      expect(windows.evaluateWindow().transition).toBe(window === 2 ? "clear" : null);
+    }
   });
 });

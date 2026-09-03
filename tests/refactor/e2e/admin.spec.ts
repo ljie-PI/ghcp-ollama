@@ -46,7 +46,7 @@ async function recordAccessibilityEvidence(page: Page): Promise<void> {
     };
   });
   expect(evidence).toMatchObject({ unnamedControls: [], duplicateIds: [], mainLandmarks: 1, headingOneCount: 1 });
-  const directory = path.resolve("artifacts", "refactor-ci");
+  const directory = path.resolve("artifacts", "ci");
   await mkdir(directory, { recursive: true });
   await writeFile(path.join(directory, "rm-21-accessibility.json"), `${JSON.stringify({
     ...evidence,
@@ -202,8 +202,8 @@ test("events-and-degraded-recovery", async ({ page }) => {
 test("daemon-restart-invalidates-session", async ({ page }) => {
   const fixture = await openAdmin(page);
   fixture.state.authenticated = false;
-  await page.getByRole("button", { name: "Accounts" }).click();
   await expect(page.getByRole("heading", { name: "Control room locked" })).toBeFocused();
   await expect(page.getByText("admin session ended")).toBeVisible();
+  expect(fixture.requests.some((request) => request.url().endsWith("/auth/session"))).toBe(true);
   expect(await page.evaluate(() => localStorage.length + sessionStorage.length)).toBe(0);
 });

@@ -17,16 +17,28 @@ import {
   parseOllamaToolArguments,
 } from "./bridge.js";
 import { encodeNdjson } from "./wire.js";
+import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 
 export async function createOllamaStreamResponse(input: {
   readonly upstream: UpstreamByteStream;
   readonly model: string;
   readonly createdAt: string;
   readonly scope: Readonly<RequestScope>;
+  readonly performanceObserver?: ProtocolPerformanceObserver;
+  readonly onTerminal?: (result: Readonly<
+    | { readonly kind: "success"; readonly promptTokens: number; readonly completionTokens: number }
+    | { readonly kind: "failure"; readonly failure: GatewayFailureError }
+  >) => void;
 }): Promise<Response> {
   const reducer = new OllamaStreamReducer(input.model, input.createdAt);
   const frames = parseChatSse(withBodyTimeouts(input.upstream.bytes, input.scope), input.scope.config.limits.sseEventBytes);
-  let pending: Uint8Array | undefined = await firstOutput(reducer, frames, input.upstream, input.scope);
+  let pending: Uint8Array | undefined = await firstOutput(
+    reducer,
+    frames,
+    input.upstream,
+    input.scope,
+    input.performanceObserver,
+  );
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller): Promise<void> {
       if (input.scope.signal.aborted) {
@@ -38,6 +50,11 @@ export async function createOllamaStreamResponse(input: {
         controller.enqueue(pending);
         pending = undefined;
         if (reducer.terminal) {
+          observeTerminal(input.onTerminal, {
+            kind: "success",
+            promptTokens: reducer.usage.promptTokens,
+            completionTokens: reducer.usage.completionTokens,
+          });
           await closeUpstream(input.upstream, frames);
           controller.close();
         }
@@ -45,10 +62,15 @@ export async function createOllamaStreamResponse(input: {
       }
       try {
         for (;;) {
-          const output = await nextOutput(reducer, frames, input.scope);
+          const output = await nextOutput(reducer, frames, input.scope, input.performanceObserver);
           if (output !== undefined) {
             controller.enqueue(output);
             if (reducer.terminal) {
+              observeTerminal(input.onTerminal, {
+                kind: "success",
+                promptTokens: reducer.usage.promptTokens,
+                completionTokens: reducer.usage.completionTokens,
+              });
               await closeUpstream(input.upstream, frames);
               controller.close();
             }
@@ -59,18 +81,22 @@ export async function createOllamaStreamResponse(input: {
         await closeUpstream(input.upstream, frames);
         const failure = streamGatewayFailure(error).failure;
         if (failure.kind === "aborted") {
+          observeTerminal(input.onTerminal, { kind: "failure", failure: new GatewayFailureError(failure) });
           controller.close();
           return;
         }
+        observeTerminal(input.onTerminal, { kind: "failure", failure: new GatewayFailureError(failure) });
         controller.enqueue(streamErrorBytes(failure.kind));
         controller.close();
       }
     },
     async cancel(): Promise<void> {
+      observeTerminal(input.onTerminal, { kind: "failure", failure: new GatewayFailureError({ kind: "aborted" }) });
       await closeUpstream(input.upstream, frames);
     },
   });
   input.scope.signal.addEventListener("abort", () => {
+    observeTerminal(input.onTerminal, { kind: "failure", failure: new GatewayFailureError({ kind: "aborted" }) });
     void closeUpstream(input.upstream, frames);
   }, { once: true });
   return new Response(stream, { headers: { "Content-Type": "application/x-ndjson" } });
@@ -92,6 +118,10 @@ class OllamaStreamReducer {
 
   get terminal(): boolean {
     return this.phase !== "open";
+  }
+
+  get usage(): { readonly promptTokens: number; readonly completionTokens: number } {
+    return { promptTokens: this.promptTokens ?? 0, completionTokens: this.completionTokens ?? 0 };
   }
 
   apply(frame: ChatStreamFrame): readonly Uint8Array[] {
@@ -304,10 +334,11 @@ async function firstOutput(
   frames: AsyncGenerator<ChatStreamFrame>,
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
+  observer?: ProtocolPerformanceObserver,
 ): Promise<Uint8Array> {
   try {
     for (;;) {
-      const output = await nextOutput(reducer, frames, scope);
+      const output = await nextOutput(reducer, frames, scope, observer);
       if (output !== undefined) {
         return output;
       }
@@ -322,6 +353,7 @@ async function nextOutput(
   reducer: OllamaStreamReducer,
   frames: AsyncGenerator<ChatStreamFrame>,
   scope: Readonly<RequestScope>,
+  observer?: ProtocolPerformanceObserver,
 ): Promise<Uint8Array | undefined> {
   if (scope.signal.aborted) {
     throw new GatewayFailureError({ kind: "aborted" });
@@ -331,7 +363,9 @@ async function nextOutput(
     if (next.done === true) {
       throw new GatewayFailureError({ kind: "upstream_stream_truncated" });
     }
-    return reducer.apply(next.value)[0];
+    return observer === undefined
+      ? reducer.apply(next.value)[0]
+      : observer.measure("event", () => reducer.apply(next.value)[0]);
   } catch (error: unknown) {
     throw streamGatewayFailure(error);
   }
@@ -506,4 +540,15 @@ function toolCallObject(index: number, tool: ToolAccumulator): Record<string, un
       arguments: parseOllamaToolArguments(tool.argumentFragments.join("")),
     },
   };
+}
+
+function observeTerminal(
+  observer: Parameters<typeof createOllamaStreamResponse>[0]["onTerminal"],
+  result: Parameters<NonNullable<Parameters<typeof createOllamaStreamResponse>[0]["onTerminal"]>>[0],
+): void {
+  try {
+    observer?.(result);
+  } catch (_error: unknown) {
+    // Observability cannot alter the stream lifecycle or bytes.
+  }
 }

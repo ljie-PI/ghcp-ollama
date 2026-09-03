@@ -168,7 +168,7 @@ describe("RM-02 WireJson", () => {
       samples.push(performance.now() - started);
     }
 
-    const artifactDir = path.resolve("dist-refactor", "bench");
+    const artifactDir = path.resolve("artifacts", "bench");
     await mkdir(artifactDir, { recursive: true });
     const artifactPath = path.join(artifactDir, "wire_json.json");
     const payload = {

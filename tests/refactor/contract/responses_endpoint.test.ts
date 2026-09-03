@@ -17,12 +17,14 @@ import { migration as responsesHistoryMigration } from "../../../src/persistence
 import type { ChatRequest, NativeResponsesUpstreamRequest } from "../../../src/protocols/chat_completions/types.js";
 import { SqliteResponsesHistory } from "../../../src/protocols/responses/history.js";
 import { createResponsesRoute } from "../../../src/protocols/responses/endpoint.js";
+import type { UsageUpdate } from "../../../src/telemetry/recorder.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 
 describe("RM-17 Responses endpoint", () => {
   it("registers only /v1/responses and rejects explicit unknown models before upstream", async () => {
-    const { gw, backend, close } = await responsesGateway();
+    const usageUpdates: UsageUpdate[] = [];
+    const { gw, backend, close } = await responsesGateway({ usageUpdates });
     try {
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/responses", { method: "POST" }))).status).toBe(404);
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/openai/v1/responses", { method: "POST" }))).status).toBe(404);
@@ -32,12 +34,21 @@ describe("RM-17 Responses endpoint", () => {
       expect(unknown.status).toBe(404);
       expect(await unknown.text()).toBe("{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}");
       expect(backend.captured).toEqual([]);
+      expect(usageUpdates).toMatchObject([{
+        protocol: "openai_responses_bridge",
+        outcome: "client_error",
+        accountId: "github.com/1",
+        resolvedModel: "missing",
+        requestCount: 1,
+        errorCount: 1,
+      }]);
     } finally {
       await close();
     }
   });
 
   it("executes native non-stream without Chat bridge or local history", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     let captured: NativeResponsesUpstreamRequest | undefined;
     const backend = new ScriptedCopilotBackend({
       responses(request) {
@@ -49,7 +60,7 @@ describe("RM-17 Responses endpoint", () => {
         };
       },
     });
-    const { gw, history, close } = await responsesGateway({ backend });
+    const { gw, history, close } = await responsesGateway({ backend, usageUpdates });
     try {
       const response = await gw.fetch(responsesRequest({
         model: "native",
@@ -64,12 +75,20 @@ describe("RM-17 Responses endpoint", () => {
       expect(backend.captured.map((entry) => entry.kind)).toEqual(["responses"]);
       expect(new TextDecoder().decode(captured?.body)).toBe("{\"model\":\"native\",\"previous_response_id\":\"upstream-owned\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}],\"reasoning\":{\"encrypted_content\":\"secret-state\"},\"stream\":false}");
       expect(history.inspect().count).toBe(0);
+      expect(usageUpdates).toMatchObject([{
+        protocol: "openai_responses_native",
+        outcome: "success",
+        inputTokens: 1,
+        outputTokens: 0,
+        cacheTokens: 0,
+      }]);
     } finally {
       await close();
     }
   });
 
   it("executes bridge non-stream and commits history before success bytes", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     let captured: ChatRequest | undefined;
     const backend = new ScriptedCopilotBackend({
       chat(request) {
@@ -88,11 +107,12 @@ describe("RM-17 Responses endpoint", () => {
                 tool_calls: [{ id: "call_1", function: { name: "lookup", arguments: "{\"q\":\"x\"}" } }],
               },
             }],
+            usage: { prompt_tokens: 9, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 3 } },
           })),
         };
       },
     });
-    const { gw, history, close } = await responsesGateway({ backend });
+    const { gw, history, close } = await responsesGateway({ backend, usageUpdates });
     try {
       const response = await gw.fetch(responsesRequest({
         model: "chat",
@@ -106,32 +126,44 @@ describe("RM-17 Responses endpoint", () => {
       expect(history.inspect().count).toBe(1);
       expect(backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
       expect(new TextDecoder().decode(captured?.body)).toContain("\"model\":\"chat\"");
+      expect(usageUpdates).toMatchObject([{
+        protocol: "openai_responses_bridge",
+        outcome: "success",
+        inputTokens: 9,
+        outputTokens: 4,
+        cacheTokens: 3,
+      }]);
     } finally {
       await close();
     }
   });
 
   it("uses Responses SSE bytes for native and bridge streams without DONE markers", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new ScriptedCopilotBackend({
       responsesStream: [
-        text("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"output\":[]}}\n\n"),
+        text("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n"),
       ],
       chatStream: [
-        text("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+        text("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":2}}}\n\n"),
         text("data: [DONE]\n\n"),
       ],
     });
-    const { gw, close } = await responsesGateway({ backend });
+    const { gw, close } = await responsesGateway({ backend, usageUpdates });
     try {
       const native = await gw.fetch(responsesRequest({ model: "native", input: "hi", stream: true }));
       expect(native.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
-      expect(await native.text()).toBe("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"output\":[]}}\n\n");
+      expect(await native.text()).toBe("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n");
 
       const bridge = await gw.fetch(responsesRequest({ model: "chat", input: "hi", stream: true }));
       const bridgeText = await bridge.text();
       expect(bridgeText).toContain("event: response.created\n");
       expect(bridgeText).toContain("event: response.completed\n");
       expect(bridgeText).not.toContain("[DONE]");
+      expect(usageUpdates).toMatchObject([
+        { protocol: "openai_responses_native", outcome: "success", inputTokens: 5, outputTokens: 2, cacheTokens: 1 },
+        { protocol: "openai_responses_bridge", outcome: "success", inputTokens: 7, outputTokens: 3, cacheTokens: 2 },
+      ]);
     } finally {
       await close();
     }
@@ -154,6 +186,7 @@ describe("RM-17 Responses endpoint", () => {
 
   async function responsesGateway(options: {
     readonly backend?: ScriptedCopilotBackend;
+    readonly usageUpdates?: UsageUpdate[];
   } = {}): Promise<{
     readonly gw: Gateway;
     readonly backend: ScriptedCopilotBackend;
@@ -202,6 +235,9 @@ describe("RM-17 Responses endpoint", () => {
       history,
       nowUnixSeconds: () => 1_700_000_000,
       createUuid: () => "00000000-0000-4000-8000-000000000001",
+      ...(options.usageUpdates === undefined
+        ? {}
+        : { usageRecorder: { recordUsage: (update: UsageUpdate) => options.usageUpdates?.push(update) } }),
     })], { createRequestId: () => "req_responses" });
     return {
       gw,

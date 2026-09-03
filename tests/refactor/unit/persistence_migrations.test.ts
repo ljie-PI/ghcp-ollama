@@ -1,12 +1,11 @@
 import Database from "better-sqlite3";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   generateMigrationManifest,
   MigrationGenerateError,
-  readMigrationManifest,
   writeMigrationManifest,
 } from "../../../scripts/refactor/generate_migrations.js";
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
@@ -140,7 +139,7 @@ describe("RM-04 migrations", () => {
 });
 
 describe("RM-04 generate_migrations", () => {
-  it("embeds the reserved 001 module and writes a static manifest", async () => {
+  it("embeds all reserved modules and writes a static TypeScript manifest", async () => {
     const migrations = await generateMigrationManifest();
     expect(migrations).toEqual([
       embedMigration(runtimeConfigMigration),
@@ -149,13 +148,14 @@ describe("RM-04 generate_migrations", () => {
       embedMigration(responsesHistoryMigration),
     ]);
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-manifest-"));
-    const manifestPath = path.join(dir, "migrations-manifest.json");
+    const manifestPath = path.join(dir, "generated_migrations.ts");
     await writeMigrationManifest(migrations, manifestPath);
-    const written = JSON.parse(await (await import("node:fs/promises")).readFile(manifestPath, "utf8")) as {
-      migrations: unknown;
-    };
-    expect(written.migrations).toEqual(migrations);
-    expect(readMigrationManifest(manifestPath)).toEqual(migrations);
+    const written = await readFile(manifestPath, "utf8");
+    expect(written).toContain("export const MIGRATION_MANIFEST =");
+    for (const migration of migrations) {
+      expect(written).toContain(migration.checksum);
+      expect(written).toContain(`"version": ${migration.version}`);
+    }
   });
 
   it("rejects filename/export mismatch, duplicates, and reserved-owner violations", async () => {
