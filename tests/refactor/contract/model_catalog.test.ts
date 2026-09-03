@@ -66,6 +66,9 @@ describe("RM-08 CAPI parse and cache", () => {
       max_output_tokens: 64_000,
       supported_endpoints: ["/v1/chat/completions"],
     });
+    expect(productionModelInfoLookup.get("mai-code-1-flash-internal")).toEqual(
+      productionModelInfoLookup.get("mai-code-1-flash"),
+    );
     expect(productionModelInfoLookup.get("unknown-model")).toBeNull();
   });
 

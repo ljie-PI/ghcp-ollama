@@ -272,10 +272,11 @@ export async function createGateway(
     if (timer !== undefined) {
       clearTimeout(timer);
     }
-    if ("error" in result) {
-      throw result.error;
-    }
     if (!result.timedOut) {
+      if ("error" in result) {
+        forceCleanup(current, dependencies);
+        throw result.error;
+      }
       return;
     }
     try {
@@ -283,19 +284,26 @@ export async function createGateway(
     } catch {
       // Timeout reporting cannot prevent forced cleanup.
     }
-    try {
-      current?.closeAllConnections?.();
-    } catch {
-      // Continue forcing the remaining resources closed.
-    }
-    try {
-      void Promise.resolve(dependencies.onForceClose?.()).catch(() => undefined);
-    } catch {
-      // Shutdown must remain bounded even when forced cleanup fails.
-    }
+    forceCleanup(current, dependencies);
   }
 
   return gateway;
+}
+
+function forceCleanup(
+  listener: GatewayListener | undefined,
+  dependencies: Readonly<GatewayDependencies>,
+): void {
+  try {
+    listener?.closeAllConnections?.();
+  } catch {
+    // Continue forcing the remaining resources closed.
+  }
+  try {
+    void Promise.resolve(dependencies.onForceClose?.()).catch(() => undefined);
+  } catch {
+    // Shutdown must remain bounded even when forced cleanup fails.
+  }
 }
 
 function defaultRequestId(): string {

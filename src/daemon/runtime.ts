@@ -14,7 +14,7 @@ import {
   type DaemonIdentityLease,
 } from "./identity_file.js";
 import { JsonlLogger, StderrLogger, type DaemonLogger } from "./logger.js";
-import { captureProcessStartIdentity } from "./process_identity.js";
+import { captureProcessStartIdentity, terminateProcessIfMatching } from "./process_identity.js";
 
 export interface DaemonRuntimeComposition {
   readonly startup: StartupConfig;
@@ -90,11 +90,7 @@ export function createProductionDaemonController(
       context,
     ),
     terminate: async (identity) => {
-      const current = await captureProcessStartIdentity(identity.pid);
-      if (current !== identity.processStartIdentity) {
-        return;
-      }
-      process.kill(identity.pid, "SIGKILL");
+      await terminateProcessIfMatching(identity.pid, identity.processStartIdentity);
     },
   });
 }

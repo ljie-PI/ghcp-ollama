@@ -123,6 +123,9 @@ export class DaemonController {
       };
     } catch (error: unknown) {
       rethrowCancellation(error, context.signal);
+      if (error instanceof CliError && (error.code === "security_error" || error.code === "daemon_conflict")) {
+        return { result: identityResult("conflict", identity, resolvedDataDir), identity };
+      }
       return { result: identityResult("unreachable", identity, resolvedDataDir), identity };
     }
   }

@@ -203,6 +203,16 @@ describe("RM-20 additive Gateway mount", () => {
     expect(order).toEqual(["control", "admin", "onClose"]);
   });
 
+  it("forces remaining resources closed when graceful cleanup rejects", async () => {
+    const calls: string[] = [];
+    const gateway = await createGateway({ startup: startup(), runtime: defaultRuntimeConfigSnapshot() }, [], {
+      onClose: () => { throw new Error("close failed"); },
+      onForceClose: () => { calls.push("forced"); },
+    });
+    await expect(gateway.close()).rejects.toThrow("close failed");
+    expect(calls).toEqual(["forced"]);
+  });
+
   it("forces listener and resource closure after the bounded 10 second grace period", async () => {
     vi.useFakeTimers();
     const server = {

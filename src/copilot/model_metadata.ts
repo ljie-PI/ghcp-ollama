@@ -73,6 +73,7 @@ const PRODUCTION_MODEL_INFO: Readonly<Record<string, RawModelInfo>> = {
   "gpt-5.2": info("chat", 128_000, 64_000, ["/v1/chat/completions", "/v1/responses"]),
   "gpt-5.3-codex": info("responses", 128_000, 128_000, ["/v1/responses"]),
   "mai-code-1-flash": info("chat", 128_000, 64_000, ["/v1/chat/completions"]),
+  "mai-code-1-flash-internal": info("chat", 128_000, 64_000, ["/v1/chat/completions"]),
   "text-embedding-3-small": info("embedding", 8_191),
   "text-embedding-3-small-inference": info("embedding", 8_191),
   "text-embedding-ada-002": info("embedding", 8_191),

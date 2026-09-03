@@ -53,6 +53,46 @@ export async function isSameProcess(
   return actual !== null && actual === expected;
 }
 
+export async function terminateProcessIfMatching(
+  pid: number,
+  expected: ProcessStartIdentity,
+  dependencies: ProcessIdentityDependencies = DEFAULT_DEPENDENCIES,
+): Promise<boolean> {
+  assertPid(pid);
+  if (dependencies.platform === "win32") {
+    const filetime = /^windows:(\d{1,20})$/u.exec(expected)?.[1];
+    if (filetime === undefined) {
+      return false;
+    }
+    const script = [
+      `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
+      "if ($null -eq $process) { exit 3 }",
+      `$expected = [Int64]::Parse('${filetime}', [Globalization.CultureInfo]::InvariantCulture)`,
+      "if ($process.StartTime.ToUniversalTime().ToFileTimeUtc() -ne $expected) { exit 4 }",
+      "$process.Kill()",
+    ].join("; ");
+    try {
+      await dependencies.runCommand(
+        "powershell.exe",
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        {},
+      );
+      return true;
+    } catch (error: unknown) {
+      if (commandExitCode(error) === 3 || commandExitCode(error) === 4) {
+        return false;
+      }
+      throw new ProcessIdentityError("unable to terminate verified Windows process", { cause: error });
+    }
+  }
+  const current = await captureProcessStartIdentity(pid, dependencies);
+  if (current !== expected) {
+    return false;
+  }
+  process.kill(pid, "SIGKILL");
+  return true;
+}
+
 export function parseLinuxProcStatStartTicks(stat: string, expectedPid: number): string {
   assertPid(expectedPid);
   const closingParenthesis = stat.lastIndexOf(")");
