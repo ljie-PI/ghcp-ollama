@@ -44,3 +44,21 @@ export async function consumeAtLeastOne<T>(stream: AsyncIterable<T>): Promise<nu
   }
   return count;
 }
+
+export async function expectCancelledStream<T>(
+  stream: AsyncIterable<T>,
+  abort: () => void,
+): Promise<void> {
+  const iterator = stream[Symbol.asyncIterator]();
+  const pending = iterator.next();
+  abort();
+  const settled = Promise.resolve(pending).then(
+    () => true,
+    () => true,
+  );
+  const timeout = new Promise<false>((resolve) => setTimeout(() => resolve(false), 5_000));
+  if (!await Promise.race([settled, timeout])) {
+    throw new Error("cancelled live stream did not terminate within five seconds");
+  }
+  await iterator.return?.();
+}

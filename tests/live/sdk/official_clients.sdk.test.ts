@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   assertLiveSdkTestsEnabled,
   consumeAtLeastOne,
+  expectCancelledStream,
   liveBaseUrl,
   loopbackOnlyFetch,
   recordLiveStatus,
@@ -70,7 +71,7 @@ describe("RM-22 guarded live official SDK smoke", () => {
       messages: [{ role: "user", content: "Count from one to five." }],
       stream: true,
     });
-    cancelled.controller.abort();
+    await expectCancelledStream(cancelled, () => cancelled.controller.abort());
     expect(cancelled.controller.signal.aborted).toBe(true);
     recordLiveStatus("openai_chat", "passing", [chatModel]);
   });
@@ -95,7 +96,7 @@ describe("RM-22 guarded live official SDK smoke", () => {
       max_output_tokens: 16,
       stream: true,
     });
-    cancelled.controller.abort();
+    await expectCancelledStream(cancelled, () => cancelled.controller.abort());
     expect(cancelled.controller.signal.aborted).toBe(true);
     recordLiveStatus("openai_responses", "passing", [responsesModel]);
     recordLiveStatus("native_responses", nativeResponsesModel === undefined ? "not_available" : "passing", nativeResponsesModel === undefined ? [] : [nativeResponsesModel]);
@@ -120,7 +121,7 @@ describe("RM-22 guarded live official SDK smoke", () => {
       max_tokens: 8,
       messages: [{ role: "user", content: "Count from one to five." }],
     });
-    cancelled.abort();
+    await expectCancelledStream(cancelled, () => cancelled.abort());
     expect(cancelled.aborted).toBe(true);
     recordLiveStatus("anthropic_messages", "passing", [chatModel]);
   });
@@ -146,7 +147,7 @@ describe("RM-22 guarded live official SDK smoke", () => {
       options: { num_predict: 8 },
       stream: true,
     });
-    cancelled.abort();
+    await expectCancelledStream(cancelled, () => cancelled.abort());
     recordLiveStatus("ollama_chat", "passing", [chatModel]);
   });
 });

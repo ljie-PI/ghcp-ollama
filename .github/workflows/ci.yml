@@ -47,6 +47,17 @@ jobs:
       - name: Verify offline install
         run: npm ci --offline
       - run: npx playwright install chromium
+      - name: Block outbound network
+        shell: bash
+        run: |
+          {
+            echo "GHC_GATEWAY_CI_NETWORK_GUARD=1"
+            echo "NODE_OPTIONS=--import ./scripts/refactor/bootstrap.mjs"
+            echo "HTTP_PROXY=http://127.0.0.1:9"
+            echo "HTTPS_PROXY=http://127.0.0.1:9"
+            echo "ALL_PROXY=http://127.0.0.1:9"
+            echo "NO_PROXY=localhost,127.0.0.1,::1"
+          } >> "$GITHUB_ENV"
       - name: Typecheck
         run: npm run typecheck
       - name: Lint

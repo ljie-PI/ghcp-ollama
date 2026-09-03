@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -84,7 +84,7 @@ export async function inspectAdminBundle(
   ].map(async (relativePath): Promise<AdminAssetEvidence> => {
     const absolutePath = path.join(root, ...relativePath.split("/"));
     const body = await readFile(absolutePath);
-    return {
+    const result: PackSmokeResult = {
       path: packagePath(relativePath),
       bytes: (await stat(absolutePath)).size,
       sha256: createHash("sha256").update(body).digest("hex"),
@@ -184,6 +184,10 @@ export async function runPackSmoke(): Promise<PackSmokeResult> {
       foregroundHealth: true,
       daemonLifecycle: true,
     };
+    const artifactDirectory = path.resolve("artifacts", "ci");
+    await mkdir(artifactDirectory, { recursive: true });
+    await writeFile(path.join(artifactDirectory, "package-smoke.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
+    return result;
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
@@ -233,6 +237,13 @@ async function verifyInstalledPackage(
     if (!status.stdout.includes("running")) {
       throw new Error("installed daemon status did not report running");
     }
+    const first = lifecycleResult(status.stdout);
+    const restarted = await runNode(cliEntry, [...common, "restart"], temporaryRoot);
+    const second = lifecycleResult(restarted.stdout);
+    if (second.state !== "running" || second.pid === first.pid || second.port !== daemonPort) {
+      throw new Error("installed daemon restart did not replace the process on the configured port");
+    }
+    await waitForHealth(daemonPort);
   } finally {
     await runNode(cliEntry, [...common, "stop"], temporaryRoot);
   }
@@ -240,6 +251,20 @@ async function verifyInstalledPackage(
   if (!stopped.stdout.includes("stopped")) {
     throw new Error("installed daemon status did not report stopped");
   }
+}
+
+function lifecycleResult(output: string): { readonly state: string; readonly pid: number | null; readonly port: number | null } {
+  const value = JSON.parse(output) as unknown;
+  if (value === null || typeof value !== "object") {
+    throw new Error("installed lifecycle command returned invalid JSON");
+  }
+  const result = value as Record<string, unknown>;
+  if (typeof result.state !== "string"
+    || (result.pid !== null && typeof result.pid !== "number")
+    || (result.port !== null && typeof result.port !== "number")) {
+    throw new Error("installed lifecycle command returned an invalid result");
+  }
+  return { state: result.state, pid: result.pid, port: result.port };
 }
 
 async function readPackEntry(output: string, packDirectory: string): Promise<NpmPackEntry> {
@@ -335,6 +360,7 @@ function runCommand(
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env };
+  delete env.NODE_OPTIONS;
   for (const key of Object.keys(env)) {
     if (/^(?:GHC_GATEWAY_(?!CI_NETWORK_GUARD))/u.test(key)
       || /(?:token|secret|password|authorization|auth_token)/iu.test(key)) {

@@ -36,7 +36,7 @@
   "scripts": {
     "start": "node dist/src/cli/main.js serve",
     "build": "node scripts/refactor/bootstrap.mjs scripts/refactor/clean_admin_build.ts all && node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && tsc -p tsconfig.json && vite build --config web/vite.config.ts",
-    "typecheck": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && tsc -p tsconfig.test.json --noEmit && svelte-check --tsconfig web/tsconfig.json",
+    "typecheck": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.sdk.json --noEmit && svelte-check --tsconfig web/tsconfig.json",
     "lint": "node scripts/refactor/bootstrap.mjs --check && eslint --no-error-on-unmatched-pattern --config eslint.config.js \"src/**/*.ts\" \"scripts/refactor/**/*.{ts,mjs}\" \"tests/refactor/unit/**/*.ts\" \"tests/refactor/contract/**/*.ts\" \"tests/refactor/integration/**/*.ts\" \"tests/refactor/performance/**/*.ts\" \"web/**/*.{ts,svelte}\" \"vitest.config.ts\" \"vitest.sdk.config.ts\" \"playwright.config.ts\"",
     "test": "node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts && vitest run --config vitest.config.ts",
     "test:sdk": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_SDK_TESTS && vitest run --config vitest.sdk.config.ts",
@@ -45,7 +45,7 @@
     "fixtures:verify": "node scripts/refactor/bootstrap.mjs scripts/refactor/fixtures.ts verify",
     "fixtures:generate": "node scripts/refactor/bootstrap.mjs scripts/refactor/fixtures.ts generate",
     "bench": "node scripts/refactor/bootstrap.mjs scripts/refactor/bench.ts",
-    "pack": "node scripts/refactor/bootstrap.mjs scripts/refactor/pack.ts",
+    "pack": "npm run build && node scripts/refactor/bootstrap.mjs scripts/refactor/pack.ts",
     "smoke:sqlite": "node scripts/refactor/bootstrap.mjs scripts/refactor/sqlite_smoke.ts",
     "typecheck:sdk": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_SDK_TESTS && tsc -p tsconfig.sdk.json --noEmit",
     "prepack": "npm run build",

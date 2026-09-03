@@ -1,2 +1,1 @@
-* text=auto eol=lf
-tests/refactor/fixtures/openai-chat/stream/*.txt whitespace=-blank-at-eof
+tests/refactor/fixtures/**/*.expected.txt whitespace=-blank-at-eof

@@ -11,10 +11,10 @@ Canonical command: `npm run pack`.
 The package gate builds from a clean `dist/`, creates an actual tarball, verifies an exact allowlisted manifest, computes SHA-256, performs an offline clean install, runs installed `ghcg --help`, probes foreground `/healthz`, and exercises detached start/status/stop. The latest local tarball SHA-256 was:
 
 ```text
-6eb2441b243663bcee6a9662eb7f037c7b1bb95bb4d6fb0255b965609ed96e4b
+ca5ab37b90bebcc6ee1cc2146213f24fe7dd7f4266799d73d31d0b7d160dd1a9
 ```
 
-The generated package manifest and current build hashes are emitted by the command and are not copied into this document.
+The exact manifest, sizes, asset hashes, installed CLI result, foreground health result, and daemon lifecycle result are written to `artifacts/ci/package-smoke.json`. CI uploads that file for each platform.
 
 ## Route and composition evidence
 
@@ -49,7 +49,7 @@ The final CI matrix is:
 - macOS x64
 - macOS arm64
 
-Each platform runs default typecheck, lint, build, tests, fixtures, seven Admin E2E flows, SQLite smoke, three-run benchmark, and installed-package smoke. Attach the successful CI run to the release record.
+Each platform runs default typecheck, lint, build, tests, fixtures, seven Admin E2E flows, SQLite smoke, three-run benchmark, and installed-package smoke. The RM-22 PR check URL is the authoritative five-platform record and must be attached after the branch is pushed; this local handoff does not claim remote evidence before it exists.
 
 ## Maintainer checklist
 
