@@ -109,6 +109,43 @@ describe("RM-19 daemon runtime listener", () => {
     await expect(listening).rejects.toBe(error);
     await gateway.close();
   });
+
+  it("releases the daemon lease after a gateway close exceeds 10 seconds", async () => {
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const shutdown = new AbortController();
+    const running = runDaemonRuntime({
+      startup: parseStartupConfig(["--data-dir", "runtime-timeout"], {}),
+      env: {},
+      managed: true,
+      shutdownSignal: shutdown.signal,
+      stderr: { write: () => undefined },
+      composeGateway: async () => ({
+        fetch: async () => new Response(null),
+        listen: async () => ({ host: "127.0.0.1", port: 31_400 }),
+        close: async () => await new Promise<void>(() => undefined),
+      }),
+      onListening: () => shutdown.abort(),
+      dependencies: {
+        pid: 123,
+        captureProcessIdentity: async () => "windows:1",
+        createSecret: () => "secret",
+        acquireIdentity: (_dataDir, identity) => ({
+          identity,
+          cleanup: () => { events.push("cleanup"); return true; },
+          release: () => events.push("release"),
+        }),
+        createLogger: () => ({ write: (record) => events.push(String(record.category)) }),
+      },
+    });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(events).not.toContain("cleanup");
+    await vi.advanceTimersByTimeAsync(1);
+    await running;
+    expect(events).toContain("shutdown_timeout");
+    expect(events.slice(-2)).toEqual(["cleanup", "release"]);
+    vi.useRealTimers();
+  });
 });
 
 function fakeServer() {

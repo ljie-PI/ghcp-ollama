@@ -6,6 +6,7 @@ import type { DeviceOAuthClient } from "../accounts/device_flow.js";
 import { authenticatedControlRequest } from "../cli/control_client.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import type { HostedGateway } from "../gateway/create_gateway.js";
+import { GRACEFUL_SHUTDOWN_MS } from "../gateway/create_gateway.js";
 import { DaemonController } from "./controller.js";
 import {
   DaemonIdentityFile,
@@ -99,9 +100,22 @@ export function createProductionDaemonController(
   });
 }
 
+const DEVICE_OAUTH_RESPONSE_BYTES = 1_048_576;
+
+export class DeviceOAuthError extends Error {
+  readonly code = "remote_error";
+
+  constructor() {
+    super("remote error");
+    this.name = "DeviceOAuthError";
+  }
+}
+
 export class HttpDeviceOAuthClient implements DeviceOAuthClient {
+  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+
   async requestDeviceCode(environment: Parameters<DeviceOAuthClient["requestDeviceCode"]>[0], signal?: AbortSignal) {
-    const response = await fetch(environment.deviceCodeUrl, {
+    const response = await this.fetch(environment.deviceCodeUrl, {
       method: "POST",
       headers: {
         accept: "application/json",
@@ -109,15 +123,18 @@ export class HttpDeviceOAuthClient implements DeviceOAuthClient {
       },
       body: new URLSearchParams({ client_id: environment.clientId }),
       ...(signal === undefined ? {} : { signal }),
-    });
-    const value = await readJson(response);
-    if (!response.ok || !isRecord(value)
-      || typeof value.device_code !== "string"
-      || typeof value.user_code !== "string"
-      || typeof value.verification_uri !== "string"
+    }, signal);
+    if (!response.ok) {
+      await cancelResponse(response);
+      throw new DeviceOAuthError();
+    }
+    const value = await readJsonObject(response, signal);
+    if (!nonemptyString(value.device_code)
+      || !nonemptyString(value.user_code)
+      || !nonemptyString(value.verification_uri)
       || !positiveNumber(value.interval)
       || !positiveNumber(value.expires_in)) {
-      throw new Error("device authorization failed");
+      throw new DeviceOAuthError();
     }
     return {
       deviceCode: value.device_code,
@@ -133,7 +150,7 @@ export class HttpDeviceOAuthClient implements DeviceOAuthClient {
     deviceCode: string,
     signal?: AbortSignal,
   ) {
-    const response = await fetch(environment.accessTokenUrl, {
+    const response = await this.fetch(environment.accessTokenUrl, {
       method: "POST",
       headers: {
         accept: "application/json",
@@ -145,28 +162,35 @@ export class HttpDeviceOAuthClient implements DeviceOAuthClient {
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
       }),
       ...(signal === undefined ? {} : { signal }),
-    });
-    const value = await readJson(response);
-    if (!response.ok || !isRecord(value)) {
-      return { status: "failed" } as const;
+    }, signal);
+    if (!response.ok) {
+      await cancelResponse(response);
+      throw new DeviceOAuthError();
     }
+    const value = await readJsonObject(response, signal);
     if (value.error === "authorization_pending" || value.error === "slow_down") {
       return { status: "pending" } as const;
     }
-    if (typeof value.access_token !== "string" || value.access_token.length === 0) {
+    if (typeof value.error === "string") {
       return { status: "failed" } as const;
+    }
+    if (!nonemptyString(value.access_token)) {
+      throw new DeviceOAuthError();
     }
     const userUrl = new URL(environment.apiBaseUrl);
     userUrl.pathname = `${userUrl.pathname.replace(/\/$/u, "")}/user`;
-    const userResponse = await fetch(userUrl, {
+    const userResponse = await this.fetch(userUrl, {
       headers: { accept: "application/vnd.github+json", authorization: `Bearer ${value.access_token}` },
       ...(signal === undefined ? {} : { signal }),
-    });
-    const user = await readJson(userResponse);
-    if (!userResponse.ok || !isRecord(user)
-      || (typeof user.id !== "string" && typeof user.id !== "number")
-      || typeof user.login !== "string") {
-      return { status: "failed" } as const;
+    }, signal);
+    if (!userResponse.ok) {
+      await cancelResponse(userResponse);
+      throw new DeviceOAuthError();
+    }
+    const user = await readJsonObject(userResponse, signal);
+    if ((typeof user.id !== "string" && typeof user.id !== "number")
+      || !nonemptyString(user.login)) {
+      throw new DeviceOAuthError();
     }
     return {
       status: "complete" as const,
@@ -178,14 +202,84 @@ export class HttpDeviceOAuthClient implements DeviceOAuthClient {
       },
     };
   }
+
+  private async fetch(input: string | URL, init: RequestInit, signal: AbortSignal | undefined): Promise<Response> {
+    try {
+      signal?.throwIfAborted();
+      return await this.fetchImpl(input, init);
+    } catch (error: unknown) {
+      if (signal?.aborted === true) {
+        signal.throwIfAborted();
+      }
+      if (error instanceof DeviceOAuthError) {
+        throw error;
+      }
+      throw new DeviceOAuthError();
+    }
+  }
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json() as unknown;
-  } catch {
-    return null;
+async function readJsonObject(
+  response: Response,
+  signal: AbortSignal | undefined,
+): Promise<Record<string, unknown>> {
+  const reader = response.body?.getReader();
+  if (reader === undefined) {
+    throw new DeviceOAuthError();
   }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let completed = false;
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      const next = await reader.read();
+      if (next.done) {
+        completed = true;
+        break;
+      }
+      total += next.value.byteLength;
+      if (total > DEVICE_OAUTH_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new DeviceOAuthError();
+      }
+      chunks.push(next.value);
+    }
+  } catch (error: unknown) {
+    if (signal?.aborted === true) {
+      signal.throwIfAborted();
+    }
+    if (error instanceof DeviceOAuthError) {
+      throw error;
+    }
+    throw new DeviceOAuthError();
+  } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    throw new DeviceOAuthError();
+  }
+  if (!isRecord(value)) {
+    throw new DeviceOAuthError();
+  }
+  return value;
+}
+
+async function cancelResponse(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -194,6 +288,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function positiveNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function nonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 export interface RunDaemonRuntimeOptions {
@@ -231,12 +329,12 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
   const lease = await acquire(options.startup.dataDir, identity);
   const stopping = new AbortController();
   const scheduleStop = dependencies.scheduleStop ?? ((stop: () => void) => setImmediate(stop));
+  const logger = dependencies.createLogger?.(options.managed, options.startup)
+    ?? (options.managed
+      ? new JsonlLogger(path.join(options.startup.dataDir, "logs"))
+      : new StderrLogger(options.stderr));
   let gateway: HostedGateway | undefined;
   try {
-    const logger = dependencies.createLogger?.(options.managed, options.startup)
-      ?? (options.managed
-        ? new JsonlLogger(path.join(options.startup.dataDir, "logs"))
-        : new StderrLogger(options.stderr));
     gateway = await options.composeGateway({
       startup: options.startup,
       env: options.env,
@@ -248,16 +346,41 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
     logger.write({ category: "gateway_started", managed: options.managed, pid });
     await options.onListening?.(identity);
     await waitForAbort(AbortSignal.any([options.shutdownSignal, stopping.signal]));
-    await gateway.close();
+    const closingGateway = gateway;
     gateway = undefined;
+    await closeGatewayBounded(closingGateway, logger);
     logger.write({ category: "gateway_stopped", managed: options.managed, pid });
   } finally {
     try {
-      await gateway?.close();
+      if (gateway !== undefined) {
+        await closeGatewayBounded(gateway, logger);
+      }
     } finally {
       lease.cleanup();
       lease.release();
     }
+  }
+}
+
+async function closeGatewayBounded(gateway: HostedGateway, logger: DaemonLogger): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    gateway.close().then(
+      () => ({ timedOut: false as const }),
+      (error: unknown) => ({ timedOut: false as const, error }),
+    ),
+    new Promise<{ readonly timedOut: true }>((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), GRACEFUL_SHUTDOWN_MS);
+    }),
+  ]);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+  }
+  if ("error" in result) {
+    throw result.error;
+  }
+  if (result.timedOut) {
+    logger.write({ category: "shutdown_timeout" });
   }
 }
 

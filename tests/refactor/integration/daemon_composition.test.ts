@@ -80,6 +80,10 @@ describe("RM-19 production composition", () => {
         uptimeMs: 1234,
         daemon: { managed: true, pid: 4242, startedAt: IDENTITY.createdAt },
       });
+      const models = await adminJson(gateway, "/admin/api/v1/models", cookie);
+      expect(models.data).toMatchObject({
+        items: [{ id: "gpt-test", maxInputTokens: 200_000, maxOutputTokens: 16_384 }],
+      });
 
       const config = defaultRuntimeConfigSnapshot();
       config.limits.requestBodyBytes = 1_048_576;
@@ -214,6 +218,11 @@ function compositionHarness(): CompositionHarness {
     history,
     telemetry,
     runtime,
+    modelMetadata: new Map([["gpt-test", {
+      mode: "chat",
+      maxInputTokens: 200_000,
+      maxOutputTokens: 16_384,
+    }]]),
     tokenCounter: litellmStyleTokenCounter,
     async close() {
       await telemetry.flush();

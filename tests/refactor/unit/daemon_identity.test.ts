@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -128,7 +128,53 @@ describe("RM-19 daemon identity file", () => {
     const file = new DaemonIdentityFile(directory);
     expect(() => file.read()).toThrowError(expect.objectContaining({ code: "unsafe_permissions" }));
   });
+
+  it.each(["CONTOSO\\current", "S-1-5-21-1000"])(
+    "accepts a Windows owner matching the current identity as %s",
+    async (owner) => {
+      const directory = await temporaryDirectory();
+      await mkdir(directory);
+      const file = new DaemonIdentityFile(directory, {
+        platform: "win32",
+        runCommand: (command, args) => windowsSecurityCommand(command, args, directory, owner),
+      });
+      expect(file.read()).toBeNull();
+    },
+  );
+
+  it("fails closed when Get-Acl reports a different Windows owner", async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(directory);
+    const calls: string[] = [];
+    const file = new DaemonIdentityFile(directory, {
+      platform: "win32",
+      runCommand: (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        return windowsSecurityCommand(command, args, directory, "CONTOSO\\other");
+      },
+    });
+    expect(() => file.read()).toThrowError(expect.objectContaining({ code: "unsafe_owner" }));
+    expect(calls.some((call) => call.includes("Get-Acl"))).toBe(true);
+  });
 });
+
+function windowsSecurityCommand(
+  command: string,
+  args: readonly string[],
+  target: string,
+  owner: string,
+): string {
+  if (command === "whoami") {
+    return "\"CONTOSO\\current\",\"S-1-5-21-1000\"\r\n";
+  }
+  if (command === "powershell.exe") {
+    return args.join(" ").includes("Get-Acl") ? `${owner}\r\n` : "false\r\n";
+  }
+  if (command === "icacls") {
+    return `${target} CONTOSO\\current:(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+  }
+  throw new Error(`unexpected command: ${command}`);
+}
 
 function processDependencies(
   platform: NodeJS.Platform,

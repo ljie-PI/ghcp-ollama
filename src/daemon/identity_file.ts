@@ -400,6 +400,10 @@ export class DaemonIdentityFile {
 
   private assertWindowsAcl(target: string): void {
     const current = currentWindowsIdentity(this.runCommand);
+    const owner = windowsOwner(target, this.runCommand);
+    if (!isCurrentWindowsIdentity(owner, current)) {
+      throw new DaemonIdentityFileError("unsafe_owner", "daemon path must be owned by the current user");
+    }
     const identities = windowsAclIdentities(target, this.runCommand);
     if (identities.length !== 1 || !isCurrentWindowsIdentity(identities[0] ?? "", current)) {
       throw new DaemonIdentityFileError("unsafe_permissions", "daemon ACL must be restricted to the current user");
@@ -602,6 +606,22 @@ function windowsAclIdentities(
     }
   }
   return identities;
+}
+
+function windowsOwner(
+  target: string,
+  runCommand: (file: string, args: readonly string[]) => string,
+): string {
+  const securityModule = "$env:windir\\system32\\WindowsPowerShell\\v1.0\\Modules"
+    + "\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1";
+  const script = `Import-Module "${securityModule}"; (Get-Acl -LiteralPath '${powerShellLiteral(target)}').Owner`;
+  const owner = runCommand("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
+  ]).trim();
+  if (owner.length === 0) {
+    throw new DaemonIdentityFileError("unsafe_owner", "unable to resolve daemon path owner");
+  }
+  return owner;
 }
 
 function isCurrentWindowsIdentity(

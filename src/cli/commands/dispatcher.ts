@@ -256,6 +256,9 @@ function setConfigValue(config: RuntimeConfigSnapshot, key: string, rawValue: st
 }
 
 function mapDispatcherError(error: unknown): CliError {
+  if (error instanceof Error && error.name === "DeviceOAuthError") {
+    return new CliError("remote_error");
+  }
   if (error instanceof CliError) {
     return error;
   }

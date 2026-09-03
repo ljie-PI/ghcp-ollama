@@ -9,6 +9,7 @@ import type { TokenRefreshError } from "../../../src/copilot/token_refresh.js";
 import { runCli } from "../../../src/cli/main.js";
 import { CliError, HttpControlClient, ScriptedControlClient } from "../../../src/cli/control_client.js";
 import { CommandDispatcher, DispatcherControlClient } from "../../../src/cli/commands/dispatcher.js";
+import { exitCodeForError } from "../../../src/cli/output.js";
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { RuntimeConfigStore } from "../../../src/config/runtime_config.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
@@ -199,6 +200,29 @@ describe("RM-18 CLI commands", () => {
       await expect(client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
     } finally {
       failedHarness.close();
+    }
+  });
+
+  it("maps device OAuth remote failures to CLI remote_error exit 5", async () => {
+    const harness = await dispatcherHarness({ device: {
+      async requestDeviceCode() {
+        const error = new Error("secret remote response");
+        error.name = "DeviceOAuthError";
+        throw error;
+      },
+      async exchangeDeviceCode() {
+        return { status: "failed" };
+      },
+    } });
+    try {
+      const client = new DispatcherControlClient(harness.dispatcher);
+      await expect(client.request("auth.login.start", {}, { dataDir: "unused" }))
+        .rejects.toMatchObject({ code: "remote_error" });
+      const error = await client.request("auth.login.start", {}, { dataDir: "unused" }).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ code: "remote_error" });
+      expect(exitCodeForError((error as CliError).code)).toBe(5);
+    } finally {
+      harness.close();
     }
   });
 

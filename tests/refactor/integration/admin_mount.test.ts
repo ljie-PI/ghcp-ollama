@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultRuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import { parseStartupConfig } from "../../../src/config/startup_config.js";
 import {
@@ -24,6 +24,7 @@ function startup(port = 31400) {
 }
 
 describe("RM-20 additive Gateway mount", () => {
+  afterEach(() => vi.useRealTimers());
   it("uses control, Admin API, protocol/probe, then Admin static precedence", async () => {
     const calls: string[] = [];
     const contexts: AdminRequestContext[] = [];
@@ -200,6 +201,39 @@ describe("RM-20 additive Gateway mount", () => {
     await gateway.close();
     await gateway.close();
     expect(order).toEqual(["control", "admin", "onClose"]);
+  });
+
+  it("forces listener and resource closure after the bounded 10 second grace period", async () => {
+    vi.useFakeTimers();
+    const server = {
+      listening: true,
+      once() { return this; },
+      off() { return this; },
+      close: vi.fn(),
+      closeIdleConnections: vi.fn(),
+      closeAllConnections: vi.fn(),
+    };
+    const forceClose = vi.fn();
+    const timeout = vi.fn();
+    const gateway = await createGateway({ startup: startup(), runtime: defaultRuntimeConfigSnapshot() }, [], {
+      listen: () => server,
+      onClose: async () => await new Promise<void>(() => undefined),
+      onForceClose: forceClose,
+      onShutdownTimeout: timeout,
+    });
+    await gateway.listen();
+    const closing = gateway.close();
+    expect(server.close).toHaveBeenCalledOnce();
+    expect(server.closeIdleConnections).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(timeout).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await closing;
+    expect(timeout).toHaveBeenCalledOnce();
+    expect(server.closeAllConnections).toHaveBeenCalledOnce();
+    expect(forceClose).toHaveBeenCalledOnce();
+    await gateway.close();
+    expect(server.close).toHaveBeenCalledOnce();
   });
 
   it("captures the current runtime config for each later protocol request", async () => {

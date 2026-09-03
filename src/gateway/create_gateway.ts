@@ -16,6 +16,8 @@ export interface GatewayListener {
   off(event: "listening", listener: () => void): this;
   off(event: "error", listener: (error: Error) => void): this;
   close(callback: (error?: Error) => void): void;
+  closeIdleConnections?(): void;
+  closeAllConnections?(): void;
 }
 
 export type GatewayListen = (options: Readonly<{
@@ -88,12 +90,16 @@ export interface GatewayDependencies {
   readonly createRequestId?: () => string;
   readonly isReady?: () => boolean;
   readonly onClose?: () => Promise<void> | void;
+  readonly onForceClose?: () => Promise<void> | void;
+  readonly onShutdownTimeout?: () => void;
   readonly admin?: AdminModule;
   readonly control?: LocalControlModule;
   readonly adminStatic?: AdminStaticModule;
   readonly readRuntimeConfig?: () => RuntimeConfigSnapshot;
   readonly listen?: GatewayListen;
 }
+
+export const GRACEFUL_SHUTDOWN_MS = 10_000;
 
 export type { RouteRegistration };
 
@@ -150,6 +156,7 @@ export async function createGateway(
 
   let listener: GatewayListener | undefined;
   let listenPromise: Promise<{ host: typeof LOOPBACK_HOST; port: number }> | undefined;
+  let closePromise: Promise<void> | undefined;
 
   const gateway: HostedGateway = {
     fetch(request: Request): Promise<Response> {
@@ -194,33 +201,38 @@ export async function createGateway(
       return await listenPromise;
     },
     async close(): Promise<void> {
-      if (closed) {
-        return;
-      }
-      closed = true;
-      for (const controller of mountedInflight) {
-        controller.abort();
-      }
-      mountedInflight.clear();
-      admission.close();
-      let closeError: unknown;
-      try {
-        dependencies.control?.close();
-      } catch (error: unknown) {
-        closeError ??= error;
-      }
-      try {
-        dependencies.admin?.close();
-      } catch (error: unknown) {
-        closeError ??= error;
-      }
-      for (const controller of inflight) {
-        controller.abort();
-      }
-      inflight.clear();
-      const current = listener;
-      listener = undefined;
-      listenPromise = undefined;
+      closePromise ??= closeGateway();
+      return await closePromise;
+    },
+  };
+
+  async function closeGateway(): Promise<void> {
+    closed = true;
+    for (const controller of mountedInflight) {
+      controller.abort();
+    }
+    mountedInflight.clear();
+    admission.close();
+    let closeError: unknown;
+    try {
+      dependencies.control?.close();
+    } catch (error: unknown) {
+      closeError ??= error;
+    }
+    try {
+      dependencies.admin?.close();
+    } catch (error: unknown) {
+      closeError ??= error;
+    }
+    for (const controller of inflight) {
+      controller.abort();
+    }
+    inflight.clear();
+    const current = listener;
+    listener = undefined;
+    listenPromise = undefined;
+
+    const graceful = (async () => {
       if (current !== undefined) {
         try {
           await new Promise<void>((resolve, reject) => {
@@ -231,6 +243,7 @@ export async function createGateway(
               }
               resolve();
             });
+            current.closeIdleConnections?.();
           });
         } catch (error: unknown) {
           closeError ??= error;
@@ -244,8 +257,43 @@ export async function createGateway(
       if (closeError !== undefined) {
         throw closeError;
       }
-    },
-  };
+    })();
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      graceful.then(
+        () => ({ timedOut: false as const }),
+        (error: unknown) => ({ timedOut: false as const, error }),
+      ),
+      new Promise<{ readonly timedOut: true }>((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true }), GRACEFUL_SHUTDOWN_MS);
+      }),
+    ]);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    if ("error" in result) {
+      throw result.error;
+    }
+    if (!result.timedOut) {
+      return;
+    }
+    try {
+      dependencies.onShutdownTimeout?.();
+    } catch {
+      // Timeout reporting cannot prevent forced cleanup.
+    }
+    try {
+      current?.closeAllConnections?.();
+    } catch {
+      // Continue forcing the remaining resources closed.
+    }
+    try {
+      void Promise.resolve(dependencies.onForceClose?.()).catch(() => undefined);
+    } catch {
+      // Shutdown must remain bounded even when forced cleanup fails.
+    }
+  }
 
   return gateway;
 }

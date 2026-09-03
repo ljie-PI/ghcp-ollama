@@ -6,6 +6,7 @@ import { FileCredentialStore, type CredentialStore } from "./accounts/credential
 import { createCopilotEndpointDiscovery, refreshCopilotToken } from "./copilot/credential_provider.js";
 import { HttpCopilotModelsSource } from "./copilot/models_source.js";
 import { CopilotModelCatalog, type CopilotModelsSource } from "./copilot/model_catalog.js";
+import { productionModelInfoLookup, type NormalizedModelInfo } from "./copilot/model_metadata.js";
 import { HttpCopilotBackend } from "./copilot/transport.js";
 import type { CopilotBackend } from "./copilot/backend.js";
 import { getValidToken } from "./copilot/token_refresh.js";
@@ -63,9 +64,11 @@ export interface ApplicationContext {
   readonly history: ResponsesHistory;
   readonly telemetry?: TelemetryRecorder;
   readonly modelsSource?: CopilotModelsSource;
+  readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
   readonly runtime?: RuntimeConfigStore;
   readonly tokenCounter: OllamaTokenCounter;
   close?(): Promise<void> | void;
+  forceClose?(): Promise<void> | void;
 }
 
 export async function bootstrapGateway(options: BootstrapOptions = {}): Promise<HostedGateway> {
@@ -89,6 +92,18 @@ export async function bootstrapGateway(options: BootstrapOptions = {}): Promise<
         await options.dependencies?.onClose?.();
         await context?.close?.();
       },
+      onForceClose: () => {
+        try {
+          void Promise.resolve(options.dependencies?.onForceClose?.()).catch(() => undefined);
+        } catch {
+          // Continue forcing application resources closed.
+        }
+        try {
+          void Promise.resolve(context?.forceClose?.()).catch(() => undefined);
+        } catch {
+          // Gateway shutdown must remain bounded.
+        }
+      },
     },
   );
 }
@@ -100,6 +115,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       directory: context.directory,
       catalog: context.catalog,
       preferences,
+      ...(context.modelMetadata === undefined ? {} : { metadata: context.modelMetadata }),
     }),
     createOpenAiChatRoute({
       directory: context.directory,
@@ -148,12 +164,12 @@ export async function createProductionApplicationContext(
   const directory = new SqliteAccountDirectory(database, credentials, Date.now, snapshot.accounts.maxAuthenticated);
   await directory.reconcile();
   const fetchDiscovery = createCopilotEndpointDiscovery(credentials);
-  const modelsSource = new HttpCopilotModelsSource(async (accountId, signal) => {
+  const modelsSource = HttpCopilotModelsSource.production(async (accountId, signal) => {
     const account = await directory.bindAccount(accountId, signal);
     const token = await getValidToken(credentials, account, Date.now(), refreshCopilotToken, signal);
     const { endpoint } = await discoverEndpoint(account, fetchDiscovery, signal);
     return { token, endpoint };
-  });
+  }, productionModelInfoLookup);
   const catalog = new CopilotModelCatalog(modelsSource);
   const copilot = new HttpCopilotBackend({
     credentials,
@@ -173,6 +189,13 @@ export async function createProductionApplicationContext(
   const history = new SqliteResponsesHistory(database, {
     ttlDays: snapshot.history.ttlDays,
   });
+  let databaseClosed = false;
+  const closeDatabaseOnce = (): void => {
+    if (!databaseClosed) {
+      databaseClosed = true;
+      closeDatabase(database);
+    }
+  };
   return {
     database,
     credentials,
@@ -182,12 +205,17 @@ export async function createProductionApplicationContext(
     history,
     telemetry,
     modelsSource,
+    modelMetadata: modelsSource.modelMetadata,
     runtime,
     tokenCounter: litellmStyleTokenCounter,
     async close() {
       await telemetry.flush();
       await catalog.close();
-      closeDatabase(database);
+      closeDatabaseOnce();
+    },
+    forceClose() {
+      modelsSource.forceClose();
+      closeDatabaseOnce();
     },
   };
 }
@@ -231,7 +259,9 @@ export async function composeProductionDaemonGateway(
       catalog: application.catalog,
       preferences: application.directory.preferences,
       preferredModels: new PreferredModelManager(application.directory.preferences),
-      modelMetadata: { get: () => null },
+      modelMetadata: {
+        get: (modelId) => application.modelMetadata?.get(modelId) ?? null,
+      },
       runtimeConfig: {
         read: () => ({ revision: runtime.readRevision(), config: runtime.readSnapshot() }),
         updateAndApply: updateRuntimeConfig,
@@ -273,6 +303,11 @@ export async function composeProductionDaemonGateway(
         admin,
         control,
         readRuntimeConfig: () => runtime.readSnapshot(),
+        onShutdownTimeout: () => composition.logger.write({
+          category: "shutdown_timeout",
+          managed: composition.identity.managed,
+          pid: composition.identity.pid,
+        }),
       },
     });
   } catch (error: unknown) {
