@@ -1,6 +1,6 @@
 # GHC Gateway
 
-GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI, Anthropic, and Ollama-compatible HTTP interfaces. It runs as one Node.js process and includes a local Admin UI for account, model, runtime configuration, history, usage, and operational-event management.
+GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI, Anthropic, and Ollama-compatible APIs. It runs as one Node.js process and includes a local Admin UI for account, model, runtime configuration, history, usage, and operational-event management.
 
 ## Requirements
 
@@ -209,10 +209,6 @@ GHC_GATEWAY_LIVE_TESTS=1 npm run test:live:sdk
 ```
 
 The live suite can contact real GitHub Copilot and must not be run as part of normal development or CI.
-
-## Release Status
-
-The implementation targets the future `ljie-PI/ghc-gateway` repository and `@ljie-pi/ghc-gateway@0.1.0` package. Publishing, promotion to the default branch, repository rename, and live-provider smoke are maintainer-only post-merge steps.
 
 ## License
 
