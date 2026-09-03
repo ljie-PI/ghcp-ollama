@@ -15,5 +15,6 @@ describe("RM-01 baseline smoke", () => {
 
     expect(result.passed, JSON.stringify(result.samples)).toBe(true);
     expect(result.samples).toHaveLength(1);
+    expect(result.adminPage).toBeUndefined();
   });
 });

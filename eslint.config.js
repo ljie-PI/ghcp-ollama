@@ -1,6 +1,7 @@
 import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";
+import svelte from "eslint-plugin-svelte";
 
 const sharedRules = {
   "no-console": "off",
@@ -26,6 +27,30 @@ export default [
     ],
   },
   js.configs.recommended,
+  ...svelte.configs.recommended,
+  ...svelte.configs.prettier,
+  {
+    files: ["web/**/*.svelte"],
+    languageOptions: {
+      ...svelte.configs.recommended.find((config) => config.name === "svelte:base:setup-for-svelte")?.languageOptions,
+      parserOptions: {
+        parser: tseslint.parser,
+        extraFileExtensions: [".svelte"],
+      },
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+      },
+    },
+    plugins: {
+      "@typescript-eslint": tseslint.plugin,
+    },
+    rules: {
+      "no-unused-vars": "off",
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" }],
+      "svelte/require-each-key": "error",
+    },
+  },
   {
     files: ["src/**/*.js", "tests/**/*.js", "scripts/**/*.{js,mjs}", "*.js"],
     languageOptions: {
@@ -44,6 +69,7 @@ export default [
       "scripts/refactor/**/*.ts",
       "tests/refactor/**/*.ts",
       "tests/live/**/*.ts",
+      "web/**/*.ts",
       "*.config.ts",
     ],
     languageOptions: {

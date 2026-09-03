@@ -7,7 +7,13 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
+    baseURL: "http://127.0.0.1:4173",
     trace: "retain-on-failure",
+  },
+  webServer: {
+    command: "npm run web:build && vite preview --config web/vite.config.ts --host 127.0.0.1 --port 4173 --strictPort",
+    url: "http://127.0.0.1:4173/admin/",
+    reuseExistingServer: !process.env.CI,
   },
   projects: [
     {

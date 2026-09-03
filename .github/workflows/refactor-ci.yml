@@ -37,6 +37,8 @@ jobs:
         run: npm ci
       - name: Verify offline dependency cache
         run: npm ci --offline
+      - name: Provision Chromium
+        run: npx playwright install chromium
       - name: Typecheck refactor app
         env:
           NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
@@ -131,6 +133,8 @@ jobs:
             echo "registry=$(npm config get registry)"
           } | tee artifacts/refactor-ci/provenance.txt
       - run: npm ci
+      - name: Provision Chromium
+        run: npx playwright install chromium
       - name: Smoke build refactor app
         env:
           NODE_OPTIONS: "--import ./scripts/refactor/bootstrap.mjs"
