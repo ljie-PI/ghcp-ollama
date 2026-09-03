@@ -384,6 +384,27 @@ describe("RM-18 CLI commands", () => {
     expect(closed).toBe(true);
   });
 
+  it("renders foreground stop/restart conflicts as canonical errors", async () => {
+    for (const action of ["stop", "restart"] as const) {
+      const stdout = new CaptureStream();
+      const stderr = new CaptureStream();
+      const result = await runCli({
+        argv: ["--data-dir", "selected", action],
+        stdout,
+        stderr,
+        daemonController: {
+          start: async () => { throw new Error("unused"); },
+          status: async () => { throw new Error("unused"); },
+          stop: async () => ({ state: "conflict", managed: false, pid: 42, startedAt: null, port: 31400, dataDir: "selected" }),
+          restart: async () => ({ state: "conflict", managed: false, pid: 42, startedAt: null, port: 31400, dataDir: "selected" }),
+        },
+      });
+      expect(result).toBe(5);
+      expect(stdout.chunks).toBe("");
+      expect(stderr.chunks).toContain("daemon conflict");
+    }
+  });
+
   it("returns 130 when foreground serve closes for SIGINT", async () => {
     const abort = new AbortController();
     const run = runCli({
