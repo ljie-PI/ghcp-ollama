@@ -208,7 +208,7 @@ GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 GHC_GATEWAY_LIVE_TESTS=1 npm run test:live:sdk
 ```
 
-The live suite can contact real GitHub Copilot and must not be run as part of normal development or CI.
+The live suite can contact real GitHub Copilot and must not be run as part of normal development or CI. Set `GHC_GATEWAY_LIVE_RESPONSES_MODEL` to a verified native Responses model, or set `GHC_GATEWAY_LIVE_NATIVE_RESPONSES_NOT_AVAILABLE=1` only after verifying that the current account catalog has no native-capable model.
 
 ## License
 

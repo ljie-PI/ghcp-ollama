@@ -37,6 +37,23 @@ export function recordLiveStatus(
   console.info(JSON.stringify({ check, status, model_ids: modelIds }));
 }
 
+export function isManagedBridgeResponseId(id: string): boolean {
+  if (!id.startsWith("resp_")) {
+    return false;
+  }
+  const encoded = id.slice("resp_".length);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded) || encoded.length % 4 !== 0) {
+    return false;
+  }
+  try {
+    const decoded = Buffer.from(encoded, "base64");
+    return decoded.toString("base64") === encoded
+      && /^litellm:custom_llm_provider:.+;model_id:.+;response_id:.+$/u.test(decoded.toString("utf8"));
+  } catch (_error: unknown) {
+    return false;
+  }
+}
+
 export async function consumeAtLeastOne<T>(stream: AsyncIterable<T>): Promise<number> {
   let count = 0;
   for await (const _item of stream) {

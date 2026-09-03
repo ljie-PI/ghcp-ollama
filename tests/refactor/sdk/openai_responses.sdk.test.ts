@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  CHAT_MODEL,
   decodeCapturedBody,
   NATIVE_RESPONSES_MODEL,
   type OfflineSdkHarness,
@@ -44,6 +45,25 @@ describe("RM-17 official OpenAI Responses SDK", () => {
       input: "sdk-responses-stream",
       stream: true,
     });
+  });
+
+  it("deserializes non-stream and iterates a terminal Chat-bridge Responses stream", async () => {
+    const nonstream = await client.responses.create({ model: CHAT_MODEL, input: "sdk-bridge-nonstream" });
+    expect(nonstream.id).toMatch(/^resp_/u);
+    expect(nonstream.output_text).toBe("pong");
+
+    const stream = await client.responses.create({
+      model: CHAT_MODEL,
+      input: "sdk-bridge-stream",
+      stream: true,
+    });
+    const eventTypes = [];
+    for await (const event of stream) {
+      eventTypes.push(event.type);
+    }
+    expect(eventTypes).toContain("response.completed");
+    expect(harness.backendKinds).toContain("chat");
+    expect(harness.backendKinds).toContain("chat-stream");
   });
 
   it("surfaces the official API error class and gateway request ID", async () => {

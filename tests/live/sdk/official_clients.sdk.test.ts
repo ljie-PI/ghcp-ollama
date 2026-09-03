@@ -6,6 +6,7 @@ import {
   assertLiveSdkTestsEnabled,
   consumeAtLeastOne,
   expectCancelledStream,
+  isManagedBridgeResponseId,
   liveBaseUrl,
   loopbackOnlyFetch,
   recordLiveStatus,
@@ -42,10 +43,39 @@ describe("RM-22 guarded live official SDK smoke", () => {
       throw new Error("no shared live Chat model is available");
     }
     const explicitResponses = process.env.GHC_GATEWAY_LIVE_RESPONSES_MODEL;
-    nativeResponsesModel = explicitResponses
-      ?? openAiModels.data.find((model) => modelMode(model) === "responses")?.id;
+    const explicitNoNative = process.env.GHC_GATEWAY_LIVE_NATIVE_RESPONSES_NOT_AVAILABLE === "1";
+    if (explicitResponses === undefined && !explicitNoNative) {
+      throw new Error(
+        "set GHC_GATEWAY_LIVE_RESPONSES_MODEL or GHC_GATEWAY_LIVE_NATIVE_RESPONSES_NOT_AVAILABLE=1",
+      );
+    }
+    if (explicitResponses !== undefined && explicitNoNative) {
+      throw new Error("native Responses model and not-available declaration are mutually exclusive");
+    }
+    nativeResponsesModel = explicitResponses;
     if (explicitResponses !== undefined && !openAiIds.includes(explicitResponses)) {
       throw new Error("GHC_GATEWAY_LIVE_RESPONSES_MODEL is not in the current catalog");
+    }
+    if (explicitResponses !== undefined
+      && modelMode(openAiModels.data.find((model) => model.id === explicitResponses)) === "chat") {
+      throw new Error("GHC_GATEWAY_LIVE_RESPONSES_MODEL is explicitly Chat-only");
+    }
+    if (explicitNoNative && openAiModels.data.some((model) => modelMode(model) === "responses")) {
+      throw new Error("native Responses is publicly available and cannot be declared unavailable");
+    }
+    if (explicitNoNative) {
+      const ambiguousModels = openAiModels.data.filter((model) => modelMode(model) !== "chat");
+      const probes = await Promise.all(ambiguousModels.map(async (model) => ({
+        model: model.id,
+        response: await openai.responses.create({
+          model: model.id,
+          input: "Reply with OK.",
+          max_output_tokens: 1,
+        }),
+      })));
+      if (probes.some((probe) => !isManagedBridgeResponseId(probe.response.id))) {
+        throw new Error("native Responses is available and cannot be declared unavailable");
+      }
     }
     responsesModel = nativeResponsesModel ?? chatModel;
     recordLiveStatus("models", "passing", [chatModel, responsesModel]);
@@ -83,6 +113,7 @@ describe("RM-22 guarded live official SDK smoke", () => {
       max_output_tokens: 8,
     });
     expect(response.id.length).toBeGreaterThan(0);
+    expect(isManagedBridgeResponseId(response.id)).toBe(nativeResponsesModel === undefined);
     const stream = await openai.responses.create({
       model: responsesModel,
       input: "Reply with OK.",
