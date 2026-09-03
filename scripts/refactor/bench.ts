@@ -33,6 +33,7 @@ import {
 } from "../../src/protocols/responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 import { nearestRankP95, THRESHOLDS } from "../../src/telemetry/performance.js";
+import type { PerformanceMeasurement, ProtocolPerformanceObserver } from "../../src/telemetry/runtime.js";
 import "./ci_network_guard.js";
 
 const execFileAsync = promisify(execFile);
@@ -249,7 +250,38 @@ interface BenchmarkRuntime {
   readonly gateway: Gateway;
   readonly backend: BenchmarkCopilotBackend;
   readonly history: MeasuredHistory;
+  readonly performance: BenchmarkPerformanceObserver;
   close(): Promise<void>;
+}
+
+class BenchmarkPerformanceObserver implements ProtocolPerformanceObserver {
+  readonly values: Record<PerformanceMeasurement, number[]> = {
+    buffered: [],
+    event: [],
+    checkpoint: [],
+  };
+
+  measure<T>(measurement: PerformanceMeasurement, work: () => T): T {
+    const startedAtMs = performance.now();
+    try {
+      return work();
+    } finally {
+      this.values[measurement].push(elapsedMs(startedAtMs));
+    }
+  }
+
+  async measureAsync<T>(measurement: PerformanceMeasurement, work: () => Promise<T>): Promise<T> {
+    const startedAtMs = performance.now();
+    try {
+      return await work();
+    } finally {
+      this.values[measurement].push(elapsedMs(startedAtMs));
+    }
+  }
+
+  reset(measurement: PerformanceMeasurement): void {
+    this.values[measurement].length = 0;
+  }
 }
 
 const BUFFERED_RESPONSE = JSON.stringify({
@@ -428,6 +460,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
   const backend = new BenchmarkCopilotBackend();
   const measuredHistory = new MeasuredHistory(database, { nowMs });
   const telemetry = new TelemetryRecorder(database, nowMs);
+  const performanceObserver = new BenchmarkPerformanceObserver();
   let closed = false;
   const application: ApplicationContext = {
     database,
@@ -437,6 +470,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     copilot: backend,
     history: measuredHistory,
     telemetry,
+    performanceObserver,
     runtime: runtimeConfig,
     tokenCounter: litellmStyleTokenCounter,
     async close() {
@@ -478,6 +512,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
       gateway,
       backend,
       history: measuredHistory,
+      performance: performanceObserver,
       async close() {
         await gateway?.close();
         await rm(dataDir, { recursive: true, force: true, maxRetries: 3 });
@@ -508,40 +543,36 @@ async function measureBufferedRequests(
   if (warmup) {
     await measureBufferedRequests(runtime, LATENCY_WARMUP_REQUESTS, false);
   }
-  const values: number[] = [];
+  runtime.performance.reset("buffered");
   for (let index = 0; index < count; index += 1) {
-    const started = performance.now();
     const response = await runtime.gateway.fetch(openAiRequest(false));
     await response.arrayBuffer();
     assertStatus(response, 200, "buffered request");
-    values.push(elapsedMs(started));
     await yieldToEventLoop(index);
+  }
+  const values = [...runtime.performance.values.buffered];
+  if (values.length !== count) {
+    throw new Error(`buffered benchmark expected ${count} samples, received ${values.length}`);
   }
   return values;
 }
 
 async function measureStreamEvents(runtime: BenchmarkRuntime, count: number): Promise<number[]> {
   runtime.backend.mode = "event";
-  runtime.backend.eventCount = count + LATENCY_WARMUP_REQUESTS;
-  const response = await runtime.gateway.fetch(openAiRequest(true));
+  runtime.backend.eventCount = LATENCY_WARMUP_REQUESTS;
+  let response = await runtime.gateway.fetch(openAiRequest(true));
+  assertStatus(response, 200, "stream event warmup request");
+  await response.arrayBuffer();
+  runtime.performance.reset("event");
+  runtime.backend.eventCount = count;
+  response = await runtime.gateway.fetch(openAiRequest(true));
   assertStatus(response, 200, "stream event request");
-  const reader = requiredReader(response);
-  const values: number[] = [];
-  let eventIndex = 0;
-  for (;;) {
-    const started = performance.now();
-    const next = await reader.read();
-    const elapsed = elapsedMs(started);
-    if (next.done) break;
-    if (eventIndex >= LATENCY_WARMUP_REQUESTS && values.length < count) {
-      values.push(elapsed);
-    }
-    eventIndex += 1;
+  await response.arrayBuffer();
+  const values = [...runtime.performance.values.event];
+  if (values.length < count) {
+    throw new Error(`stream event benchmark expected at least ${count} samples, received ${values.length}`);
   }
-  if (values.length !== count) {
-    throw new Error(`stream event benchmark expected ${count} samples, received ${values.length}`);
-  }
-  return values;
+  return values.slice(0, count);
 }
 
 async function measureCheckpoints(
@@ -641,7 +672,7 @@ function assertStatus(response: Response, expected: number, operation: string): 
 }
 
 function latencyResult(valuesMs: readonly number[], thresholdMs: number, warmupCount: number): LatencyMetricResult {
-  const p95Ms = stableP95(valuesMs);
+  const p95Ms = nearestRankP95(valuesMs);
   if (p95Ms === null) {
     throw new Error("latency benchmark produced no samples");
   }
@@ -653,22 +684,6 @@ function latencyResult(valuesMs: readonly number[], thresholdMs: number, warmupC
     p95Ms,
     passed: p95Ms <= thresholdMs,
   };
-}
-
-function stableP95(valuesMs: readonly number[]): number | null {
-  if (valuesMs.length < 100) {
-    return nearestRankP95(valuesMs);
-  }
-  const batchSize = Math.floor(valuesMs.length / 5);
-  const batches = Array.from({ length: 5 }, (_, index) => valuesMs.slice(
-    index * batchSize,
-    index === 4 ? valuesMs.length : (index + 1) * batchSize,
-  ));
-  const p95s = batches
-    .map((batch) => nearestRankP95(batch))
-    .filter((value): value is number => value !== null)
-    .sort((left, right) => left - right);
-  return p95s[Math.floor(p95s.length / 2)] ?? null;
 }
 
 async function stableResidentSamples(pid = process.pid, collectGarbage = true): Promise<StableResidentSamples> {

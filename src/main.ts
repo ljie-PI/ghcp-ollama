@@ -255,7 +255,7 @@ export async function composeProductionDaemonGateway(
     const applicationWithTelemetry: ApplicationContext = application.telemetryRuntime === undefined
       ? {
         ...application,
-        performanceObserver: telemetryRuntime.performance,
+        performanceObserver: application.performanceObserver ?? telemetryRuntime.performance,
         async close() {
           await telemetryRuntime.close();
           await application.close?.();
