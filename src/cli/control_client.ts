@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
 import type { CatalogSnapshot } from "../copilot/model_catalog.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { StartupConfig } from "../config/startup_config.js";
+import { DaemonIdentityFile, type DaemonIdentity } from "../daemon/identity_file.js";
 
 export type CliErrorCode =
   | "internal_error"
@@ -222,6 +222,8 @@ export interface ControlEndpoint {
   readonly managed: boolean;
 }
 
+export type AuthenticatedControlIdentity = DaemonIdentity;
+
 export class ScriptedControlClient implements ControlClient {
   readonly calls: Array<{
     readonly kind: "lifecycle" | "control" | "admin.open";
@@ -347,75 +349,78 @@ export class HttpControlClient implements ControlClient {
     body?: unknown,
     context: Pick<CliLifecycleContext, "signal" | "timeoutMs"> = {},
   ): Promise<unknown> {
-    let response: Response;
-    const timeout = controlTimeout(context.signal, context.timeoutMs ?? 30_000);
     try {
-      response = await Promise.race([this.fetchImpl(`http://127.0.0.1:${endpoint.port}${pathPart}`, {
-        method,
-        headers: {
-          "content-type": "application/json",
-          "x-ghcg-control-token": endpoint.controlToken,
-          "x-ghcg-instance-nonce": endpoint.instanceNonce,
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: timeout.signal,
-      }), timeout.promise]);
-    } catch (_error: unknown) {
-      timeout.clear();
-      if (timeout.timedOut()) {
-        throw new CliError("timeout");
-      }
-      if (timeout.parentAborted()) {
-        throw new CliError("interrupted");
-      }
-      if (pathPart.endsWith("/status")) {
+      return await authenticatedControlRequest(endpoint, method, pathPart, body, context, this.fetchImpl);
+    } catch (error: unknown) {
+      if (pathPart.endsWith("/status") && error instanceof CliError && error.code === "daemon_unreachable") {
         return { state: "unreachable" };
       }
-      throw new CliError("daemon_unreachable");
+      throw error;
     }
-    let payload: unknown;
-    try {
-      payload = await Promise.race([response.json(), timeout.promise]).catch(() => null) as unknown;
-    } finally {
-      timeout.clear();
-    }
+  }
+}
+
+export async function authenticatedControlRequest(
+  endpoint: Readonly<ControlEndpoint>,
+  method: "GET" | "POST",
+  pathPart: string,
+  body?: unknown,
+  context: Pick<CliLifecycleContext, "signal" | "timeoutMs"> = {},
+  fetchImpl: typeof fetch = fetch,
+): Promise<unknown> {
+  let response: Response;
+  const timeout = controlTimeout(context.signal, context.timeoutMs ?? 30_000);
+  try {
+    response = await Promise.race([fetchImpl(`http://127.0.0.1:${endpoint.port}${pathPart}`, {
+      method,
+      headers: {
+        "content-type": "application/json",
+        "x-ghcg-control-token": endpoint.controlToken,
+        "x-ghcg-instance-nonce": endpoint.instanceNonce,
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: timeout.signal,
+    }), timeout.promise]);
+  } catch (_error: unknown) {
+    timeout.clear();
     if (timeout.timedOut()) {
       throw new CliError("timeout");
     }
     if (timeout.parentAborted()) {
       throw new CliError("interrupted");
     }
-    if (response.ok && isObject(payload) && "data" in payload) {
-      return payload.data;
-    }
-    throw cliErrorFromControlResponse(response.status, payload);
+    throw new CliError("daemon_unreachable");
   }
+  let payload: unknown;
+  try {
+    payload = await Promise.race([response.json(), timeout.promise]).catch(() => null) as unknown;
+  } finally {
+    timeout.clear();
+  }
+  if (timeout.timedOut()) {
+    throw new CliError("timeout");
+  }
+  if (timeout.parentAborted()) {
+    throw new CliError("interrupted");
+  }
+  if (response.ok && isObject(payload) && "data" in payload) {
+    return payload.data;
+  }
+  throw cliErrorFromControlResponse(response.status, payload);
 }
 
-async function readControlEndpoint(dataDir: string): Promise<ControlEndpoint | null> {
-  let parsed: unknown;
+export async function readDaemonIdentity(dataDir: string): Promise<DaemonIdentity | null> {
   try {
-    parsed = JSON.parse(await readFile(path.join(dataDir, "daemon.json"), "utf8")) as unknown;
+    return new DaemonIdentityFile(dataDir).read();
   } catch (error: unknown) {
     if (isNodeNotFound(error)) {
       return null;
     }
     throw new CliError("security_error");
   }
-  if (!isObject(parsed)
-    || typeof parsed.managed !== "boolean"
-    || typeof parsed.controlToken !== "string"
-    || typeof parsed.instanceNonce !== "string"
-    || !Number.isInteger(parsed.port)) {
-    throw new CliError("security_error");
-  }
-  return {
-    managed: parsed.managed,
-    controlToken: parsed.controlToken,
-    instanceNonce: parsed.instanceNonce,
-    port: numberValue(parsed.port),
-  };
 }
+
+const readControlEndpoint = readDaemonIdentity;
 
 function controlTimeout(parent: AbortSignal | undefined, ms: number): {
   readonly signal: AbortSignal;

@@ -9,6 +9,21 @@ import { AdmissionController, defaultDelay, type DelayFn } from "./admission.js"
 import { createHonoApp, type RouteRegistration } from "./hono_app.js";
 import type { TimeoutScheduler } from "./timeouts.js";
 
+export interface GatewayListener {
+  readonly listening: boolean;
+  once(event: "listening", listener: () => void): this;
+  once(event: "error", listener: (error: Error) => void): this;
+  off(event: "listening", listener: () => void): this;
+  off(event: "error", listener: (error: Error) => void): this;
+  close(callback: (error?: Error) => void): void;
+}
+
+export type GatewayListen = (options: Readonly<{
+  fetch: (request: Request) => Response | Promise<Response>;
+  hostname: typeof LOOPBACK_HOST;
+  port: number;
+}>) => GatewayListener;
+
 export interface Gateway {
   fetch(request: Request): Promise<Response>;
   close(): Promise<void>;
@@ -77,6 +92,7 @@ export interface GatewayDependencies {
   readonly control?: LocalControlModule;
   readonly adminStatic?: AdminStaticModule;
   readonly readRuntimeConfig?: () => RuntimeConfigSnapshot;
+  readonly listen?: GatewayListen;
 }
 
 export type { RouteRegistration };
@@ -132,7 +148,8 @@ export async function createGateway(
   };
   const app = createHonoApp(routes, appDependencies);
 
-  let listener: ReturnType<typeof serve> | undefined;
+  let listener: GatewayListener | undefined;
+  let listenPromise: Promise<{ host: typeof LOOPBACK_HOST; port: number }> | undefined;
 
   const gateway: HostedGateway = {
     fetch(request: Request): Promise<Response> {
@@ -144,14 +161,37 @@ export async function createGateway(
     async listen(): Promise<{ host: typeof LOOPBACK_HOST; port: number }> {
       assertLoopbackBindHost(config.startup.host);
       if (listener !== undefined) {
-        return { host: LOOPBACK_HOST, port: config.startup.port };
+        return await (listenPromise ?? Promise.resolve({ host: LOOPBACK_HOST, port: config.startup.port }));
       }
-      listener = serve({
+      const listen: GatewayListen = dependencies.listen ?? ((options) => serve(options));
+      const current = listen({
         fetch: app.fetch,
         hostname: LOOPBACK_HOST,
         port: config.startup.port,
       });
-      return { host: LOOPBACK_HOST, port: config.startup.port };
+      listener = current;
+      listenPromise = current.listening
+        ? Promise.resolve({ host: LOOPBACK_HOST, port: config.startup.port })
+        : new Promise((resolve, reject) => {
+          const cleanup = (): void => {
+            current.off("listening", onListening);
+            current.off("error", onError);
+          };
+          const onListening = (): void => {
+            cleanup();
+            resolve({ host: LOOPBACK_HOST, port: config.startup.port });
+          };
+          const onError = (error: Error): void => {
+            cleanup();
+            if (listener === current) {
+              listener = undefined;
+            }
+            reject(error);
+          };
+          current.once("listening", onListening);
+          current.once("error", onError);
+        });
+      return await listenPromise;
     },
     async close(): Promise<void> {
       if (closed) {
@@ -180,6 +220,7 @@ export async function createGateway(
       inflight.clear();
       const current = listener;
       listener = undefined;
+      listenPromise = undefined;
       if (current !== undefined) {
         try {
           await new Promise<void>((resolve, reject) => {

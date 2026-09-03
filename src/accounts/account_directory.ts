@@ -57,7 +57,11 @@ export class AccountDirectory {
     this.preferences = new AccountModelPreferences(database, nowMs);
   }
 
-  private readonly maxAuthenticated: number;
+  private maxAuthenticated: number;
+
+  setMaxAuthenticated(maxAuthenticated: number): void {
+    this.maxAuthenticated = maxAuthenticated;
+  }
 
   list(): readonly AccountSummary[] {
     return (this.database.prepare(

@@ -97,6 +97,9 @@ export class TelemetryRecorder {
   private seq = 0;
   private droppedUsage = 0;
   private droppedEvents = 0;
+  private observer: TelemetryRecorderObserver | undefined;
+  private usageRetentionMs: number;
+  private eventRetentionMs: number;
 
   constructor(
     private readonly database: Database.Database,
@@ -104,9 +107,23 @@ export class TelemetryRecorder {
     private readonly usageRowCap = USAGE_ROW_CAP,
     private readonly eventRowCap = EVENT_ROW_CAP,
     private readonly queueCap = TELEMETRY_QUEUE_CAP,
-    private readonly observer?: TelemetryRecorderObserver,
+    observer?: TelemetryRecorderObserver,
+    usageRetentionDays = USAGE_RETENTION_MS / (24 * 60 * 60 * 1000),
+    eventRetentionDays = EVENT_RETENTION_MS / (24 * 60 * 60 * 1000),
   ) {
+    this.observer = observer;
+    this.usageRetentionMs = usageRetentionDays * 24 * 60 * 60 * 1000;
+    this.eventRetentionMs = eventRetentionDays * 24 * 60 * 60 * 1000;
     this.cleanup(this.nowMs());
+  }
+
+  setObserver(observer: TelemetryRecorderObserver | undefined): void {
+    this.observer = observer;
+  }
+
+  setRetentionDays(usageRetentionDays: number, eventRetentionDays: number): void {
+    this.usageRetentionMs = usageRetentionDays * 24 * 60 * 60 * 1000;
+    this.eventRetentionMs = eventRetentionDays * 24 * 60 * 60 * 1000;
   }
 
   recordUsage(update: UsageUpdate): void {
@@ -289,7 +306,7 @@ export class TelemetryRecorder {
   }
 
   private cleanup(now: number): void {
-    const usageCutoff = floorToUtcHour(now - USAGE_RETENTION_MS);
+    const usageCutoff = floorToUtcHour(now - this.usageRetentionMs);
     this.database.prepare("DELETE FROM usage_buckets WHERE utc_hour_ms < ?").run(usageCutoff);
     const usageCount = (this.database.prepare("SELECT COUNT(*) AS count FROM usage_buckets").get() as { count: number }).count;
     if (usageCount > this.usageRowCap) {
@@ -302,7 +319,7 @@ export class TelemetryRecorder {
       ).run(usageCount - this.usageRowCap);
     }
 
-    const eventCutoff = now - EVENT_RETENTION_MS;
+    const eventCutoff = now - this.eventRetentionMs;
     this.database.prepare("DELETE FROM operational_events WHERE occurred_at_ms <= ?").run(eventCutoff);
     const eventCount = (this.database.prepare("SELECT COUNT(*) AS count FROM operational_events").get() as { count: number }).count;
     if (eventCount > this.eventRowCap) {

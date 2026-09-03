@@ -1,0 +1,269 @@
+import {
+  appendFileSync,
+  chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  type Stats,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { LOG_LINE_LIMIT_BYTES, sanitizeMetadata, utf8Bytes } from "../telemetry/sanitize.js";
+
+export const LOG_FILE_BYTES = 10 * 1024 * 1024;
+export const LOG_FILE_COUNT = 5;
+export const LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface DaemonLogger {
+  write(record: Record<string, unknown>): void;
+}
+
+export class JsonlLogger implements DaemonLogger {
+  private rotationSequence = 0;
+
+  constructor(
+    private readonly directory: string,
+    private readonly nowMs: () => number = Date.now,
+  ) {
+    const existed = pathExists(directory);
+    if (!existed) {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+    }
+    if (process.platform !== "win32" && !existed) {
+      chmodSync(directory, 0o700);
+    } else if (process.platform === "win32" && !existed) {
+      restrictWindowsAcl(directory, true);
+    }
+    assertSafeDirectory(directory);
+    this.prune(true);
+  }
+
+  write(record: Record<string, unknown>): void {
+    this.prune();
+    const sanitized = sanitizeMetadata(record);
+    const timestamp = this.nowMs();
+    let line = JSON.stringify({ ts: timestamp, ...sanitized });
+    if (utf8Bytes(line) > LOG_LINE_LIMIT_BYTES) {
+      line = JSON.stringify({ ts: timestamp, overflow: true, reason: "log_line_truncated" });
+    }
+    const encoded = `${line}\n`;
+    const active = this.activeFile();
+    if (fileSize(active) + utf8Bytes(encoded) > LOG_FILE_BYTES) {
+      this.rotate(active, timestamp);
+    }
+    appendProtected(active, encoded);
+    this.prune();
+  }
+
+  private activeFile(): string {
+    return path.join(this.directory, "gateway.jsonl");
+  }
+
+  private rotate(active: string, timestamp: number): void {
+    if (fileSize(active) === 0) {
+      return;
+    }
+    let rotated: string;
+    do {
+      rotated = path.join(this.directory, `gateway.${timestamp}.${this.rotationSequence}.jsonl`);
+      this.rotationSequence += 1;
+    } while (pathExists(rotated));
+    renameSync(active, rotated);
+  }
+
+  private prune(validateWindowsSecurity = false): void {
+    const now = this.nowMs();
+    const files = readdirSync(this.directory)
+      .filter((name) => /^gateway\.\d+\.\d+\.jsonl$/u.test(name))
+      .map((name) => path.join(this.directory, name))
+      .map((file) => ({ file, stat: assertSafeFile(file, validateWindowsSecurity) }))
+      .sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs)
+      .map(({ file }) => file);
+    for (const file of files) {
+      if (now - statSync(file).mtimeMs > LOG_MAX_AGE_MS) {
+        unlinkIfExists(file);
+      }
+    }
+    const active = this.activeFile();
+    if (pathExists(active) && now - statSync(active).mtimeMs > LOG_MAX_AGE_MS) {
+      unlinkIfExists(active);
+    }
+    const retained = files.filter(pathExists);
+    for (const file of retained.slice(0, Math.max(0, retained.length - (LOG_FILE_COUNT - 1)))) {
+      unlinkIfExists(file);
+    }
+  }
+}
+
+export class StderrLogger implements DaemonLogger {
+  constructor(
+    private readonly stream: { write(chunk: string): unknown },
+    private readonly nowMs: () => number = Date.now,
+  ) {}
+
+  write(record: Record<string, unknown>): void {
+    this.stream.write(`${JSON.stringify({ ts: this.nowMs(), ...sanitizeMetadata(record) })}\n`);
+  }
+}
+
+function appendProtected(filePath: string, value: string): void {
+  const existed = pathExists(filePath);
+  if (existed) {
+    assertSafeFile(filePath, false);
+  }
+  const noFollow = process.platform === "win32"
+    ? 0
+    : ((constants as Readonly<Record<string, number>>)["O_NOFOLLOW"] ?? 0);
+  const fd = openSync(filePath, constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | noFollow, 0o600);
+  try {
+    if (process.platform !== "win32") {
+      if (!existed) {
+        chmodSync(filePath, 0o600);
+      }
+    } else if (!existed) {
+      restrictWindowsAcl(filePath, false);
+    }
+    const opened = fstatSync(fd);
+    const pathStat = assertSafeFile(filePath, !existed);
+    if (!opened.isFile() || opened.dev !== pathStat.dev || opened.ino !== pathStat.ino) {
+      throw new Error("log file changed during validation");
+    }
+    appendFileSync(fd, value, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function restrictWindowsAcl(target: string, directory: boolean): void {
+  const identity = currentWindowsIdentity();
+  const grant = directory ? `*${identity.sid}:(OI)(CI)(F)` : `*${identity.sid}:(F)`;
+  execFileSync("icacls", [target, "/inheritance:r", "/grant:r", grant], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+}
+
+function assertSafeDirectory(target: string): void {
+  const stat = lstatSync(target);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || isWindowsReparsePoint(target)) {
+    throw new Error("log directory must be a regular directory");
+  }
+  assertOwner(stat.uid);
+  if (process.platform === "win32") {
+    assertWindowsAcl(target);
+  } else if ((stat.mode & 0o777) !== 0o700) {
+    throw new Error("log directory permissions must be 0700");
+  }
+}
+
+function assertSafeFile(target: string, validateWindowsSecurity = true): Stats {
+  const stat: Stats = lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink()
+    || (validateWindowsSecurity && isWindowsReparsePoint(target))) {
+    throw new Error("log path must be a regular file");
+  }
+  assertOwner(stat.uid);
+  if (process.platform === "win32") {
+    if (validateWindowsSecurity) {
+      assertWindowsAcl(target);
+    }
+  } else if ((stat.mode & 0o777) !== 0o600) {
+    throw new Error("log file permissions must be 0600");
+  }
+  return stat;
+}
+
+function assertOwner(uid: number): void {
+  if (process.platform !== "win32" && typeof process.getuid === "function" && uid !== process.getuid()) {
+    throw new Error("log path must be owned by the current user");
+  }
+}
+
+function isWindowsReparsePoint(target: string): boolean {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  const escaped = target.replaceAll("'", "''");
+  const output = execFileSync("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+    `$item = Get-Item -LiteralPath '${escaped}' -Force; if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { 'true' } else { 'false' }`,
+  ], { encoding: "utf8", windowsHide: true });
+  return output.trim() === "true";
+}
+
+function assertWindowsAcl(target: string): void {
+  const current = currentWindowsIdentity();
+  const output = execFileSync("icacls", [target], { encoding: "utf8", windowsHide: true });
+  const identities: string[] = [];
+  for (const rawLine of output.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("Successfully processed") || line.startsWith("Failed processing")) {
+      continue;
+    }
+    const entry = rawLine.startsWith(target) ? rawLine.slice(target.length).trim() : line;
+    const separator = entry.indexOf(":(");
+    if (separator > 0) {
+      identities.push(entry.slice(0, separator).toLowerCase());
+    }
+  }
+  if (identities.length !== 1
+    || (identities[0] !== current.sid.toLowerCase() && identities[0] !== current.name.toLowerCase())) {
+    throw new Error("log ACL must be restricted to the current user");
+  }
+}
+
+function currentWindowsIdentity(): { readonly name: string; readonly sid: string } {
+  const identity = execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], {
+    encoding: "utf8",
+    windowsHide: true,
+  }).trim();
+  const match = /^"([^"]+)","([^"]+)"$/u.exec(identity);
+  if (match?.[1] === undefined || match[2] === undefined) {
+    throw new Error("unable to resolve current Windows identity");
+  }
+  return { name: match[1], sid: match[2] };
+}
+
+function fileSize(filePath: string): number {
+  try {
+    return statSync(filePath).size;
+  } catch (error: unknown) {
+    if (isNotFound(error)) {
+      return 0;
+    }
+    throw error;
+  }
+}
+
+function pathExists(filePath: string): boolean {
+  try {
+    statSync(filePath);
+    return true;
+  } catch (error: unknown) {
+    if (isNotFound(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function unlinkIfExists(filePath: string): void {
+  try {
+    unlinkSync(filePath);
+  } catch (error: unknown) {
+    if (!isNotFound(error)) {
+      throw error;
+    }
+  }
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}

@@ -303,6 +303,18 @@ describe("RM-18 CLI commands", () => {
       stderr,
       pid: 123,
       now: () => new Date("2026-09-02T00:00:00.000Z"),
+      daemonRuntimeDependencies: {
+        pid: 123,
+        now: () => new Date("2026-09-02T00:00:00.000Z"),
+        createSecret: () => "test-secret",
+        captureProcessIdentity: async () => "windows:1",
+        acquireIdentity: (_dataDir, identity) => ({
+          identity,
+          cleanup: () => true,
+          release() {},
+        }),
+        createLogger: () => ({ write() {} }),
+      },
       shutdownSignal: abort.signal,
       createGateway: async (startup) => ({
         fetch: async () => new Response(null, { status: 404 }),
@@ -322,6 +334,25 @@ describe("RM-18 CLI commands", () => {
     abort.abort();
     expect(await run).toBe(0);
     expect(closed).toBe(true);
+  });
+
+  it("routes lifecycle commands through the injected daemon controller", async () => {
+    const controller = {
+      start: vi.fn(async (startup) => ({ state: "running", managed: true, pid: 42, startedAt: "2026-09-03T00:00:00.000Z", port: startup.port, dataDir: startup.dataDir } as const)),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      status: vi.fn(),
+    };
+    const stdout = new CaptureStream();
+    expect(await runCli({
+      argv: ["--data-dir", "selected", "start", "--port", "31409"],
+      homedir: "Q:/tmp/home",
+      stdout,
+      stderr: new CaptureStream(),
+      daemonController: controller,
+    })).toBe(0);
+    expect(controller.start).toHaveBeenCalledWith(expect.objectContaining({ port: 31_409, dataDir: expect.stringContaining("selected") }), {});
+    expect(JSON.parse(stdout.chunks)).toMatchObject({ state: "running", managed: true, pid: 42 });
   });
 
   it("foreground composition registers all completed public routes without legacy fallback", async () => {
