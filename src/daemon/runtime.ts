@@ -61,7 +61,6 @@ export function createProductionDaemonController(
     processIdentity: captureProcessStartIdentity,
     spawn: async (startup) => {
       const child = spawn(execPath, [
-        "--max-old-space-size=32",
         childEntry,
         "--data-dir", startup.dataDir,
         "--port", String(startup.port),

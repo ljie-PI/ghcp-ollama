@@ -804,7 +804,8 @@ async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
   const workerPath = path.resolve("artifacts/bench/scripts/refactor/bench.js");
   const { stdout, stderr } = await execFileAsync(process.execPath, [
     "--jitless",
-    "--max-old-space-size=32",
+    "--optimize-for-size",
+    "--gc-global",
     "--expose-gc",
     workerPath,
     "__worker",
@@ -921,13 +922,12 @@ function idleLaunchArgs(workerPath: string): string[] {
     return [
       "--jitless",
       "--optimize-for-size",
-      "--max-old-space-size=32",
       "--gc-global",
       "--expose-gc",
       workerPath,
     ];
   }
-  return ["--jitless", "--max-old-space-size=32", "--expose-gc", workerPath];
+  return ["--jitless", "--optimize-for-size", "--gc-global", "--expose-gc", workerPath];
 }
 
 function idleWorkerSource(): string {

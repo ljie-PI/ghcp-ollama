@@ -21,7 +21,7 @@ The package installs one executable: `ghcg`.
 Run in the foreground:
 
 ```bash
-NODE_OPTIONS=--max-old-space-size=32 ghcg serve
+ghcg serve
 ```
 
 Or start one detached, self-managed daemon:
@@ -32,8 +32,6 @@ ghcg status
 ghcg restart
 ghcg stop
 ```
-
-Detached mode applies the verified 32 MiB V8 old-space limit automatically. Use the shown `NODE_OPTIONS` setting for the same lightweight memory profile in foreground mode.
 
 The listener is always `127.0.0.1`. The default port is `31400`. A different startup port can be selected only for `serve` or `start`:
 
