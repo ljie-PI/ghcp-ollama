@@ -3,6 +3,7 @@ import { AccountDirectoryError, type AccountSummary } from "../../accounts/accou
 import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_flow.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import type { NormalizedModelInfo } from "../../copilot/model_metadata.js";
 import type { RuntimeConfigStore } from "../../config/runtime_config.js";
 import { isRuntimeConfigKey, readRuntimeConfigNumber, RUNTIME_CONFIG_RANGES, RuntimeConfigError, withRuntimeConfigNumber } from "../../config/runtime_config.js";
 import type { RuntimeConfigSnapshot } from "../../config/schema.js";
@@ -29,6 +30,7 @@ export interface CommandDispatcherDependencies {
     signal: AbortSignal,
   ) => Readonly<{ revision: number; config: RuntimeConfigSnapshot }>;
   readonly invalidateAccountCaches?: (accountId: string) => void;
+  readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
 }
 
 export class CommandDispatcher {
@@ -129,6 +131,7 @@ export class CommandDispatcher {
         accountId,
         catalog,
         this.dependencies.directory.preferences.get(accountId),
+        this.dependencies.modelMetadata,
       ) as ControlOperationMap[Operation]["result"];
     }
     case "models.current": {

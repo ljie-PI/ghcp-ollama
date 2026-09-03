@@ -80,6 +80,30 @@ describe("RM-19 daemon runtime listener", () => {
     expect(events).toEqual(["cleanup", "release"]);
   });
 
+  it("cleans and releases its published identity when logger construction fails", async () => {
+    const events: string[] = [];
+    await expect(runDaemonRuntime({
+      startup: parseStartupConfig(["--data-dir", "runtime-logger-failure"], {}),
+      env: {},
+      managed: true,
+      shutdownSignal: new AbortController().signal,
+      stderr: { write: () => undefined },
+      composeGateway: async () => { throw new Error("must not compose"); },
+      dependencies: {
+        pid: 123,
+        captureProcessIdentity: async () => "windows:1",
+        createSecret: () => "secret",
+        acquireIdentity: (_dataDir, identity) => ({
+          identity,
+          cleanup: () => { events.push("cleanup"); return true; },
+          release: () => { events.push("release"); },
+        }),
+        createLogger: () => { throw new Error("logger failed"); },
+      },
+    })).rejects.toThrow("logger failed");
+    expect(events).toEqual(["cleanup", "release"]);
+  });
+
   it("does not report listening until the server emits listening", async () => {
     const server = fakeServer();
     const gateway = await createGateway({

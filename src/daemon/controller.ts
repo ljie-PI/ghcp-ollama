@@ -57,7 +57,7 @@ interface DaemonInspection {
 }
 
 interface InspectionContext extends DaemonLifecycleContext {
-  readonly timeoutMs?: number;
+  readonly deadlineMs?: number;
 }
 
 export class DaemonController {
@@ -77,20 +77,29 @@ export class DaemonController {
     context.signal?.throwIfAborted();
     let identity: DaemonIdentity | null;
     try {
-      identity = await this.dependencies.identityFile.read(resolvedDataDir);
-    } catch (_error: unknown) {
+      identity = await this.runBeforeDeadline(
+        () => this.dependencies.identityFile.read(resolvedDataDir),
+        context.deadlineMs,
+        context.signal,
+      );
+    } catch (error: unknown) {
+      rethrowCancellation(error, context.signal);
       throw new CliError("security_error");
     }
     if (identity === null) {
       return { result: emptyResult("stopped", resolvedDataDir), identity };
     }
 
-    const processState = await this.readProcessIdentity(identity, context.signal);
+    const processState = await this.readProcessIdentity(identity, context.signal, context.deadlineMs);
     if (processState.kind === "unknown" || processState.kind === "different") {
       return { result: identityResult("conflict", identity, resolvedDataDir), identity };
     }
     if (processState.kind === "dead") {
-      const removed = await this.dependencies.identityFile.remove(resolvedDataDir, identity);
+      const removed = await this.runBeforeDeadline(
+        () => this.dependencies.identityFile.remove(resolvedDataDir, identity),
+        context.deadlineMs,
+        context.signal,
+      );
       return {
         result: identityResult(removed ? "stale" : "conflict", identity, resolvedDataDir),
         identity,
@@ -98,10 +107,16 @@ export class DaemonController {
     }
 
     try {
-      const response = await this.dependencies.controlRequest(identity, "GET", STATUS_PATH, {
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
-        ...(context.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
-      });
+      const response = await this.runBeforeDeadline(
+        () => this.dependencies.controlRequest(identity, "GET", STATUS_PATH, {
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+          ...(context.deadlineMs === undefined
+            ? {}
+            : { timeoutMs: remainingMs(context.deadlineMs, this.dependencies.nowMs()) }),
+        }),
+        context.deadlineMs,
+        context.signal,
+      );
       return {
         result: identityResult(validControlResponse(response, identity, true) ? "running" : "conflict", identity, resolvedDataDir),
         identity,
@@ -140,7 +155,7 @@ export class DaemonController {
     try {
       existing = (await this.inspect(startup.dataDir, {
         ...context,
-        timeoutMs: remainingMs(deadline, this.dependencies.nowMs()),
+        deadlineMs: deadline,
       })).result;
     } catch (error: unknown) {
       if (isDeadlineTimeout(error)) {
@@ -156,20 +171,28 @@ export class DaemonController {
     if (this.dependencies.nowMs() >= deadline) {
       return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
     }
-    const child = await this.dependencies.spawn(startup);
+    const child = await this.runBeforeDeadline(
+      () => this.dependencies.spawn(startup),
+      deadline,
+      context.signal,
+    );
     let spawned: ProcessIdentityReference | null = null;
     try {
-      const spawnedStartIdentity = await withDeadline(
-        this.dependencies.processIdentity(child.pid),
-        remainingMs(deadline, this.dependencies.nowMs()),
+      const spawnedStartIdentity = await this.runBeforeDeadline(
+        () => this.dependencies.processIdentity(child.pid),
+        deadline,
         context.signal,
       );
       if (spawnedStartIdentity !== null) {
         spawned = { pid: child.pid, processStartIdentity: spawnedStartIdentity };
       }
       while (this.dependencies.nowMs() < deadline) {
-        await this.dependencies.delay(
-          Math.min(POLL_INTERVAL_MS, remainingMs(deadline, this.dependencies.nowMs())),
+        await this.runBeforeDeadline(
+          () => this.dependencies.delay(
+            Math.min(POLL_INTERVAL_MS, remainingMs(deadline, this.dependencies.nowMs())),
+            context.signal,
+          ),
+          deadline,
           context.signal,
         );
         const timeoutMs = remainingMs(deadline, this.dependencies.nowMs());
@@ -177,7 +200,7 @@ export class DaemonController {
           break;
         }
         try {
-          const inspection = await this.inspect(startup.dataDir, { ...context, timeoutMs });
+          const inspection = await this.inspect(startup.dataDir, { ...context, deadlineMs: deadline });
           if (inspection.result.state === "running") {
             return inspection.result;
           }
@@ -205,7 +228,16 @@ export class DaemonController {
     context: Readonly<DaemonLifecycleContext> = {},
   ): Promise<CliLifecycleResult> {
     const resolvedDataDir = path.resolve(dataDir);
-    const inspection = await this.inspect(resolvedDataDir, context);
+    const graceDeadline = this.dependencies.nowMs() + STOP_TIMEOUT_MS;
+    let inspection: DaemonInspection;
+    try {
+      inspection = await this.inspect(resolvedDataDir, { ...context, deadlineMs: graceDeadline });
+    } catch (error: unknown) {
+      if (isDeadlineTimeout(error)) {
+        return identityResult("unreachable", await this.readIdentityOrNull(resolvedDataDir), resolvedDataDir);
+      }
+      throw error;
+    }
     const current = inspection.result;
     if (current.state !== "running") {
       return current;
@@ -219,35 +251,66 @@ export class DaemonController {
     }
 
     try {
-      const response = await this.dependencies.controlRequest(identity, "POST", STOP_PATH, {
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
-      });
+      const response = await this.runBeforeDeadline(
+        () => this.dependencies.controlRequest(identity, "POST", STOP_PATH, {
+          ...(context.signal === undefined ? {} : { signal: context.signal }),
+          timeoutMs: remainingMs(graceDeadline, this.dependencies.nowMs()),
+        }),
+        graceDeadline,
+        context.signal,
+      );
       if (!validControlResponse(response, identity, false)) {
         return identityResult("conflict", identity, resolvedDataDir);
       }
     } catch (error: unknown) {
-      rethrowCancellation(error, context.signal);
-      return identityResult("unreachable", identity, resolvedDataDir);
+      if (!isDeadlineTimeout(error)) {
+        rethrowCancellation(error, context.signal);
+        return identityResult("unreachable", identity, resolvedDataDir);
+      }
     }
 
-    for (let elapsed = 0; elapsed < STOP_TIMEOUT_MS; elapsed += POLL_INTERVAL_MS) {
-      await this.dependencies.delay(POLL_INTERVAL_MS, context.signal);
-      const processState = await this.readProcessIdentity(identity, context.signal);
+    while (this.dependencies.nowMs() < graceDeadline) {
+      const remaining = remainingMs(graceDeadline, this.dependencies.nowMs());
+      const delayMs = remaining <= POLL_INTERVAL_MS ? 0 : POLL_INTERVAL_MS;
+      if (delayMs > 0) {
+        await this.runBeforeDeadline(
+          () => this.dependencies.delay(delayMs, context.signal),
+          graceDeadline,
+          context.signal,
+        );
+      }
+      let processState: { readonly kind: "same" | "different" | "dead" | "unknown" };
+      try {
+        processState = await this.readProcessIdentity(identity, context.signal, graceDeadline);
+      } catch (error: unknown) {
+        if (isDeadlineTimeout(error)) {
+          return identityResult("unreachable", identity, resolvedDataDir);
+        }
+        throw error;
+      }
       if (processState.kind === "dead") {
-        await this.dependencies.identityFile.remove(resolvedDataDir, identity);
+        await this.runBeforeDeadline(
+          () => this.dependencies.identityFile.remove(resolvedDataDir, identity),
+          graceDeadline,
+          context.signal,
+        );
         return emptyResult("stopped", resolvedDataDir);
       }
       if (processState.kind !== "same") {
         return identityResult("conflict", identity, resolvedDataDir);
       }
+      if (remainingMs(graceDeadline, this.dependencies.nowMs()) <= POLL_INTERVAL_MS) {
+        break;
+      }
     }
 
-    const fresh = await this.readProcessIdentity(identity, context.signal);
-    if (fresh.kind !== "same") {
-      return identityResult(fresh.kind === "dead" ? "stale" : "conflict", identity, resolvedDataDir);
-    }
-    await this.dependencies.terminate(identity);
-    const afterTerminate = await this.waitForTermination(identity, undefined);
+    const forceDeadline = this.dependencies.nowMs() + FORCE_STOP_TIMEOUT_MS;
+    await this.runBeforeDeadline(
+      () => this.dependencies.terminate(identity),
+      forceDeadline,
+      undefined,
+    );
+    const afterTerminate = await this.waitForTermination(identity, undefined, forceDeadline);
     if (afterTerminate.kind === "dead") {
       await this.dependencies.identityFile.remove(resolvedDataDir, identity);
       return emptyResult("stopped", resolvedDataDir);
@@ -273,13 +336,18 @@ export class DaemonController {
     if (spawned === null) {
       return;
     }
-    const fresh = await this.readProcessIdentity(spawned, undefined);
+    const forceDeadline = this.dependencies.nowMs() + FORCE_STOP_TIMEOUT_MS;
+    const fresh = await this.readProcessIdentity(spawned, undefined, forceDeadline);
     if (fresh.kind !== "same") {
       await this.removeSpawnedIdentityIfOwned(dataDir, spawned);
       return;
     }
-    await this.dependencies.terminate(spawned);
-    const afterTerminate = await this.waitForTermination(spawned, undefined);
+    await this.runBeforeDeadline(
+      () => this.dependencies.terminate(spawned),
+      forceDeadline,
+      undefined,
+    );
+    const afterTerminate = await this.waitForTermination(spawned, undefined, forceDeadline);
     if (afterTerminate.kind === "dead") {
       await this.removeSpawnedIdentityIfOwned(dataDir, spawned);
     }
@@ -300,10 +368,10 @@ export class DaemonController {
   private async waitForTermination(
     identity: Readonly<ProcessIdentityReference>,
     signal: AbortSignal | undefined,
+    deadline: number,
   ): Promise<{ readonly kind: "same" | "different" | "dead" | "unknown" }> {
-    const deadline = this.dependencies.nowMs() + FORCE_STOP_TIMEOUT_MS;
     for (;;) {
-      const state = await this.readProcessIdentity(identity, signal);
+      const state = await this.readProcessIdentity(identity, signal, deadline);
       if (state.kind !== "same") {
         return state;
       }
@@ -311,7 +379,14 @@ export class DaemonController {
       if (remaining === 0) {
         return state;
       }
-      await this.dependencies.delay(Math.min(POLL_INTERVAL_MS, remaining), signal);
+      await this.runBeforeDeadline(
+        () => this.dependencies.delay(Math.min(POLL_INTERVAL_MS, remaining), signal),
+        deadline,
+        signal,
+      );
+      if (this.dependencies.nowMs() >= deadline) {
+        return state;
+      }
     }
   }
 
@@ -326,17 +401,39 @@ export class DaemonController {
   private async readProcessIdentity(
     identity: Readonly<ProcessIdentityReference>,
     signal: AbortSignal | undefined,
+    deadline?: number,
   ): Promise<{ readonly kind: "same" | "different" | "dead" | "unknown" }> {
     signal?.throwIfAborted();
     try {
-      const actual = await this.dependencies.processIdentity(identity.pid);
+      const actual = await this.runBeforeDeadline(
+        () => this.dependencies.processIdentity(identity.pid),
+        deadline,
+        signal,
+      );
       if (actual === null) {
         return { kind: "dead" };
       }
       return { kind: actual === identity.processStartIdentity ? "same" : "different" };
-    } catch (_error: unknown) {
+    } catch (error: unknown) {
+      rethrowCancellation(error, signal);
       return { kind: "unknown" };
     }
+  }
+
+  private async runBeforeDeadline<T>(
+    work: () => Promise<T>,
+    deadline: number | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<T> {
+    signal?.throwIfAborted();
+    if (deadline === undefined) {
+      return await work();
+    }
+    const result = await withDeadline(work, remainingMs(deadline, this.dependencies.nowMs()), signal);
+    if (this.dependencies.nowMs() > deadline) {
+      throw new CliError("timeout");
+    }
+    return result;
   }
 }
 
@@ -399,7 +496,7 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function withDeadline<T>(work: Promise<T>, timeoutMs: number, parent?: AbortSignal): Promise<T> {
+async function withDeadline<T>(work: () => Promise<T>, timeoutMs: number, parent?: AbortSignal): Promise<T> {
   if (timeoutMs <= 0) {
     throw new CliError("timeout");
   }
@@ -408,7 +505,7 @@ async function withDeadline<T>(work: Promise<T>, timeoutMs: number, parent?: Abo
   const signal = parent === undefined ? timeout.signal : AbortSignal.any([parent, timeout.signal]);
   try {
     return await Promise.race([
-      work,
+      work(),
       new Promise<never>((_resolve, reject) => {
         signal.addEventListener("abort", () => reject(signal.reason), { once: true });
       }),

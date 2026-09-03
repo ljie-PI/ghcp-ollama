@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { JsonlLogger, LOG_FILE_BYTES, type WindowsLogSecurity } from "../../../src/daemon/logger.js";
+import { JsonlLogger, LOG_FILE_BYTES, StderrLogger, type WindowsLogSecurity } from "../../../src/daemon/logger.js";
 
 const testWindowsSecurity: WindowsLogSecurity = {
   restrict() {},
@@ -12,6 +12,20 @@ const testWindowsSecurity: WindowsLogSecurity = {
 };
 
 describe("RM-19 daemon JSONL logger", () => {
+  it("uses the startup threshold while preserving error lifecycle records", async () => {
+    const chunks: string[] = [];
+    const logger = new StderrLogger({ write: (chunk) => chunks.push(chunk) }, () => 1, "warn");
+    logger.write({ level: "trace", category: "trace_event" });
+    logger.write({ level: "debug", category: "debug_event" });
+    logger.write({ level: "info", category: "gateway_started" });
+    logger.write({ level: "warn", category: "warning_event" });
+    logger.write({ level: "error", category: "shutdown_timeout" });
+    expect(chunks.map((chunk) => JSON.parse(chunk) as { level: string; category: string })).toEqual([
+      { ts: 1, level: "warn", category: "warning_event" },
+      { ts: 1, level: "error", category: "shutdown_timeout" },
+    ]);
+  });
+
   it("sanitizes records, caps line size, and rotates at 10 MiB", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-log-"));
     const dir = path.join(root, "logs");

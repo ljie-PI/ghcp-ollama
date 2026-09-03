@@ -3,6 +3,7 @@ import path from "node:path";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
 import type { CatalogSnapshot } from "../copilot/model_catalog.js";
+import type { NormalizedModelInfo } from "../copilot/model_metadata.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import { DaemonIdentityFile, type DaemonIdentity } from "../daemon/identity_file.js";
@@ -604,6 +605,7 @@ export function adminModelsFromCatalog(
   accountId: string,
   catalog: CatalogSnapshot,
   preferredModel: ModelPreference | null,
+  metadata?: ReadonlyMap<string, NormalizedModelInfo>,
 ): AdminModels {
   return {
     accountId,
@@ -616,12 +618,15 @@ export function adminModelsFromCatalog(
         modelId: preferredModel.modelId,
         validity: preferredModel.validity,
       },
-    items: catalog.models.map((model) => ({
-      id: model.id,
-      name: model.name,
-      vendor: model.vendor,
-      maxInputTokens: null,
-      maxOutputTokens: null,
-    })),
+    items: catalog.models.map((model) => {
+      const modelMetadata = metadata?.get(model.id);
+      return {
+        id: model.id,
+        name: model.name,
+        vendor: model.vendor,
+        maxInputTokens: modelMetadata?.maxInputTokens ?? null,
+        maxOutputTokens: modelMetadata?.maxOutputTokens ?? null,
+      };
+    }),
   };
 }

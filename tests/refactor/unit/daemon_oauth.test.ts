@@ -3,7 +3,7 @@ import { resolveGitHubEnvironment } from "../../../src/accounts/github_environme
 import {
   DeviceOAuthError,
   HttpDeviceOAuthClient,
-} from "../../../src/daemon/runtime.js";
+} from "../../../src/accounts/device_oauth.js";
 
 const environment = resolveGitHubEnvironment("ghe.example.com");
 

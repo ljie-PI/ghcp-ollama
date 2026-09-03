@@ -44,6 +44,7 @@ const ControlCommandSchema = Type.Union([
 type ControlCommand = Static<typeof ControlCommandSchema>;
 
 export interface LocalControlIdentity {
+  readonly managed: boolean;
   readonly pid: number;
   readonly processStartIdentity: string;
   readonly instanceNonce: string;
@@ -85,6 +86,7 @@ export function createLocalControlModule(
 ): LocalControlModule {
   const identity = Object.freeze({
     pid: dependencies.identity.pid,
+    managed: dependencies.identity.managed,
     processStartIdentity: dependencies.identity.processStartIdentity,
     instanceNonce: dependencies.identity.instanceNonce,
     controlToken: dependencies.identity.controlToken,
@@ -132,6 +134,9 @@ export function createLocalControlModule(
           return success(200, { state: "running", instance }, context.requestId);
         }
         if (route === "stop") {
+          if (!identity.managed) {
+            throw new ControlFailure("instance_mismatch");
+          }
           await withAbort(Promise.resolve(dependencies.requestStop(signal)), signal);
           signal.throwIfAborted();
           return success(202, { instance }, context.requestId);

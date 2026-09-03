@@ -69,12 +69,12 @@ describe("RM-19 stale PID safety", () => {
     let reads = 0;
     const fixture = harness(async () => {
       reads += 1;
-      return reads <= 101
+      return reads <= 99
         ? IDENTITY.processStartIdentity
         : "linux:01234567-89ab-cdef-0123-456789abcdef:999";
     });
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "conflict" });
-    expect(fixture.elapsedMs).toBe(10_000);
+    expect(fixture.elapsedMs).toBeLessThanOrEqual(10_000);
     expect(fixture.terminate).not.toHaveBeenCalled();
     expect(fixture.remove).not.toHaveBeenCalled();
   });

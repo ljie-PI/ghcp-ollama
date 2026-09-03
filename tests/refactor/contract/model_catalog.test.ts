@@ -43,6 +43,29 @@ describe("RM-08 CAPI parse and cache", () => {
       max_output_tokens: 128_000,
       supported_endpoints: ["/v1/responses"],
     });
+    expect(productionModelInfoLookup.get("claude-opus-4.6-fast")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 16_000,
+      supported_endpoints: ["/v1/chat/completions"],
+    });
+    expect(productionModelInfoLookup.get("gemini-3-pro-preview")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+    });
+    expect(productionModelInfoLookup.get("gpt-5.3-codex")).toEqual({
+      mode: "responses",
+      max_input_tokens: 128_000,
+      max_output_tokens: 128_000,
+      supported_endpoints: ["/v1/responses"],
+    });
+    expect(productionModelInfoLookup.get("mai-code-1-flash")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+      supported_endpoints: ["/v1/chat/completions"],
+    });
     expect(productionModelInfoLookup.get("unknown-model")).toBeNull();
   });
 

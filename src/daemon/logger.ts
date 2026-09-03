@@ -15,11 +15,20 @@ import {
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import type { LogLevel } from "../config/startup_config.js";
 import { LOG_LINE_LIMIT_BYTES, sanitizeMetadata, utf8Bytes } from "../telemetry/sanitize.js";
 
 export const LOG_FILE_BYTES = 10 * 1024 * 1024;
 export const LOG_FILE_COUNT = 5;
 export const LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const LOG_LEVEL_PRIORITY: Readonly<Record<LogLevel, number>> = {
+  trace: 0,
+  debug: 1,
+  info: 2,
+  warn: 3,
+  error: 4,
+};
 
 export interface DaemonLogger {
   write(record: Record<string, unknown>): void;
@@ -38,6 +47,7 @@ export class JsonlLogger implements DaemonLogger {
     private readonly directory: string,
     private readonly nowMs: () => number = Date.now,
     private readonly windowsSecurity: WindowsLogSecurity = DEFAULT_WINDOWS_LOG_SECURITY,
+    private readonly threshold: LogLevel = "info",
   ) {
     const existed = pathExists(directory);
     if (!existed) {
@@ -53,6 +63,9 @@ export class JsonlLogger implements DaemonLogger {
   }
 
   write(record: Record<string, unknown>): void {
+    if (!shouldWrite(record, this.threshold)) {
+      return;
+    }
     this.prune();
     const sanitized = sanitizeMetadata(record);
     const category = typeof record.category === "string" && /^[a-z0-9_]+$/u.test(record.category)
@@ -68,6 +81,7 @@ export class JsonlLogger implements DaemonLogger {
       ...(category === undefined ? {} : { category }),
       ...(managed === undefined ? {} : { managed }),
       ...(pid === undefined ? {} : { pid }),
+      ...logLevel(record),
       ...sanitized,
     });
     if (utf8Bytes(line) > LOG_LINE_LIMIT_BYTES) {
@@ -129,18 +143,36 @@ export class StderrLogger implements DaemonLogger {
   constructor(
     private readonly stream: { write(chunk: string): unknown },
     private readonly nowMs: () => number = Date.now,
+    private readonly threshold: LogLevel = "info",
   ) {}
 
   write(record: Record<string, unknown>): void {
+    if (!shouldWrite(record, this.threshold)) {
+      return;
+    }
     const category = typeof record.category === "string" && /^[a-z0-9_]+$/u.test(record.category)
       ? record.category
       : undefined;
     this.stream.write(`${JSON.stringify({
       ts: this.nowMs(),
       ...(category === undefined ? {} : { category }),
+      ...logLevel(record),
       ...sanitizeMetadata(record),
     })}\n`);
   }
+}
+
+function shouldWrite(record: Readonly<Record<string, unknown>>, threshold: LogLevel): boolean {
+  const level = isLogLevel(record.level) ? record.level : "info";
+  return LOG_LEVEL_PRIORITY[level] >= LOG_LEVEL_PRIORITY[threshold];
+}
+
+function logLevel(record: Readonly<Record<string, unknown>>): { readonly level?: LogLevel } {
+  return isLogLevel(record.level) ? { level: record.level } : {};
+}
+
+function isLogLevel(value: unknown): value is LogLevel {
+  return value === "trace" || value === "debug" || value === "info" || value === "warn" || value === "error";
 }
 
 function appendProtected(filePath: string, value: string, windowsSecurity: WindowsLogSecurity): void {

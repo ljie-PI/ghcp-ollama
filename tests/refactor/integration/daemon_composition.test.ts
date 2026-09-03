@@ -84,6 +84,13 @@ describe("RM-19 production composition", () => {
       expect(models.data).toMatchObject({
         items: [{ id: "gpt-test", maxInputTokens: 200_000, maxOutputTokens: 16_384 }],
       });
+      const cliModels = await control(gateway, "POST", "/command", {
+        operation: "models.list",
+        arguments: {},
+      });
+      expect(await cliModels.json()).toMatchObject({
+        data: { items: [{ id: "gpt-test", maxInputTokens: 200_000, maxOutputTokens: 16_384 }] },
+      });
 
       const config = defaultRuntimeConfigSnapshot();
       config.limits.requestBodyBytes = 1_048_576;

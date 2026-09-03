@@ -2,6 +2,7 @@ import path from "node:path";
 import { createAdminModule } from "./admin/routes.js";
 import type { AccountDirectory } from "./accounts/account_directory.js";
 import { DeviceFlowService } from "./accounts/device_flow.js";
+import { HttpDeviceOAuthClient } from "./accounts/device_oauth.js";
 import { FileCredentialStore, type CredentialStore } from "./accounts/credential_store.js";
 import { createCopilotEndpointDiscovery, refreshCopilotToken } from "./copilot/credential_provider.js";
 import { HttpCopilotModelsSource } from "./copilot/models_source.js";
@@ -17,7 +18,6 @@ import { defaultRuntimeConfigSnapshot, parseRuntimeConfigSnapshot, type RuntimeC
 import { parseStartupConfig, type StartupConfig } from "./config/startup_config.js";
 import { createGateway, type GatewayDependencies, type HostedGateway, type RouteRegistration } from "./gateway/create_gateway.js";
 import type { DaemonRuntimeComposition } from "./daemon/runtime.js";
-import { HttpDeviceOAuthClient } from "./daemon/runtime.js";
 import { createLocalControlModule } from "./daemon/local_control.js";
 import { closeDatabase, openDatabase } from "./persistence/database.js";
 import { embedMigration } from "./persistence/migrations.js";
@@ -288,6 +288,7 @@ export async function composeProductionDaemonGateway(
       runtimeConfig: runtime,
       updateRuntimeConfig,
       invalidateAccountCaches: (accountId) => accountCaches.invalidate(accountId),
+      ...(application.modelMetadata === undefined ? {} : { modelMetadata: application.modelMetadata }),
     });
     const control = createLocalControlModule({
       identity: composition.identity,
@@ -304,6 +305,7 @@ export async function composeProductionDaemonGateway(
         control,
         readRuntimeConfig: () => runtime.readSnapshot(),
         onShutdownTimeout: () => composition.logger.write({
+          level: "error",
           category: "shutdown_timeout",
           managed: composition.identity.managed,
           pid: composition.identity.pid,

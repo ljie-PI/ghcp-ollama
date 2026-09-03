@@ -11,6 +11,7 @@ const ORIGIN: LoopbackOrigin = "http://127.0.0.1:31400";
 const CONTROL = `${ORIGIN}/__ghcg/control/v1`;
 const BODY_LIMIT = 1_048_576;
 const identity: LocalControlIdentity = Object.freeze({
+  managed: true,
   pid: 123,
   processStartIdentity: "windows-filetime-133801632000000000",
   instanceNonce: "instance-nonce",
@@ -89,6 +90,14 @@ describe("RM-19 LocalControlModule", () => {
     });
     expect(fixture.stop).toHaveBeenCalledOnce();
     expect(fixture.stop.mock.calls[0]?.[0]).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects authenticated stop for a foreground instance without requesting shutdown", async () => {
+    const fixture = harness({ identity: { ...identity, managed: false } });
+    const response = await handle(fixture.control, "POST", "/stop");
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "instance_mismatch", message: "instance mismatch" } });
+    expect(fixture.stop).not.toHaveBeenCalled();
   });
 
   it("uses the shared Admin bootstrap seam and hides capacity or closure", async () => {
@@ -246,7 +255,10 @@ class ScriptedDispatcher implements LocalControlCommandDispatcher {
   }
 }
 
-function harness(options: { readonly dispatcher?: LocalControlCommandDispatcher } = {}) {
+function harness(options: {
+  readonly dispatcher?: LocalControlCommandDispatcher;
+  readonly identity?: LocalControlIdentity;
+} = {}) {
   const dispatcher = options.dispatcher ?? new ScriptedDispatcher();
   const admin: AdminModule = {
     handle: async () => new Response(null),
@@ -254,7 +266,7 @@ function harness(options: { readonly dispatcher?: LocalControlCommandDispatcher 
     close() {},
   };
   const stop = vi.fn(async (_signal: AbortSignal) => undefined);
-  const control = createLocalControlModule({ identity, admin, dispatcher, requestStop: stop });
+  const control = createLocalControlModule({ identity: options.identity ?? identity, admin, dispatcher, requestStop: stop });
   return { control, admin, dispatcher: dispatcher as ScriptedDispatcher, stop };
 }
 

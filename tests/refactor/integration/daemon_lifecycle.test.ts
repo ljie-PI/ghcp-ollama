@@ -160,6 +160,24 @@ describe("RM-19 DaemonController lifecycle", () => {
     expect(fixture.terminate).toHaveBeenCalledOnce();
   });
 
+  it("includes process probes and delays in the absolute readiness deadline", async () => {
+    const fixture = harness();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    let processReads = 0;
+    fixture.processIdentityOverride = async (pid) => {
+      processReads += 1;
+      if (processReads === 1) {
+        fixture.elapsedMs += 29_950;
+      }
+      return fixture.processes.get(pid) ?? null;
+    };
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    await expect(fixture.controller.start(STARTUP)).resolves.toMatchObject({ state: "unreachable" });
+    expect(fixture.elapsedMs).toBe(30_000);
+    expect(fixture.terminate).toHaveBeenCalledOnce();
+  });
+
   it("gracefully stops a managed daemon and removes identity only after process death", async () => {
     const fixture = harness({ identity: FIRST });
     fixture.onDelay = () => fixture.processes.delete(FIRST.pid);
@@ -186,10 +204,35 @@ describe("RM-19 DaemonController lifecycle", () => {
     fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
 
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped" });
-    expect(fixture.elapsedMs).toBe(10_000);
+    expect(fixture.elapsedMs).toBeLessThanOrEqual(10_000);
     expect(fixture.processReads.at(-1)).toEqual(FIRST.pid);
     expect(fixture.terminate).toHaveBeenCalledWith(FIRST);
     expect(fixture.removed).toEqual([FIRST]);
+  });
+
+  it("forces after at most 10 seconds including status, stop, probes, and delays", async () => {
+    const fixture = harness({ identity: FIRST });
+    let terminatedAt = Number.POSITIVE_INFINITY;
+    let controlCalls = 0;
+    fixture.controlRequest = async (identity, method) => {
+      fixture.elapsedMs += controlCalls === 0 ? 2_000 : 3_000;
+      controlCalls += 1;
+      return method === "GET"
+        ? { state: "running", instance: instanceOf(identity) }
+        : { instance: instanceOf(identity) };
+    };
+    fixture.processIdentityOverride = async (pid) => {
+      fixture.elapsedMs += 50;
+      return fixture.processes.get(pid) ?? null;
+    };
+    fixture.onTerminate = () => {
+      terminatedAt = fixture.elapsedMs;
+      fixture.processes.delete(FIRST.pid);
+    };
+
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped" });
+    expect(terminatedAt).toBeLessThanOrEqual(10_000);
+    expect(fixture.terminate).toHaveBeenCalledOnce();
   });
 
   it("polls after force termination and rejects a reused PID while waiting", async () => {
@@ -205,7 +248,7 @@ describe("RM-19 DaemonController lifecycle", () => {
     };
 
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "conflict" });
-    expect(fixture.elapsedMs).toBe(10_200);
+    expect(fixture.elapsedMs).toBe(10_100);
     expect(fixture.removed).toEqual([]);
   });
 
