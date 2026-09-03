@@ -350,12 +350,19 @@ function runCommand(
     child.once("error", reject);
     child.once("close", (code) => {
       if (code === null || !allowedExitCodes.includes(code)) {
-        reject(new Error(`${path.basename(command)} failed with exit code ${String(code)}`));
+        const safeArgs = args.map((arg) => path.basename(arg)).join(" ");
+        reject(new Error(
+          `${path.basename(command)} ${safeArgs} failed with exit code ${String(code)}; stdout=${safeOutput(stdout)}; stderr=${safeOutput(stderr)}`,
+        ));
       } else {
         resolve({ stdout, stderr });
       }
     });
   });
+}
+
+function safeOutput(value: string): string {
+  return value.trim().replaceAll(/[\r\n]+/gu, " ").slice(0, 1_024);
 }
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {
