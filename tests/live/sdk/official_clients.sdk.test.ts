@@ -110,14 +110,14 @@ describe("RM-22 guarded live official SDK smoke", () => {
     const response = await openai.responses.create({
       model: responsesModel,
       input: "Reply with OK.",
-      max_output_tokens: 8,
+      max_output_tokens: 16,
     });
     expect(response.id.length).toBeGreaterThan(0);
     expect(isManagedBridgeResponseId(response.id)).toBe(nativeResponsesModel === undefined);
     const stream = await openai.responses.create({
       model: responsesModel,
       input: "Reply with OK.",
-      max_output_tokens: 8,
+      max_output_tokens: 16,
       stream: true,
     });
     expect(await consumeAtLeastOne(stream)).toBeGreaterThan(0);
@@ -136,13 +136,13 @@ describe("RM-22 guarded live official SDK smoke", () => {
   it("calls Anthropic Messages non-stream, stream, and cancellation", async () => {
     const message = await anthropic.messages.create({
       model: chatModel,
-      max_tokens: 4,
+      max_tokens: 8,
       messages: [{ role: "user", content: "Reply with OK." }],
     });
     expect(message.content.length).toBeGreaterThan(0);
     const stream = await anthropic.messages.create({
       model: chatModel,
-      max_tokens: 4,
+      max_tokens: 8,
       messages: [{ role: "user", content: "Reply with OK." }],
       stream: true,
     });
@@ -161,21 +161,21 @@ describe("RM-22 guarded live official SDK smoke", () => {
     const response = await ollama.chat({
       model: chatModel,
       messages: [{ role: "user", content: "Reply with OK." }],
-      options: { num_predict: 4 },
+      options: { num_predict: 64 },
       stream: false,
     });
     expect(response.done).toBe(true);
     const stream = await ollama.chat({
       model: chatModel,
       messages: [{ role: "user", content: "Reply with OK." }],
-      options: { num_predict: 4 },
+      options: { num_predict: 64 },
       stream: true,
     });
     expect(await consumeAtLeastOne(stream)).toBeGreaterThan(0);
     const cancelled = await ollama.chat({
       model: chatModel,
       messages: [{ role: "user", content: "Count from one to five." }],
-      options: { num_predict: 8 },
+      options: { num_predict: 64 },
       stream: true,
     });
     await expectCancelledStream(cancelled, () => cancelled.abort());
