@@ -144,6 +144,22 @@ describe("RM-19 DaemonController lifecycle", () => {
     });
   });
 
+  it("retries the spawned child identity probe before failed-start cleanup", async () => {
+    const fixture = harness();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    let reads = 0;
+    fixture.processIdentityOverride = async (pid) => {
+      reads += 1;
+      if (reads === 1) throw new Error("temporary probe failure");
+      return fixture.processes.get(pid) ?? null;
+    };
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    await expect(fixture.controller.start(STARTUP)).resolves.toMatchObject({ state: "unreachable" });
+    expect(reads).toBeGreaterThan(1);
+    expect(fixture.terminate).toHaveBeenCalledOnce();
+  });
+
   it("bounds each readiness status call by the absolute 30 second deadline", async () => {
     const fixture = harness();
     fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
@@ -264,6 +280,13 @@ describe("RM-19 DaemonController lifecycle", () => {
     expect(fixture.removed).toEqual([]);
   });
 
+  it("normalizes a proven stale identity to idempotent stopped", async () => {
+    const fixture = harness({ identity: FIRST });
+    fixture.processes.delete(FIRST.pid);
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped", pid: null });
+    expect(fixture.removed).toEqual([FIRST]);
+  });
+
   it("implements restart as verified stop followed by start with a new start identity and nonce", async () => {
     const fixture = harness({ identity: FIRST, spawnedPid: SECOND.pid });
     let delayCount = 0;
@@ -284,6 +307,22 @@ describe("RM-19 DaemonController lifecycle", () => {
     });
     expect(fixture.spawn).toHaveBeenCalledOnce();
     expect(fixture.controlCalls.at(-1)?.identity).toEqual(SECOND);
+  });
+
+  it("restarts on the verified daemon identity port", async () => {
+    const identity = { ...FIRST, port: 31_409 };
+    const fixture = harness({ identity, spawnedPid: SECOND.pid });
+    let delayCount = 0;
+    fixture.onDelay = () => {
+      delayCount += 1;
+      if (delayCount === 1) fixture.processes.delete(identity.pid);
+      else {
+        fixture.identity = { ...SECOND, port: identity.port };
+        fixture.processes.set(SECOND.pid, SECOND.processStartIdentity);
+      }
+    };
+    await fixture.controller.restart(STARTUP);
+    expect(fixture.spawn).toHaveBeenCalledWith(expect.objectContaining({ port: 31_409 }));
   });
 });
 

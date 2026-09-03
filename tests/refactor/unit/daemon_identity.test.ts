@@ -13,6 +13,7 @@ import {
   captureProcessStartIdentity,
   isSameProcess,
   parseLinuxProcStatStartTicks,
+  terminateProcessIfMatching,
   type ProcessIdentityDependencies,
 } from "../../../src/daemon/process_identity.js";
 
@@ -237,6 +238,21 @@ describe("RM-19 process start identity", () => {
       args: ["-o", "lstart=", "-p", "4242"],
       env: { LC_ALL: "C", TZ: "UTC" },
     });
+  });
+
+  it("performs Linux identity verification and termination in one command", async () => {
+    const calls: string[] = [];
+    const dependencies: ProcessIdentityDependencies = {
+      ...processDependencies("linux"),
+      runCommand: async (file, args) => {
+        calls.push(`${file} ${args.join(" ")}`);
+        return "";
+      },
+    };
+    await expect(terminateProcessIfMatching(4242, identity.processStartIdentity, dependencies)).resolves.toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("kill -KILL");
+    expect(calls[0]).toContain("987654");
   });
 
   it("matches the complete process-start identity and treats absence separately", async () => {

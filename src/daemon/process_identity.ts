@@ -85,12 +85,63 @@ export async function terminateProcessIfMatching(
       throw new ProcessIdentityError("unable to terminate verified Windows process", { cause: error });
     }
   }
-  const current = await captureProcessStartIdentity(pid, dependencies);
-  if (current !== expected) {
-    return false;
+  if (dependencies.platform === "linux") {
+    const match = /^linux:([0-9a-f-]{36}):(\d+)$/u.exec(expected);
+    if (match?.[1] === undefined || match[2] === undefined) {
+      return false;
+    }
+    const script = [
+      `pid='${pid}'`,
+      `expected_boot='${match[1]}'`,
+      `expected_ticks='${match[2]}'`,
+      "boot=$(tr '[:upper:]' '[:lower:]' < /proc/sys/kernel/random/boot_id) || exit 3",
+      "stat=$(cat \"/proc/$pid/stat\") || exit 3",
+      "rest=${stat##*) }",
+      "ticks=$(printf '%s\\n' \"$rest\" | awk '{print $20}')",
+      "[ \"$boot\" = \"$expected_boot\" ] && [ \"$ticks\" = \"$expected_ticks\" ] || exit 4",
+      "kill -KILL \"$pid\"",
+    ].join("; ");
+    return await runVerifiedTermination("sh", ["-c", script], dependencies);
   }
-  process.kill(pid, "SIGKILL");
-  return true;
+  if (dependencies.platform === "darwin") {
+    const timestamp = /^macos:(.+)$/u.exec(expected)?.[1];
+    if (timestamp === undefined) {
+      return false;
+    }
+    const script = [
+      `pid='${pid}'`,
+      "actual=$(LC_ALL=C TZ=UTC ps -o lstart= -p \"$pid\") || exit 3",
+      `expected='${shellLiteral(timestamp)}'`,
+      "actual_epoch=$(LC_ALL=C TZ=UTC date -j -f '%a %b %e %T %Y' \"$actual\" '+%Y-%m-%dT%H:%M:%SZ') || exit 3",
+      "[ \"$actual_epoch\" = \"$expected\" ] || exit 4",
+      "kill -KILL \"$pid\"",
+    ].join("; ");
+    return await runVerifiedTermination("sh", ["-c", script], dependencies);
+  }
+  return false;
+}
+
+async function runVerifiedTermination(
+  file: string,
+  args: readonly string[],
+  dependencies: ProcessIdentityDependencies,
+): Promise<boolean> {
+  try {
+    await dependencies.runCommand(file, args, {});
+    return true;
+  } catch (error: unknown) {
+    if (commandExitCode(error) === 3 || commandExitCode(error) === 4) {
+      return false;
+    }
+    throw new ProcessIdentityError("unable to terminate verified process", { cause: error });
+  }
+}
+
+function shellLiteral(value: string): string {
+  if (!/^[A-Za-z0-9:._+-]+$/u.test(value)) {
+    throw new ProcessIdentityError("invalid process identity");
+  }
+  return value;
 }
 
 export function parseLinuxProcStatStartTicks(stat: string, expectedPid: number): string {

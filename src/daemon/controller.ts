@@ -181,15 +181,24 @@ export class DaemonController {
     );
     let spawned: ProcessIdentityReference | null = null;
     try {
-      const spawnedStartIdentity = await this.runBeforeDeadline(
-        () => this.dependencies.processIdentity(child.pid),
-        deadline,
-        context.signal,
-      );
-      if (spawnedStartIdentity !== null) {
-        spawned = { pid: child.pid, processStartIdentity: spawnedStartIdentity };
-      }
       while (this.dependencies.nowMs() < deadline) {
+        if (spawned === null) {
+          try {
+            const captured = await this.runBeforeDeadline(
+              () => this.dependencies.processIdentity(child.pid),
+              deadline,
+              context.signal,
+            );
+            if (captured !== null) {
+              spawned = { pid: child.pid, processStartIdentity: captured };
+            }
+          } catch (error: unknown) {
+            if (isDeadlineTimeout(error)) {
+              break;
+            }
+            rethrowCancellation(error, context.signal);
+          }
+        }
         await this.runBeforeDeadline(
           () => this.dependencies.delay(
             Math.min(POLL_INTERVAL_MS, remainingMs(deadline, this.dependencies.nowMs())),
@@ -242,6 +251,9 @@ export class DaemonController {
       throw error;
     }
     const current = inspection.result;
+    if (current.state === "stale") {
+      return emptyResult("stopped", resolvedDataDir);
+    }
     if (current.state !== "running") {
       return current;
     }
@@ -325,11 +337,15 @@ export class DaemonController {
     startup: Readonly<StartupConfig>,
     context: Readonly<DaemonLifecycleContext> = {},
   ): Promise<CliLifecycleResult> {
+    const inspection = await this.inspect(startup.dataDir, context);
+    const effectiveStartup = inspection.identity === null
+      ? startup
+      : { ...startup, port: inspection.identity.port };
     const stopped = await this.stop(startup.dataDir, context);
     if (stopped.state !== "stopped" && stopped.state !== "stale") {
       return stopped;
     }
-    return await this.start(startup, context);
+    return await this.start(effectiveStartup, context);
   }
 
   private async cleanupFailedStart(
