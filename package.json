@@ -46,7 +46,7 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:golden": "node tests/integration/utils/golden_generator.js",
-    "build:refactor": "node scripts/refactor/bootstrap.mjs --check && tsc -p tsconfig.refactor.json && node scripts/refactor/clean_admin_build.mjs && vite build --config web/vite.config.ts && node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts",
+    "build:refactor": "node scripts/refactor/bootstrap.mjs --check && tsc -p tsconfig.refactor.json && node scripts/refactor/bootstrap.mjs scripts/refactor/clean_admin_build.ts && vite build --config web/vite.config.ts && node scripts/refactor/bootstrap.mjs scripts/refactor/generate_migrations.ts",
     "typecheck:refactor": "node scripts/refactor/bootstrap.mjs --check && tsc -p tsconfig.refactor.json --noEmit && svelte-check --tsconfig web/tsconfig.json",
     "lint:refactor": "node scripts/refactor/bootstrap.mjs --check && eslint --no-error-on-unmatched-pattern --config eslint.config.js \"src/**/*.ts\" \"scripts/refactor/**/*.{ts,mjs}\" \"tests/refactor/unit/**/*.ts\" \"tests/refactor/contract/**/*.ts\" \"tests/refactor/integration/**/*.ts\" \"tests/refactor/performance/**/*.ts\" \"web/**/*.{ts,svelte}\" \"vitest.refactor.config.ts\" \"playwright.config.ts\"",
     "test:refactor": "node scripts/refactor/bootstrap.mjs --check && vitest run --config vitest.refactor.config.ts",
@@ -62,7 +62,7 @@
     "typecheck:sdk:refactor": "node scripts/refactor/bootstrap.mjs scripts/refactor/require_opt_in.ts GHC_GATEWAY_SDK_TESTS && tsc -p tsconfig.sdk.refactor.json --noEmit",
     "web:dev": "vite --config web/vite.config.ts",
     "web:typecheck": "svelte-check --tsconfig web/tsconfig.json",
-    "web:build": "node scripts/refactor/clean_admin_build.mjs && vite build --config web/vite.config.ts"
+    "web:build": "node scripts/refactor/bootstrap.mjs scripts/refactor/clean_admin_build.ts && vite build --config web/vite.config.ts"
   },
   "bin": {
     "ghcpo": "./src/ghcpo.js",

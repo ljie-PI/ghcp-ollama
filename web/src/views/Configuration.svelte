@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ApiError, errorMessage, type AdminClient } from "../api.js";
+  import type { RuntimeConfigKey } from "../../../src/config/schema.js";
   import type { AdminRuntimeConfig } from "../types.js";
 
   type RuntimeConfig = AdminRuntimeConfig["config"];
   interface ConfigField {
-    readonly key: string;
+    readonly key: RuntimeConfigKey;
     readonly label: string;
     readonly description: string;
     readonly read: (config: RuntimeConfig) => number;
@@ -19,7 +20,7 @@
   let failure = $state("");
   let message = $state("");
 
-  const fields: readonly ConfigField[] = [
+  const fields = [
     field("limits.requestBodyBytes", "Request body", "Maximum inbound JSON bytes", (config) => config.limits.requestBodyBytes, (config, value) => config.limits.requestBodyBytes = value),
     field("limits.sseEventBytes", "SSE event", "Maximum upstream event bytes", (config) => config.limits.sseEventBytes, (config, value) => config.limits.sseEventBytes = value),
     field("limits.nonstreamBodyBytes", "Non-stream body", "Maximum buffered upstream bytes", (config) => config.limits.nonstreamBodyBytes, (config, value) => config.limits.nonstreamBodyBytes = value),
@@ -35,7 +36,10 @@
     field("history.ttlDays", "History TTL", "Responses bridge retention", (config) => config.history.ttlDays, (config, value) => config.history.ttlDays = value),
     field("usage.retentionDays", "Usage retention", "Hourly aggregate retention", (config) => config.usage.retentionDays, (config, value) => config.usage.retentionDays = value),
     field("events.retentionDays", "Event retention", "Operational event retention", (config) => config.events.retentionDays, (config, value) => config.events.retentionDays = value),
-  ];
+  ] satisfies readonly ConfigField[];
+  type MissingConfigKey = Exclude<RuntimeConfigKey, typeof fields[number]["key"]>;
+  const allConfigKeysCovered: MissingConfigKey extends never ? true : never = true;
+  void allConfigKeysCovered;
   const groups = ["limits", "admission", "timeouts", "accounts", "history", "usage", "events"] as const;
 
   onMount(load);
@@ -53,7 +57,7 @@
   }
 
   function field(
-    key: string,
+    key: RuntimeConfigKey,
     label: string,
     description: string,
     read: ConfigField["read"],

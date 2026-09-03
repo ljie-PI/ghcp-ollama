@@ -141,9 +141,9 @@
         </dl>
         <button
           onclick={() => prefer(model.id)}
-          disabled={busy === model.id || data.preferredModel?.modelId === model.id}
+          disabled={busy === model.id || (data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid")}
         >
-          {data.preferredModel?.modelId === model.id ? "Preferred" : "Set preferred"}
+          {data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid" ? "Preferred" : "Set preferred"}
         </button>
       </article>
     {/each}

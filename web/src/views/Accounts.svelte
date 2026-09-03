@@ -71,7 +71,7 @@
       await load();
     } catch (error: unknown) {
       failure = errorMessage(error);
-      if (error instanceof ApiError && error.status === 409) await load(true);
+      await load(true);
     } finally {
       busy = "";
     }

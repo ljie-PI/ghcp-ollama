@@ -36,10 +36,10 @@ Windows x64 evidence on Node `v24.13.0`:
 
 | Measurement | Result |
 | --- | ---: |
-| npm package files | 114 |
-| tarball bytes | 329,035 |
-| unpacked bytes | 1,271,152 |
-| required Admin asset bytes | 82,774 |
+| npm package files | 109 |
+| tarball bytes | 205,499 |
+| unpacked bytes | 924,599 |
+| required Admin asset bytes | 83,761 |
 | required Admin assets packaged | 4 of 4 |
 
 The generated hashes and filenames remain in `dist-refactor/pack-smoke.json`; they are intentionally generated from the current build rather than copied into this handoff.
