@@ -268,6 +268,12 @@ describe("RM-19 DaemonController lifecycle", () => {
     expect(fixture.removed).toEqual([]);
   });
 
+  it("treats owned identity cleanup as stopped while the OS process record settles", async () => {
+    const fixture = harness({ identity: FIRST });
+    fixture.onTerminate = () => { fixture.identity = null; };
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped", pid: null });
+  });
+
   it("rejects stop for foreground serve and leaves the process untouched", async () => {
     const fixture = harness({ identity: { ...FIRST, managed: false } });
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({

@@ -26,7 +26,8 @@ export async function runManagedChild(argv = process.argv.slice(2), env = proces
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  void runManagedChild().catch(() => {
-    process.exitCode = 1;
-  });
+  void runManagedChild().then(
+    () => process.exit(0),
+    () => process.exit(1),
+  );
 }

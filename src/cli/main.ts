@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { CliError, HttpControlClient, type CliLifecycleResult, type ControlClient } from "./control_client.js";
 import { parseCli } from "./parser.js";
@@ -270,7 +270,12 @@ export async function main(): Promise<void> {
 }
 
 export function isMainModule(moduleUrl: string, argvEntry: string | undefined): boolean {
-  return argvEntry !== undefined && moduleUrl === pathToFileURL(realpathSync(argvEntry)).href;
+  if (argvEntry === undefined) return false;
+  const modulePath = realpathSync(fileURLToPath(moduleUrl));
+  const entryPath = realpathSync(argvEntry);
+  return process.platform === "win32"
+    ? modulePath.toLowerCase() === entryPath.toLowerCase()
+    : modulePath === entryPath;
 }
 
 if (isMainModule(import.meta.url, process.argv[1])) {

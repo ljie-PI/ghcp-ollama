@@ -70,6 +70,7 @@ export async function terminateProcessIfMatching(
       `$expected = [Int64]::Parse('${filetime}', [Globalization.CultureInfo]::InvariantCulture)`,
       "if ($process.StartTime.ToUniversalTime().ToFileTimeUtc() -ne $expected) { exit 4 }",
       "$process.Kill()",
+      "if (-not $process.WaitForExit(10000)) { exit 5 }",
     ].join("; ");
     try {
       await dependencies.runCommand(

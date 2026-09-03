@@ -7,6 +7,8 @@ const POLL_INTERVAL_MS = 100;
 const START_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 10_000;
 const FORCE_STOP_TIMEOUT_MS = 10_000;
+const FORCE_SETTLE_TIMEOUT_MS = 10_000;
+const RESTART_SETTLE_TIMEOUT_MS = 5_000;
 const STATUS_PATH = "/__ghcg/control/v1/status";
 const STOP_PATH = "/__ghcg/control/v1/stop";
 
@@ -325,9 +327,19 @@ export class DaemonController {
       forceDeadline,
       undefined,
     );
-    const afterTerminate = await this.waitForTermination(identity, undefined, forceDeadline);
+    let afterTerminate = await this.waitForTermination(identity, undefined, forceDeadline);
+    if (afterTerminate.kind === "same") {
+      afterTerminate = await this.waitForTermination(
+        identity,
+        undefined,
+        this.dependencies.nowMs() + FORCE_SETTLE_TIMEOUT_MS,
+      );
+    }
     if (afterTerminate.kind === "dead") {
       await this.dependencies.identityFile.remove(resolvedDataDir, identity);
+      return emptyResult("stopped", resolvedDataDir);
+    }
+    if (afterTerminate.kind === "same" && await this.readIdentityOrNull(resolvedDataDir) === null) {
       return emptyResult("stopped", resolvedDataDir);
     }
     return identityResult(afterTerminate.kind === "same" ? "unreachable" : "conflict", identity, resolvedDataDir);
@@ -341,7 +353,15 @@ export class DaemonController {
     const effectiveStartup = inspection.identity === null
       ? startup
       : { ...startup, port: inspection.identity.port };
-    const stopped = await this.stop(startup.dataDir, context);
+    let stopped = await this.stop(startup.dataDir, context);
+    if (stopped.state === "unreachable") {
+      const deadline = this.dependencies.nowMs() + RESTART_SETTLE_TIMEOUT_MS;
+      while (this.dependencies.nowMs() < deadline) {
+        await this.dependencies.delay(POLL_INTERVAL_MS, context.signal);
+        stopped = await this.status(startup.dataDir, context);
+        if (stopped.state !== "unreachable") break;
+      }
+    }
     if (stopped.state !== "stopped" && stopped.state !== "stale") {
       return stopped;
     }
