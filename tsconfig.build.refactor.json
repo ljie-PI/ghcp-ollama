@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.refactor.json",
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-refactor",
+    "src/persistence/migrations/**/*.ts"
+  ]
+}

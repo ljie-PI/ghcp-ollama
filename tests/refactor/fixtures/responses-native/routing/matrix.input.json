@@ -1,0 +1,1 @@
+[{"name":"mode-responses","routing":{"mode":"responses"}},{"name":"mode-chat-wins","routing":{"mode":"chat","supportedEndpoints":["/v1/responses"]}},{"name":"endpoint-fallback","routing":{"supportedEndpoints":["/v1/responses"]}},{"name":"missing","routing":{}}]

@@ -111,6 +111,7 @@ export function validatedNativeResponsesBody(
 export async function* normalizeNativeResponsesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
+  observeEvent?: (event: Readonly<WireJsonObject>) => void,
 ): AsyncIterable<Uint8Array> {
   const stableIds = new Map<number, string>();
   let terminal = false;
@@ -121,6 +122,11 @@ export async function* normalizeNativeResponsesStream(
       throw new GatewayFailureError({ kind: "invalid_upstream_response" });
     }
     const normalized = normalizeNativeResponsesEvent(payload, stableIds, type);
+    try {
+      observeEvent?.(normalized);
+    } catch (_error: unknown) {
+      // Side observation cannot affect native Responses bytes.
+    }
     yield encodeResponsesSseEvent(normalized);
     if (TERMINAL_EVENTS.has(type)) {
       terminal = true;

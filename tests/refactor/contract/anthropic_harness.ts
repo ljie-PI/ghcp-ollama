@@ -12,6 +12,7 @@ import { migration as accountsMigration } from "../../../src/persistence/migrati
 import { createAnthropicMessagesRoute } from "../../../src/protocols/anthropic_messages/endpoint.js";
 import type { RuntimeConfigSnapshot } from "../../../src/config/schema.js";
 import type { ChatRequest } from "../../../src/protocols/chat_completions/types.js";
+import type { UsageUpdate } from "../../../src/telemetry/recorder.js";
 
 export const ACCOUNT_ID = "github.com/1";
 
@@ -31,6 +32,8 @@ export async function anthropicGateway(options: {
   readonly preferredModel?: string;
   readonly createUuid?: () => string;
   readonly catalogFetch?: () => Promise<CapiModelsResponse> | CapiModelsResponse;
+  readonly usageUpdates?: UsageUpdate[];
+  readonly telemetryNowMs?: () => number;
 } = {}): Promise<AnthropicGatewayFixture> {
   const database = openDatabase({
     path: ":memory:",
@@ -87,6 +90,10 @@ export async function anthropicGateway(options: {
     preferences: accounts.preferences,
     copilot: backend,
     createUuid: options.createUuid ?? (() => "00000000-0000-4000-8000-000000000001"),
+    ...(options.usageUpdates === undefined
+      ? {}
+      : { usageRecorder: { recordUsage: (update: UsageUpdate) => options.usageUpdates?.push(update) } }),
+    ...(options.telemetryNowMs === undefined ? {} : { nowMs: options.telemetryNowMs }),
   })], {
     createRequestId: () => "req_test_1",
     ...options.gatewayDependencies,

@@ -3,8 +3,9 @@ import type { AccountModelPreferences } from "../../accounts/model_preferences.j
 import type { CopilotBackend } from "../../copilot/backend.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
-import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
-import type { RouteRegistration } from "../../gateway/hono_app.js";
+import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
+import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
+import type { RequestScope } from "../../gateway/request_scope.js";
 import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
@@ -12,6 +13,7 @@ import { convertChatResponse } from "./bridge.js";
 import { convertAnthropicRequest } from "./request.js";
 import { createAnthropicStreamResponse } from "./stream.js";
 import { anthropicErrorBody, type AnthropicErrorType } from "./wire.js";
+import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -19,6 +21,8 @@ export interface AnthropicMessagesRouteDependencies {
   readonly preferences: AccountModelPreferences;
   readonly copilot: CopilotBackend;
   readonly createUuid?: () => string;
+  readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
+  readonly nowMs?: () => number;
 }
 
 const JSON_HEADERS = {
@@ -27,60 +31,88 @@ const JSON_HEADERS = {
 } as const;
 
 export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRouteDependencies): RouteRegistration {
+  const attempts = new Map<string, ReturnType<typeof createUsageAttempt>>();
   return {
     method: "POST",
     path: "/v1/messages",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: presentAnthropicFailure,
-    endpoint: async (request, scope) => {
-      if (request.body === undefined) {
-        throw new GatewayFailureError({ kind: "invalid_request" });
-      }
-      assertAnthropicVersion(request.headers);
-      const requestedModel = readRequestedModel(request.body);
-      const account = await bindAccount(dependencies, scope.signal);
-      const catalog = await loadCatalog(dependencies, account.accountId, scope.signal);
-      const resolved = resolveModel(catalog, requestedModel.value, dependencies.preferences.get(account.accountId));
-      if ("kind" in resolved) {
-        throw new GatewayFailureError({ kind: resolved.kind });
-      }
-      const chatBody = convertAnthropicRequest(request.body, resolved.upstreamModel, requestedModel.value);
-      const stream = chatBody.stream === true;
-      const copilot = await dependencies.copilot.bind(account, scope.signal);
-      const chatRequest: ChatRequest = {
-        model: resolved.upstreamModel,
-        body: new TextEncoder().encode(JSON.stringify(chatBody)),
-        stream,
-        hasVisionInput: hasVisionInput(chatBody.messages),
-        nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
-        connectTimeoutMs: scope.config.timeouts.connectMs,
-        firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
-        signal: scope.signal,
-      };
-
-      if (!stream) {
-        const upstream = await copilot.completeChat(chatRequest);
-        throwIfUpstreamHttp(upstream);
-        if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
-          throw new GatewayFailureError({ kind: "invalid_upstream_response" });
-        }
-        const body = convertChatResponse(upstream);
-        return new Response(JSON.stringify(body), {
-          headers: { ...JSON_HEADERS, "request-id": scope.requestId },
-        });
-      }
-
-      const upstream = await copilot.openChatStream(chatRequest);
-      throwIfUpstreamHttp(upstream);
-      return createAnthropicStreamResponse({
-        upstream,
-        model: resolved.upstreamModel,
-        createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
-        scope,
-      });
+    presentFailure: (failure, requestId) => {
+      const usage = attempts.get(requestId) ?? createUsageAttempt(dependencies, new AbortController().signal);
+      usage.failure(new GatewayFailureError(failure));
+      attempts.delete(requestId);
+      return presentAnthropicFailure(failure, requestId);
     },
+    endpoint: (request, scope) => executeAnthropicMessages(dependencies, request, scope, attempts),
   };
+}
+
+async function executeAnthropicMessages(
+  dependencies: AnthropicMessagesRouteDependencies,
+  request: Readonly<DecodedHttpRequest>,
+  scope: Readonly<RequestScope>,
+  attempts: Map<string, ReturnType<typeof createUsageAttempt>>,
+): Promise<Response> {
+  const usage = createUsageAttempt(dependencies, scope.signal, () => attempts.delete(scope.requestId));
+  if (dependencies.usageRecorder !== undefined) {
+    attempts.set(scope.requestId, usage);
+  }
+  if (request.body === undefined) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  assertAnthropicVersion(request.headers);
+  const requestedModel = readRequestedModel(request.body);
+  if (requestedModel.value !== undefined) {
+    usage.setModel(requestedModel.value);
+  }
+  const account = await bindAccount(dependencies, scope.signal);
+  usage.setAccount(account.accountId);
+  const catalog = await loadCatalog(dependencies, account.accountId, scope.signal);
+  const resolved = resolveModel(catalog, requestedModel.value, dependencies.preferences.get(account.accountId));
+  if ("kind" in resolved) {
+    throw new GatewayFailureError({ kind: resolved.kind });
+  }
+  usage.setModel(resolved.upstreamModel);
+  const chatBody = convertAnthropicRequest(request.body, resolved.upstreamModel, requestedModel.value);
+  const stream = chatBody.stream === true;
+  const copilot = await dependencies.copilot.bind(account, scope.signal);
+  const chatRequest: ChatRequest = {
+    model: resolved.upstreamModel,
+    body: new TextEncoder().encode(JSON.stringify(chatBody)),
+    stream,
+    hasVisionInput: hasVisionInput(chatBody.messages),
+    nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
+    connectTimeoutMs: scope.config.timeouts.connectMs,
+    firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
+    signal: scope.signal,
+  };
+
+  if (!stream) {
+    const upstream = await copilot.completeChat(chatRequest);
+    throwIfUpstreamHttp(upstream);
+    if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
+      throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+    }
+    const body = convertChatResponse(upstream);
+    usage.success(anthropicUsageTokens(body));
+    return new Response(JSON.stringify(body), {
+      headers: { ...JSON_HEADERS, "request-id": scope.requestId },
+    });
+  }
+
+  const upstream = await copilot.openChatStream(chatRequest);
+  throwIfUpstreamHttp(upstream);
+  return createAnthropicStreamResponse({
+    upstream,
+    model: resolved.upstreamModel,
+    createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+    scope,
+    ...(dependencies.usageRecorder === undefined ? {} : {
+      onTerminal: (result: Parameters<NonNullable<Parameters<typeof createAnthropicStreamResponse>[0]["onTerminal"]>>[0]) => result.kind === "success"
+        ? usage.success(result.usage)
+        : usage.failure(result.error),
+    }),
+  });
 }
 
 function presentAnthropicFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
@@ -272,4 +304,142 @@ function retryAfterHeader(status: number, headers: Headers): string | undefined 
 
 function hasVisionInput(messages: unknown[]): boolean {
   return JSON.stringify(messages).includes("\"image_url\"");
+}
+
+interface UsageTokens {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheTokens: number;
+}
+
+const ZERO_USAGE: UsageTokens = { inputTokens: 0, outputTokens: 0, cacheTokens: 0 };
+const NOOP_USAGE_ATTEMPT = {
+  setAccount: (_accountId: string): void => undefined,
+  setModel: (_model: string): void => undefined,
+  success: (_tokens: UsageTokens): void => undefined,
+  failure: (_error: unknown): void => undefined,
+};
+
+function createUsageAttempt(
+  dependencies: AnthropicMessagesRouteDependencies,
+  signal: AbortSignal,
+  onFinished?: () => void,
+): {
+  setAccount(accountId: string): void;
+  setModel(model: string): void;
+  success(tokens: UsageTokens): void;
+  failure(error: unknown): void;
+} {
+  if (dependencies.usageRecorder === undefined) {
+    return NOOP_USAGE_ATTEMPT;
+  }
+  const nowMs = dependencies.nowMs ?? Date.now;
+  const startedAtMs = nowMs();
+  let accountId = "unbound";
+  let model = "unresolved";
+  let recorded = false;
+  const finish = (outcome: UsageUpdate["outcome"], tokens: UsageTokens): void => {
+    if (recorded) {
+      return;
+    }
+    recorded = true;
+    signal.removeEventListener("abort", onAbort);
+    onFinished?.();
+    const occurredAtMs = nowMs();
+    try {
+      dependencies.usageRecorder?.recordUsage({
+        occurredAtMs,
+        accountId,
+        protocol: "anthropic",
+        resolvedModel: model,
+        outcome,
+        requestCount: 1,
+        errorCount: outcome === "success" ? 0 : 1,
+        ...tokens,
+        latencyMs: Math.max(0, occurredAtMs - startedAtMs),
+      });
+    } catch (_error: unknown) {
+      // Telemetry is noncritical and cannot affect protocol behavior.
+    }
+  };
+  const onAbort = (): void => {
+    if (abortOutcome(signal) === "aborted") {
+      finish("aborted", ZERO_USAGE);
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  return {
+    setAccount: (value) => { accountId = value; },
+    setModel: (value) => { model = value; },
+    success: (tokens) => finish("success", tokens),
+    failure: (error) => finish(usageOutcome(error, signal), ZERO_USAGE),
+  };
+}
+
+function anthropicUsageTokens(response: unknown): UsageTokens {
+  const root = asObject(response);
+  const usage = asObject(root?.usage);
+  return {
+    inputTokens: safeInteger(usage?.input_tokens),
+    outputTokens: safeInteger(usage?.output_tokens),
+    cacheTokens: safeInteger(usage?.cache_read_input_tokens) + safeInteger(usage?.cache_creation_input_tokens),
+  };
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function safeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function usageOutcome(error: unknown, signal: AbortSignal): UsageUpdate["outcome"] {
+  if (signal.aborted) {
+    return abortOutcome(signal);
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return "aborted";
+  }
+  if (error instanceof AccountDirectoryError) {
+    return "authentication_error";
+  }
+  const failure = failureFromUnknown(error);
+  switch (failure.kind) {
+  case "invalid_request":
+  case "body_too_large":
+  case "unsupported_media_type":
+  case "unsupported_semantics":
+  case "model_not_found":
+    return "client_error";
+  case "authentication":
+  case "permission":
+    return "authentication_error";
+  case "queue_full":
+  case "queue_timeout":
+    return "overloaded";
+  case "upstream_timeout":
+    return "timeout";
+  case "upstream_http":
+  case "upstream_network":
+  case "upstream_stream_error":
+  case "upstream_stream_truncated":
+  case "invalid_upstream_response":
+  case "invalid_tool_arguments":
+  case "invalid_logprobs":
+    return "upstream_error";
+  case "aborted":
+    return "aborted";
+  case "internal":
+    return "internal_error";
+  }
+}
+
+function abortOutcome(signal: AbortSignal): UsageUpdate["outcome"] {
+  const reason = signal.reason;
+  return reason instanceof GatewayFailureError && reason.failure.kind === "upstream_timeout"
+    ? "timeout"
+    : "aborted";
 }

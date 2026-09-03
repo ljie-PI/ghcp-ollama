@@ -2,6 +2,7 @@
 node_modules/
 dist/
 dist-refactor/
+src/persistence/generated_migrations.ts
 playwright-report/
 test-results/
 

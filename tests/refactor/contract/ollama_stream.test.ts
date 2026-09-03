@@ -15,6 +15,7 @@ import { migration as runtimeConfigMigration } from "../../../src/persistence/mi
 import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
 import { createOllamaChatRoutes } from "../../../src/protocols/ollama_chat/endpoint.js";
 import type { ChatRequest, ChatResponse, NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../../../src/protocols/chat_completions/types.js";
+import type { UsageUpdate } from "../../../src/telemetry/recorder.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 
@@ -50,6 +51,7 @@ class StreamBackend implements CopilotBackend {
 async function ollamaGateway(
   backend: CopilotBackend,
   configureRuntime: (runtime: RuntimeConfigSnapshot) => void = () => undefined,
+  usageUpdates?: UsageUpdate[],
 ) {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-stream-"));
   const database = openDatabase({
@@ -73,12 +75,16 @@ async function ollamaGateway(
     copilot: backend,
     now: () => new Date("2026-01-02T03:04:05.120Z"),
     tokenCounter: () => 0,
+    ...(usageUpdates === undefined
+      ? {}
+      : { usageRecorder: { recordUsage: (update: UsageUpdate) => usageUpdates.push(update) } }),
   }));
   return { gw, close: async () => { await gw.close(); closeDatabase(database); } };
 }
 
 describe("RM-10 Ollama stream", () => {
   it("reduces sparse Chat chunks to exact Ollama NDJSON", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new StreamBackend();
     backend.chunks = [
       sse({ choices: [{ index: 0, delta: { content: "<think>hidden" }, logprobs: { content: [{ token: "hidden", logprob: -0.25, bytes: [104] }] } }] }),
@@ -89,7 +95,7 @@ describe("RM-10 Ollama stream", () => {
       sse({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], usage: { completion_tokens: 6 } }),
       done(),
     ];
-    const { gw, close } = await ollamaGateway(backend);
+    const { gw, close } = await ollamaGateway(backend, undefined, usageUpdates);
     try {
       const response = await gw.fetch(request({ model: "gpt", stream: true, messages: [{ role: "user", content: "hi" }] }));
       expect(response.status).toBe(200);
@@ -99,6 +105,12 @@ describe("RM-10 Ollama stream", () => {
         + "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"explicit\"},\"done\":false}\n"
         + "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"index\":1,\"name\":\"weather\",\"arguments\":{\"2\":\"two\",\"1\":\"one\"}}}]},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":12,\"eval_count\":6}\n",
       );
+      expect(usageUpdates).toMatchObject([{
+        protocol: "ollama",
+        outcome: "success",
+        inputTokens: 12,
+        outputTokens: 6,
+      }]);
     } finally {
       await close();
     }
@@ -180,9 +192,10 @@ describe("RM-10 Ollama stream", () => {
   });
 
   it("writes one post-commit error and no synthetic terminal on truncation", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new StreamBackend();
     backend.chunks = [sse({ choices: [{ index: 0, delta: { content: "hello" } }] })];
-    const { gw, close } = await ollamaGateway(backend);
+    const { gw, close } = await ollamaGateway(backend, undefined, usageUpdates);
     try {
       const response = await gw.fetch(request({ model: "gpt", messages: [{ role: "user", content: "hi" }] }));
       expect(response.status).toBe(200);
@@ -190,6 +203,7 @@ describe("RM-10 Ollama stream", () => {
         "{\"model\":\"gpt\",\"created_at\":\"2026-01-02T03:04:05.12Z\",\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"done\":false}\n"
         + "{\"error\":\"upstream stream truncated\"}\n",
       );
+      expect(usageUpdates).toMatchObject([{ protocol: "ollama", outcome: "upstream_error", errorCount: 1 }]);
     } finally {
       await close();
     }
@@ -233,12 +247,13 @@ describe("RM-10 Ollama stream", () => {
   });
 
   it("aborts without writing error or done after commit and cancels upstream", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new StreamBackend();
     let resume = (): void => undefined;
     backend.chunks = delayedStream(sse({ choices: [{ index: 0, delta: { content: "hello" } }] }), new Promise<void>((resolve) => {
       resume = resolve;
     }));
-    const { gw, close } = await ollamaGateway(backend);
+    const { gw, close } = await ollamaGateway(backend, undefined, usageUpdates);
     try {
       const controller = new AbortController();
       const response = await gw.fetch(request({ model: "gpt", messages: [{ role: "user", content: "hi" }] }, controller.signal));
@@ -252,6 +267,7 @@ describe("RM-10 Ollama stream", () => {
       const next = await reader?.read().catch(() => ({ done: true, value: undefined }));
       expect(next?.value === undefined ? "" : new TextDecoder().decode(next.value)).toBe("");
       expect(backend.canceled).toBeGreaterThan(0);
+      expect(usageUpdates).toMatchObject([{ protocol: "ollama", outcome: "aborted", errorCount: 1 }]);
     } finally {
       await close();
     }

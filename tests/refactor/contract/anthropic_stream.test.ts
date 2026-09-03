@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ScriptedCopilotBackend } from "../../../src/copilot/backend.js";
+import type { UsageUpdate } from "../../../src/telemetry/recorder.js";
 import { anthropicGateway, anthropicRequest, sse } from "./anthropic_harness.js";
 
 const decoder = new TextDecoder();
@@ -76,6 +77,7 @@ describe("RM-11 Anthropic stream lifecycle", () => {
   });
 
   it("emits Python-compatible SSE for block switches, signed thinking, delayed usage, and message_stop", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new ScriptedCopilotBackend({
       chatStream: [
         sse({ id: "chunk_1", choices: [{ delta: { reasoning_content: "plan" } }] }),
@@ -92,6 +94,7 @@ describe("RM-11 Anthropic stream lifecycle", () => {
         const values = ["00000000-0000-4000-8000-0000000000aa"];
         return () => values.shift() ?? "00000000-0000-4000-8000-0000000000ff";
       })(),
+      usageUpdates,
     });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
@@ -113,6 +116,13 @@ describe("RM-11 Anthropic stream lifecycle", () => {
         "event: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"tool_use\"}, \"usage\": {\"input_tokens\": 8, \"output_tokens\": 4, \"cache_read_input_tokens\": 2}}\n\n",
         "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n",
       ].join(""));
+      expect(usageUpdates).toMatchObject([{
+        protocol: "anthropic",
+        outcome: "success",
+        inputTokens: 8,
+        outputTokens: 4,
+        cacheTokens: 2,
+      }]);
     } finally {
       await close();
     }

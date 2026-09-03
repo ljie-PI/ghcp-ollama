@@ -1,12 +1,13 @@
 import { VERSION } from "../../version.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
-import type { AccountDirectory } from "../../accounts/account_directory.js";
+import { AccountDirectoryError, type AccountDirectory } from "../../accounts/account_directory.js";
 import {
   UpstreamBodyLimitError,
   UpstreamTimeoutError,
 } from "../../copilot/transport.js";
-import { GatewayFailureError } from "../../gateway/failures.js";
-import type { FailurePresenter, RouteRegistration } from "../../gateway/hono_app.js";
+import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
+import type { DecodedHttpRequest, FailurePresenter, RouteRegistration } from "../../gateway/hono_app.js";
+import type { RequestScope } from "../../gateway/request_scope.js";
 import {
   isWireJsonArray,
   isWireJsonNumber,
@@ -21,12 +22,15 @@ import { ollamaCreatedAt, ollamaErrorBody, ollamaJsonStringify } from "./wire.js
 import { ollamaNonstreamResponse, type OllamaTokenCounter } from "./bridge.js";
 import { createOllamaStreamResponse } from "./stream.js";
 import type { ChatRequest } from "../chat_completions/types.js";
+import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 
 export interface OllamaRouteDependencies {
   readonly directory: AccountDirectory;
   readonly copilot: CopilotBackend;
   readonly now?: () => Date;
+  readonly nowMs?: () => number;
   readonly tokenCounter: OllamaTokenCounter;
+  readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
 }
 
 const JSON_HEADERS = {
@@ -35,7 +39,11 @@ const JSON_HEADERS = {
 } as const;
 
 export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): readonly RouteRegistration[] {
-  const presentFailure: FailurePresenter = (failure) => {
+  const attempts = new Map<string, ReturnType<typeof createUsageAttempt>>();
+  const presentFailure: FailurePresenter = (failure, requestId) => {
+    const usage = attempts.get(requestId) ?? createUsageAttempt(dependencies, new AbortController().signal);
+    usage.failure(new GatewayFailureError(failure));
+    attempts.delete(requestId);
     const { status, text } = ollamaFailureStatusAndText(failure);
     return new Response(ollamaErrorBody(text), { status, headers: JSON_HEADERS });
   };
@@ -57,74 +65,96 @@ export function createOllamaChatRoutes(dependencies: OllamaRouteDependencies): r
       admission: "inference",
       body: "wire-json-object",
       presentFailure,
-      endpoint: async (request, scope) => {
-        if (request.body === undefined) {
-          throw new GatewayFailureError({ kind: "invalid_request" });
-        }
-        const model = asNonEmptyString(memberValues(request.body, "model")[0]);
-        const messages = memberValues(request.body, "messages")[0];
-        if (model === undefined || !isWireJsonArray(messages)) {
-          throw new GatewayFailureError({ kind: "invalid_request" });
-        }
-        if (messages.items.length === 0) {
-          throw new GatewayFailureError({ kind: "unsupported_semantics" });
-        }
-        const streamValue = memberValues(request.body, "stream")[0];
-        const stream = streamValue === undefined ? true : streamValue === true;
-        if (streamValue !== undefined && streamValue !== true && streamValue !== false) {
-          throw new GatewayFailureError({ kind: "invalid_request" });
-        }
-        const chatRequest = buildOllamaChatRequest(request.body, model, messages, stream);
-        const hasVisionInput = hasOllamaImages(messages);
-        const account = await dependencies.directory.bindDefault(scope.signal);
-        const copilot = await dependencies.copilot.bind(account, scope.signal);
-        const chatBody = serializeWireJson(chatRequest);
-        if (!stream) {
-          const response = await completeChat(copilot, {
-            model,
-            body: chatBody,
-            stream: false,
-            hasVisionInput,
-            nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
-            connectTimeoutMs: scope.config.timeouts.connectMs,
-            firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
-            signal: scope.signal,
-          });
-          if (response.status < 200 || response.status >= 300) {
-            throw new GatewayFailureError({ kind: "upstream_http", status: response.status });
-          }
-          return new Response(ollamaJsonStringify(ollamaNonstreamResponse(
-            response.body,
-            model,
-            chatMessagesFromRequest(chatRequest),
-            scope.config.limits.nonstreamBodyBytes,
-            dependencies.now ?? (() => new Date()),
-            dependencies.tokenCounter,
-          )), { headers: JSON_HEADERS });
-        }
-        const upstream = await openChatStream(copilot, {
-          model,
-          body: chatBody,
-          stream: true,
-          hasVisionInput,
-          nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
-          connectTimeoutMs: scope.config.timeouts.connectMs,
-          firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
-          signal: scope.signal,
-        });
-        if (upstream.status < 200 || upstream.status >= 300) {
-          await upstream.cancel();
-          throw new GatewayFailureError({ kind: "upstream_http", status: upstream.status });
-        }
-        return await createOllamaStreamResponse({
-          upstream,
-          model,
-          createdAt: ollamaCreatedAt((dependencies.now ?? (() => new Date()))()),
-          scope,
-        });
-      },
+      endpoint: (request, scope) => executeOllamaChat(dependencies, request, scope, attempts),
     },
   ];
+}
+
+async function executeOllamaChat(
+  dependencies: OllamaRouteDependencies,
+  request: Readonly<DecodedHttpRequest>,
+  scope: Readonly<RequestScope>,
+  attempts: Map<string, ReturnType<typeof createUsageAttempt>>,
+): Promise<Response> {
+  const usage = createUsageAttempt(dependencies, scope.signal, () => attempts.delete(scope.requestId));
+  if (dependencies.usageRecorder !== undefined) {
+    attempts.set(scope.requestId, usage);
+  }
+  if (request.body === undefined) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const model = asNonEmptyString(memberValues(request.body, "model")[0]);
+  const messages = memberValues(request.body, "messages")[0];
+  if (model === undefined || !isWireJsonArray(messages)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  usage.setModel(model);
+  if (messages.items.length === 0) {
+    throw new GatewayFailureError({ kind: "unsupported_semantics" });
+  }
+  const streamValue = memberValues(request.body, "stream")[0];
+  const stream = streamValue === undefined ? true : streamValue === true;
+  if (streamValue !== undefined && streamValue !== true && streamValue !== false) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const chatRequest = buildOllamaChatRequest(request.body, model, messages, stream);
+  const hasVisionInput = hasOllamaImages(messages);
+  const account = await dependencies.directory.bindDefault(scope.signal);
+  usage.setAccount(account.accountId);
+  const copilot = await dependencies.copilot.bind(account, scope.signal);
+  const chatBody = serializeWireJson(chatRequest);
+  if (!stream) {
+    const response = await completeChat(copilot, {
+      model,
+      body: chatBody,
+      stream: false,
+      hasVisionInput,
+      nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
+      connectTimeoutMs: scope.config.timeouts.connectMs,
+      firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
+      signal: scope.signal,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new GatewayFailureError({ kind: "upstream_http", status: response.status });
+    }
+    const converted = ollamaNonstreamResponse(
+      response.body,
+      model,
+      chatMessagesFromRequest(chatRequest),
+      scope.config.limits.nonstreamBodyBytes,
+      dependencies.now ?? (() => new Date()),
+      dependencies.tokenCounter,
+    );
+    usage.success(ollamaUsage(converted));
+    return new Response(ollamaJsonStringify(converted), { headers: JSON_HEADERS });
+  }
+  const upstream = await openChatStream(copilot, {
+    model,
+    body: chatBody,
+    stream: true,
+    hasVisionInput,
+    nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
+    connectTimeoutMs: scope.config.timeouts.connectMs,
+    firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
+    signal: scope.signal,
+  });
+  if (upstream.status < 200 || upstream.status >= 300) {
+    await upstream.cancel();
+    throw new GatewayFailureError({ kind: "upstream_http", status: upstream.status });
+  }
+  return await createOllamaStreamResponse({
+    upstream,
+    model,
+    createdAt: ollamaCreatedAt((dependencies.now ?? (() => new Date()))()),
+    scope,
+    ...(dependencies.usageRecorder === undefined ? {} : { onTerminal: (result: Parameters<NonNullable<Parameters<typeof createOllamaStreamResponse>[0]["onTerminal"]>>[0]) => {
+      if (result.kind === "success") {
+        usage.success({ inputTokens: result.promptTokens, outputTokens: result.completionTokens, cacheTokens: 0 });
+      } else {
+        usage.failure(result.failure);
+      }
+    } }),
+  });
 }
 
 function ollamaFailureStatusAndText(failure: Parameters<FailurePresenter>[0]): { readonly status: number; readonly text: string } {
@@ -632,4 +662,133 @@ function upstreamCallFailure(error: unknown): GatewayFailureError {
     return new GatewayFailureError({ kind: "upstream_timeout", cause: error });
   }
   return new GatewayFailureError({ kind: "upstream_network", cause: error });
+}
+
+interface UsageTokens {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheTokens: number;
+}
+
+function createUsageAttempt(dependencies: OllamaRouteDependencies, signal: AbortSignal, onFinished?: () => void): {
+  setAccount(accountId: string): void;
+  setModel(model: string): void;
+  success(tokens: UsageTokens): void;
+  failure(error: unknown): void;
+} {
+  if (dependencies.usageRecorder === undefined) {
+    return NOOP_USAGE_ATTEMPT;
+  }
+  const nowMs = dependencies.nowMs ?? Date.now;
+  const startedAtMs = nowMs();
+  let accountId = "unbound";
+  let model = "unresolved";
+  let recorded = false;
+  const onAbort = (): void => {
+    if (abortOutcome(signal) === "aborted") {
+      finish("aborted", ZERO_USAGE);
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  const finish = (outcome: UsageUpdate["outcome"], tokens: UsageTokens): void => {
+    if (recorded) {
+      return;
+    }
+    recorded = true;
+    signal.removeEventListener("abort", onAbort);
+    onFinished?.();
+    const occurredAtMs = nowMs();
+    try {
+      dependencies.usageRecorder?.recordUsage({
+        occurredAtMs,
+        accountId,
+        protocol: "ollama",
+        resolvedModel: model,
+        outcome,
+        requestCount: 1,
+        errorCount: outcome === "success" ? 0 : 1,
+        ...tokens,
+        latencyMs: Math.max(0, occurredAtMs - startedAtMs),
+      });
+    } catch (_error: unknown) {
+      // Telemetry is noncritical and cannot affect protocol behavior.
+    }
+  };
+  return {
+    setAccount: (value) => { accountId = value; },
+    setModel: (value) => { model = value; },
+    success: (tokens) => finish("success", tokens),
+    failure: (error) => finish(usageOutcome(error, signal), ZERO_USAGE),
+  };
+}
+
+const ZERO_USAGE: UsageTokens = { inputTokens: 0, outputTokens: 0, cacheTokens: 0 };
+const NOOP_USAGE_ATTEMPT = {
+  setAccount: (_accountId: string): void => undefined,
+  setModel: (_model: string): void => undefined,
+  success: (_tokens: UsageTokens): void => undefined,
+  failure: (_error: unknown): void => undefined,
+};
+
+function ollamaUsage(response: Record<string, unknown>): UsageTokens {
+  return {
+    inputTokens: nonnegativeNumber(response.prompt_eval_count),
+    outputTokens: nonnegativeNumber(response.eval_count),
+    cacheTokens: 0,
+  };
+}
+
+function nonnegativeNumber(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function usageOutcome(error: unknown, signal: AbortSignal): UsageUpdate["outcome"] {
+  if (signal.aborted) {
+    return abortOutcome(signal);
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return "aborted";
+  }
+  if (error instanceof AccountDirectoryError) {
+    return "authentication_error";
+  }
+  return outcomeForFailure(failureFromUnknown(error));
+}
+
+function abortOutcome(signal: AbortSignal): UsageUpdate["outcome"] {
+  const reason = signal.reason;
+  return reason instanceof GatewayFailureError && reason.failure.kind === "upstream_timeout"
+    ? "timeout"
+    : "aborted";
+}
+
+function outcomeForFailure(failure: GatewayFailure): UsageUpdate["outcome"] {
+  switch (failure.kind) {
+  case "invalid_request":
+  case "body_too_large":
+  case "unsupported_media_type":
+  case "unsupported_semantics":
+  case "model_not_found":
+    return "client_error";
+  case "authentication":
+  case "permission":
+    return "authentication_error";
+  case "queue_full":
+  case "queue_timeout":
+    return "overloaded";
+  case "upstream_timeout":
+    return "timeout";
+  case "upstream_http":
+  case "upstream_network":
+  case "upstream_stream_error":
+  case "upstream_stream_truncated":
+  case "invalid_upstream_response":
+  case "invalid_tool_arguments":
+  case "invalid_logprobs":
+    return "upstream_error";
+  case "aborted":
+    return "aborted";
+  case "internal":
+    return "internal_error";
+  }
 }

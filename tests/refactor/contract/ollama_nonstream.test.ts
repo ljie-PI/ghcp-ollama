@@ -16,6 +16,7 @@ import { migration as runtimeConfigMigration } from "../../../src/persistence/mi
 import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";
 import { createOllamaChatRoutes } from "../../../src/protocols/ollama_chat/endpoint.js";
 import type { ChatRequest, ChatResponse, NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../../../src/protocols/chat_completions/types.js";
+import type { UsageUpdate } from "../../../src/telemetry/recorder.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 
@@ -58,6 +59,7 @@ async function ollamaGateway(
   backend: CopilotBackend,
   tokenCounter: (input: { readonly model: ""; readonly messages?: unknown; readonly text?: string }) => number = () => 0,
   now: () => Date = () => new Date("2026-01-02T03:04:05.000Z"),
+  usageUpdates?: UsageUpdate[],
 ) {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-"));
   const database = openDatabase({
@@ -79,6 +81,9 @@ async function ollamaGateway(
     copilot: backend,
     now,
     tokenCounter,
+    ...(usageUpdates === undefined
+      ? {}
+      : { usageRecorder: { recordUsage: (update: UsageUpdate) => usageUpdates.push(update) } }),
   }));
   return { gw, close: async () => { await gw.close(); closeDatabase(database); } };
 }
@@ -114,6 +119,7 @@ describe("RM-10 Ollama non-stream", () => {
   });
 
   it("maps content, reasoning, tool calls, finish reason, usage, and logprobs", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new NonstreamBackend();
     backend.responseBody = new TextEncoder().encode(JSON.stringify({
       id: "ignored",
@@ -150,7 +156,7 @@ describe("RM-10 Ollama non-stream", () => {
     }));
     const { gw, close } = await ollamaGateway(backend, undefined, () => {
       throw new Error("created upstream responses must not read the injected clock");
-    });
+    }, usageUpdates);
     try {
       const response = await gw.fetch(new Request("http://127.0.0.1:31400/api/chat", {
         method: "POST",
@@ -161,6 +167,14 @@ describe("RM-10 Ollama non-stream", () => {
       expect(await response.text()).toBe(
         "{\"model\":\"gpt\",\"created_at\":\"2023-11-14T22:13:20Z\",\"message\":{\"role\":\"assistant\",\"content\":\"visible\",\"thinking\":\"hidden\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"index\":2,\"name\":\"weather\",\"arguments\":{\"10\":\"ten\",\"2\":\"two\",\"city\":\"Tōkyō\"}}}]},\"done\":true,\"done_reason\":\"stop\",\"logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118,105],\"top_logprobs\":[{\"token\":\"visible\",\"logprob\":-0.5,\"bytes\":[118]}]}],\"prompt_eval_count\":12,\"eval_count\":6}",
       );
+      expect(usageUpdates).toMatchObject([{
+        protocol: "ollama",
+        outcome: "success",
+        resolvedModel: "gpt",
+        inputTokens: 12,
+        outputTokens: 6,
+        cacheTokens: 0,
+      }]);
     } finally {
       await close();
     }

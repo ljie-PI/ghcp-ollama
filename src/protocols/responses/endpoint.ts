@@ -3,11 +3,11 @@ import type { AccountModelPreferences } from "../../accounts/model_preferences.j
 import { iterateChatFrames, type BoundCopilot, type CopilotBackend } from "../../copilot/backend.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
-import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
-import type { RouteRegistration } from "../../gateway/hono_app.js";
+import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
+import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
-import { isWireJsonObject, parseWireJson, serializeWireJson, type WireJsonObject } from "../../serialization/wire_json.js";
+import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { ChatRequest, UpstreamByteResponse, UpstreamByteStream } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
@@ -23,6 +23,7 @@ import {
   RESPONSES_STREAM_HEADERS,
   serializeResponsesErrorBody,
 } from "./wire.js";
+import type { TelemetryProtocol, TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 
 export interface ResponsesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -32,38 +33,63 @@ export interface ResponsesRouteDependencies {
   readonly history: ResponsesHistory;
   readonly nowUnixSeconds?: () => number;
   readonly createUuid?: () => string;
+  readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
+  readonly nowMs?: () => number;
 }
 
 export function createResponsesRoute(dependencies: ResponsesRouteDependencies): RouteRegistration {
+  const attempts = new Map<string, UsageAttempt>();
   return {
     method: "POST",
     path: "/v1/responses",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: presentResponsesFailure,
-    endpoint: async (request, scope) => {
-      if (request.body === undefined) {
-        throw new GatewayFailureError({ kind: "invalid_request" });
-      }
-      const decoded = decodeRequest(request.body);
-      const account = await bindAccount(dependencies.directory, scope.signal);
-      const catalog = await loadCatalog(dependencies, account.accountId, scope.signal);
-      const resolved = resolveModel(catalog, decoded.model, dependencies.preferences.get(account.accountId));
-      if ("kind" in resolved) {
-        throw new GatewayFailureError({ kind: resolved.kind });
-      }
-      const bound = await dependencies.copilot.bind(account, scope.signal);
-      const plan = planResponsesExecution(decoded, resolved, bound.target);
-      if (plan.kind === "native_responses") {
-        return decoded.stream
-          ? await nativeStreamResponse(bound, plan, scope)
-          : await nativeNonstreamResponse(bound, plan, scope);
-      }
-      return decoded.stream
-        ? await bridgeStreamResponse(dependencies, bound, plan, scope)
-        : await bridgeNonstreamResponse(dependencies, bound, plan, scope);
+    presentFailure: (failure, requestId) => {
+      const usage = attempts.get(requestId) ?? createUsageAttempt(dependencies, new AbortController().signal);
+      usage.failure(new GatewayFailureError(failure));
+      attempts.delete(requestId);
+      return presentResponsesFailure(failure, requestId);
     },
+    endpoint: (request, scope) => executeResponses(dependencies, request, scope, attempts),
   };
+}
+
+async function executeResponses(
+  dependencies: ResponsesRouteDependencies,
+  request: Readonly<DecodedHttpRequest>,
+  scope: Readonly<RequestScope>,
+  attempts: Map<string, UsageAttempt>,
+): Promise<Response> {
+  const usage = createUsageAttempt(dependencies, scope.signal, () => attempts.delete(scope.requestId));
+  if (dependencies.usageRecorder !== undefined) {
+    attempts.set(scope.requestId, usage);
+  }
+  if (request.body === undefined) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const decoded = decodeRequest(request.body);
+  if (decoded.model !== undefined) {
+    usage.setModel(decoded.model);
+  }
+  const account = await bindAccount(dependencies.directory, scope.signal);
+  usage.setAccount(account.accountId);
+  const catalog = await loadCatalog(dependencies, account.accountId, scope.signal);
+  const resolved = resolveModel(catalog, decoded.model, dependencies.preferences.get(account.accountId));
+  if ("kind" in resolved) {
+    throw new GatewayFailureError({ kind: resolved.kind });
+  }
+  usage.setModel(resolved.upstreamModel);
+  const bound = await dependencies.copilot.bind(account, scope.signal);
+  const plan = planResponsesExecution(decoded, resolved, bound.target);
+  usage.setProtocol(plan.kind === "native_responses" ? "openai_responses_native" : "openai_responses_bridge");
+  if (plan.kind === "native_responses") {
+    return decoded.stream
+      ? await nativeStreamResponse(bound, plan, scope, usage)
+      : await nativeNonstreamResponse(bound, plan, scope, usage);
+  }
+  return decoded.stream
+    ? await bridgeStreamResponse(dependencies, bound, plan, scope, usage)
+    : await bridgeNonstreamResponse(dependencies, bound, plan, scope, usage);
 }
 
 function decodeRequest(body: WireJsonObject) {
@@ -81,9 +107,14 @@ async function nativeNonstreamResponse(
   bound: BoundCopilot,
   plan: Parameters<typeof completeNativeResponses>[1],
   scope: Readonly<RequestScope>,
+  usage: UsageAttempt,
 ): Promise<Response> {
   const upstream = await completeNativeResponses(bound, plan, nativeOptions(scope));
   assertUpstreamSuccess(upstream);
+  if (usage.enabled) {
+    const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+    usage.finish(nativeOutcome(payload), responsesUsage(payload));
+  }
   return new Response(Buffer.from(upstream.body), {
     status: upstream.status,
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
@@ -94,6 +125,7 @@ async function nativeStreamResponse(
   bound: BoundCopilot,
   plan: Parameters<typeof openNativeResponsesStream>[1],
   scope: Readonly<RequestScope>,
+  usage: UsageAttempt,
 ): Promise<Response> {
   const upstream = await openNativeResponsesStream(bound, plan, nativeOptions(scope));
   if (upstream.status < 200 || upstream.status >= 300) {
@@ -101,7 +133,13 @@ async function nativeStreamResponse(
   }
   assertUpstreamSuccess(upstream);
   const bytes = withStreamTimeouts(upstream.bytes, upstream, scope);
-  return await streamBytesResponse(normalizeNativeResponsesStream(bytes, scope.config.limits.sseEventBytes), upstream, scope);
+  const observed = usage.enabled ? createNativeStreamObservation(usage) : undefined;
+  return await streamBytesResponse(
+    normalizeNativeResponsesStream(bytes, scope.config.limits.sseEventBytes, observed?.observe),
+    upstream,
+    scope,
+    usage.failure,
+  );
 }
 
 async function bridgeNonstreamResponse(
@@ -109,6 +147,7 @@ async function bridgeNonstreamResponse(
   bound: BoundCopilot,
   plan: ChatBridgePlan,
   scope: Readonly<RequestScope>,
+  usage: UsageAttempt,
 ): Promise<Response> {
   const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
     reasoningConfig: null,
@@ -125,6 +164,7 @@ async function bridgeNonstreamResponse(
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
   });
   await dependencies.history.record(converted.historyRecord, scope.signal);
+  usage.finish("success", responsesUsage(converted.response));
   return new Response(Buffer.from(serializeWireJson(converted.response)), {
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
@@ -135,6 +175,7 @@ async function bridgeStreamResponse(
   bound: BoundCopilot,
   plan: ChatBridgePlan,
   scope: Readonly<RequestScope>,
+  usage: UsageAttempt,
 ): Promise<Response> {
   const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
     reasoningConfig: null,
@@ -155,7 +196,7 @@ async function bridgeStreamResponse(
     customLlmProvider: "github_copilot",
     modelId: plan.resolvedModel.upstreamModel,
   });
-  return await streamEmissionsResponse(emissions, dependencies.history, upstream, scope);
+  return await streamEmissionsResponse(emissions, dependencies.history, upstream, scope, usage);
 }
 
 async function* withStreamTimeouts(
@@ -224,6 +265,7 @@ async function streamEmissionsResponse(
   history: ResponsesHistory,
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
+  usage: UsageAttempt,
 ): Promise<Response> {
   const bytes = (async function* (): AsyncIterable<Uint8Array> {
     try {
@@ -235,25 +277,30 @@ async function streamEmissionsResponse(
         if (emission.kind === "checkpoint") {
           await history.record(emission.historyRecord, scope.signal);
         }
+        if (usage.enabled) {
+          observeBridgeEvent(usage, emission.event);
+        }
         yield encodeResponsesSseEvent(emission.event);
       }
     } finally {
       await upstream.cancel();
     }
   })();
-  return await streamBytesResponse(bytes, upstream, scope);
+  return await streamBytesResponse(bytes, upstream, scope, usage.failure);
 }
 
 async function streamBytesResponse(
   bytes: AsyncIterable<Uint8Array>,
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
+  onFailure: (error: unknown) => void,
 ): Promise<Response> {
   const iterator = bytes[Symbol.asyncIterator]();
   let first: IteratorResult<Uint8Array>;
   try {
     first = await iterator.next();
   } catch (error: unknown) {
+    onFailure(error);
     await upstream.cancel();
     throw error;
   }
@@ -261,6 +308,11 @@ async function streamBytesResponse(
     signal: scope.signal,
     headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
   });
+  scope.signal.addEventListener("abort", () => {
+    onFailure(scope.signal.reason instanceof GatewayFailureError
+      ? scope.signal.reason
+      : new GatewayFailureError({ kind: "aborted" }));
+  }, { once: true });
   void (async () => {
     try {
       if (first.done !== true && !await writer.enqueue(first.value)) {
@@ -278,7 +330,8 @@ async function streamBytesResponse(
         }
       }
       writer.close();
-    } catch (_error: unknown) {
+    } catch (error: unknown) {
+      onFailure(error);
       writer.abort();
     } finally {
       await iterator.return?.().catch(() => undefined);
@@ -508,4 +561,234 @@ function retryAfterHeader(status: number, headers: Headers): string | undefined 
     return value;
   }
   return undefined;
+}
+
+interface UsageTokens {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheTokens: number;
+}
+
+interface UsageAttempt {
+  readonly enabled: boolean;
+  setAccount(accountId: string): void;
+  setModel(model: string): void;
+  setProtocol(protocol: TelemetryProtocol): void;
+  finish(outcome: UsageUpdate["outcome"], tokens: UsageTokens): void;
+  failure(error: unknown): void;
+}
+
+const ZERO_USAGE: UsageTokens = { inputTokens: 0, outputTokens: 0, cacheTokens: 0 };
+const NOOP_USAGE_ATTEMPT: UsageAttempt = {
+  enabled: false,
+  setAccount: (_accountId) => undefined,
+  setModel: (_model) => undefined,
+  setProtocol: (_protocol) => undefined,
+  finish: (_outcome, _tokens) => undefined,
+  failure: (_error) => undefined,
+};
+
+function createUsageAttempt(
+  dependencies: ResponsesRouteDependencies,
+  signal: AbortSignal,
+  onFinished?: () => void,
+): UsageAttempt {
+  if (dependencies.usageRecorder === undefined) {
+    return NOOP_USAGE_ATTEMPT;
+  }
+  const nowMs = dependencies.nowMs ?? Date.now;
+  const startedAtMs = nowMs();
+  let accountId = "unbound";
+  let model = "unresolved";
+  let protocol: TelemetryProtocol = "openai_responses_bridge";
+  let recorded = false;
+  const finish = (outcome: UsageUpdate["outcome"], tokens: UsageTokens): void => {
+    if (recorded) {
+      return;
+    }
+    recorded = true;
+    signal.removeEventListener("abort", onAbort);
+    onFinished?.();
+    const occurredAtMs = nowMs();
+    try {
+      dependencies.usageRecorder?.recordUsage({
+        occurredAtMs,
+        accountId,
+        protocol,
+        resolvedModel: model,
+        outcome,
+        requestCount: 1,
+        errorCount: outcome === "success" ? 0 : 1,
+        ...tokens,
+        latencyMs: Math.max(0, occurredAtMs - startedAtMs),
+      });
+    } catch (_error: unknown) {
+      // Telemetry is noncritical and cannot affect protocol behavior.
+    }
+  };
+  const failure = (error: unknown): void => finish(usageOutcome(error, signal), ZERO_USAGE);
+  const onAbort = (): void => {
+    if (abortOutcome(signal) === "aborted") {
+      finish("aborted", ZERO_USAGE);
+    }
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  return {
+    enabled: true,
+    setAccount: (value) => { accountId = value; },
+    setModel: (value) => { model = value; },
+    setProtocol: (value) => { protocol = value; },
+    finish,
+    failure,
+  };
+}
+
+function responsesUsage(payload: WireJsonObject): UsageTokens {
+  const observed = responsesUsageObservation(payload);
+  return {
+    inputTokens: observed.inputTokens ?? 0,
+    outputTokens: observed.outputTokens ?? 0,
+    cacheTokens: observed.cacheTokens ?? 0,
+  };
+}
+
+interface UsageObservation {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheTokens?: number;
+}
+
+function responsesUsageObservation(payload: WireJsonObject): UsageObservation {
+  const usage = objectMember(payload, "usage") ?? objectMember(objectMember(payload, "response"), "usage");
+  const details = objectMember(usage, "input_tokens_details");
+  const inputTokens = observedInteger(memberValue(usage, "input_tokens"));
+  const outputTokens = observedInteger(memberValue(usage, "output_tokens"));
+  const cacheTokens = observedInteger(memberValue(details, "cached_tokens"));
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(cacheTokens === undefined ? {} : { cacheTokens }),
+  };
+}
+
+function nativeOutcome(payload: WireJsonObject): UsageUpdate["outcome"] {
+  return memberValue(payload, "status") === "failed"
+    || memberValue(objectMember(payload, "response"), "status") === "failed"
+    || memberValue(payload, "type") === "response.failed"
+    || memberValue(payload, "type") === "error"
+    ? "upstream_error"
+    : "success";
+}
+
+function createNativeStreamObservation(usage: UsageAttempt): { readonly observe: (event: Readonly<WireJsonObject>) => void } {
+  let observation: UsageObservation = {};
+  return {
+    observe(event) {
+      const observed = responsesUsageObservation(event);
+      observation = {
+        ...((observed.inputTokens ?? observation.inputTokens) === undefined
+          ? {}
+          : { inputTokens: observed.inputTokens ?? observation.inputTokens }),
+        ...((observed.outputTokens ?? observation.outputTokens) === undefined
+          ? {}
+          : { outputTokens: observed.outputTokens ?? observation.outputTokens }),
+        ...((observed.cacheTokens ?? observation.cacheTokens) === undefined
+          ? {}
+          : { cacheTokens: observed.cacheTokens ?? observation.cacheTokens }),
+      };
+      const type = memberValue(event, "type");
+      if (type === "response.completed" || type === "response.incomplete" || type === "response.failed" || type === "error") {
+        usage.finish(nativeOutcome(event), {
+          inputTokens: observation.inputTokens ?? 0,
+          outputTokens: observation.outputTokens ?? 0,
+          cacheTokens: observation.cacheTokens ?? 0,
+        });
+      }
+    },
+  };
+}
+
+function observeBridgeEvent(usage: UsageAttempt, event: WireJsonObject): void {
+  if (memberValue(event, "type") === "response.completed") {
+    usage.finish("success", chatUsage(objectMember(event, "response")));
+  }
+}
+
+function chatUsage(response: WireJsonObject | undefined): UsageTokens {
+  const usage = objectMember(response, "usage");
+  const details = objectMember(usage, "prompt_tokens_details");
+  return {
+    inputTokens: observedInteger(memberValue(usage, "prompt_tokens")) ?? 0,
+    outputTokens: observedInteger(memberValue(usage, "completion_tokens")) ?? 0,
+    cacheTokens: observedInteger(memberValue(details, "cached_tokens")) ?? 0,
+  };
+}
+
+function objectMember(object: WireJsonObject | undefined, key: string): WireJsonObject | undefined {
+  const value = object === undefined ? undefined : memberValue(object, key);
+  return isWireJsonObject(value) ? value : undefined;
+}
+
+function memberValue(object: WireJsonObject | undefined, key: string): WireJson | undefined {
+  if (object === undefined) {
+    return undefined;
+  }
+  const values = memberValues(object, key);
+  return values.length === 1 ? values[0] : undefined;
+}
+
+function observedInteger(value: WireJson | undefined): number | undefined {
+  if (!isWireJsonNumber(value) || !/^(?:0|[1-9]\d*)$/u.test(value.lexeme)) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(value.lexeme, 10);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function usageOutcome(error: unknown, signal: AbortSignal): UsageUpdate["outcome"] {
+  if (signal.aborted) {
+    return abortOutcome(signal);
+  }
+  if (error instanceof Error && error.name === "AbortError") {
+    return "aborted";
+  }
+  if (error instanceof AccountDirectoryError) {
+    return "authentication_error";
+  }
+  const failure = failureFromUnknown(error);
+  switch (failure.kind) {
+  case "invalid_request":
+  case "body_too_large":
+  case "unsupported_media_type":
+  case "unsupported_semantics":
+  case "model_not_found":
+    return "client_error";
+  case "authentication":
+  case "permission":
+    return "authentication_error";
+  case "queue_full":
+  case "queue_timeout":
+    return "overloaded";
+  case "upstream_timeout":
+    return "timeout";
+  case "upstream_http":
+  case "upstream_network":
+  case "upstream_stream_error":
+  case "upstream_stream_truncated":
+  case "invalid_upstream_response":
+  case "invalid_tool_arguments":
+  case "invalid_logprobs":
+    return "upstream_error";
+  case "aborted":
+    return "aborted";
+  case "internal":
+    return "internal_error";
+  }
+}
+
+function abortOutcome(signal: AbortSignal): UsageUpdate["outcome"] {
+  const reason = signal.reason;
+  return reason instanceof GatewayFailureError && reason.failure.kind === "upstream_timeout"
+    ? "timeout"
+    : "aborted";
 }

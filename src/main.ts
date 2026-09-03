@@ -22,11 +22,7 @@ import { createGateway, type GatewayDependencies, type HostedGateway, type Route
 import type { DaemonRuntimeComposition } from "./daemon/runtime.js";
 import { createLocalControlModule } from "./daemon/local_control.js";
 import { closeDatabase, openDatabase } from "./persistence/database.js";
-import { embedMigration } from "./persistence/migrations.js";
-import { migration as runtimeConfigMigration } from "./persistence/migrations/001_runtime_config.js";
-import { migration as accountsMigration } from "./persistence/migrations/010_accounts.js";
-import { migration as telemetryMigration } from "./persistence/migrations/020_telemetry.js";
-import { migration as responsesHistoryMigration } from "./persistence/migrations/030_responses_history.js";
+import { MIGRATION_MANIFEST } from "./persistence/generated_migrations.js";
 import { AccountDirectory as SqliteAccountDirectory } from "./accounts/account_directory.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { createModelCatalogRoutes } from "./protocols/model_catalog/routes.js";
@@ -130,12 +126,14 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       directory: context.directory,
       copilot: context.copilot,
       tokenCounter: context.tokenCounter,
+      ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
       catalog: context.catalog,
       preferences,
       copilot: context.copilot,
+      ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
     }),
     createResponsesRoute({
       directory: context.directory,
@@ -143,6 +141,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       preferences,
       copilot: context.copilot,
       history: context.history,
+      ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
     }),
   ];
 }
@@ -154,12 +153,7 @@ export async function createProductionApplicationContext(
   const credentials = new FileCredentialStore(path.join(startup.dataDir, "credentials.json"));
   const database = openDatabase({
     path: path.join(startup.dataDir, "state.db"),
-    migrations: [
-      embedMigration(runtimeConfigMigration),
-      embedMigration(accountsMigration),
-      embedMigration(telemetryMigration),
-      embedMigration(responsesHistoryMigration),
-    ],
+    migrations: MIGRATION_MANIFEST,
   });
   const runtime = new RuntimeConfigStore(database);
   const snapshot = runtime.seedIfEmpty(env);

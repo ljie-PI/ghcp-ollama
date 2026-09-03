@@ -13,7 +13,7 @@ import { createGateway, type Gateway } from "../../../src/gateway/create_gateway
 import type { FailurePresenter, RouteRegistration } from "../../../src/gateway/hono_app.js";
 import { VERSION } from "../../../src/version.js";
 
-const PROBE_ROOT = path.resolve("tests/refactor/fixtures/gateway-http/probe");
+const PROBE_ROOT = path.resolve("tests/refactor/fixtures/gateway-http-host/probe");
 
 const fakePresenter: FailurePresenter = (failure, requestId) => {
   const status = failure.kind === "queue_full" || failure.kind === "queue_timeout"

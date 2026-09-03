@@ -1,34 +1,80 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  CHAT_MODEL,
+  decodeCapturedBody,
+  type OfflineSdkHarness,
+  startOfflineSdkHarness,
+  waitFor,
+} from "./harness.js";
 
-const enabled = process.env.GHC_GATEWAY_SDK_TESTS === "1";
+describe("RM-11 official Anthropic SDK", () => {
+  let harness: OfflineSdkHarness;
+  let client: Anthropic;
 
-describe.runIf(enabled)("RM-11 Anthropic SDK compatibility", () => {
-  it("can list models and call Messages non-stream and stream through the gateway", async () => {
-    const client = new Anthropic({
-      apiKey: "gateway-local",
-      baseURL: process.env.GHC_GATEWAY_BASE_URL ?? "http://127.0.0.1:31400",
-    });
+  beforeAll(async () => {
+    harness = await startOfflineSdkHarness();
+    client = new Anthropic({ apiKey: "local", baseURL: harness.baseUrl, fetch: harness.fetch, maxRetries: 0 });
+  });
+  afterAll(async () => {
+    await harness.close();
+  });
 
-    const models = await client.models.list();
-    expect(models.data.length).toBeGreaterThanOrEqual(0);
-
+  it("deserializes Messages non-stream and iterates the complete event stream", async () => {
     const message = await client.messages.create({
-      model: process.env.GHC_GATEWAY_SDK_MODEL ?? "gpt",
+      model: CHAT_MODEL,
       max_tokens: 8,
-      messages: [{ role: "user", content: "Say ok." }],
+      messages: [{ role: "user", content: "sdk-anthropic-nonstream" }],
     });
     expect(message.type).toBe("message");
+    expect(message.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
 
     const stream = await client.messages.create({
-      model: process.env.GHC_GATEWAY_SDK_MODEL ?? "gpt",
+      model: CHAT_MODEL,
+      max_tokens: 8,
+      messages: [{ role: "user", content: "sdk-anthropic-stream" }],
+      stream: true,
+    });
+    const eventTypes = [];
+    for await (const event of stream) {
+      eventTypes.push(event.type);
+    }
+    expect(eventTypes[0]).toBe("message_start");
+    expect(eventTypes.at(-1)).toBe("message_stop");
+    expect(decodeCapturedBody(harness.chatRequests[0]!)).toEqual({
+      model: CHAT_MODEL,
+      messages: [{ role: "user", content: "sdk-anthropic-nonstream" }],
+      max_tokens: 8,
+    });
+    expect(decodeCapturedBody(harness.chatRequests[1]!)).toEqual({
+      model: CHAT_MODEL,
+      messages: [{ role: "user", content: "sdk-anthropic-stream" }],
       max_tokens: 8,
       stream: true,
-      messages: [{ role: "user", content: "Say ok." }],
+      stream_options: { include_usage: true },
     });
-    for await (const event of stream) {
-      expect(event.type.length).toBeGreaterThan(0);
-      break;
-    }
+  });
+
+  it("surfaces the official API error class and gateway request ID", async () => {
+    const error = await client.messages.create({
+      model: "missing-sdk-model",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "sdk-error" }],
+    }).then(() => undefined, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Anthropic.APIError);
+    expect(error).toMatchObject({ status: 404, requestID: "req_sdk_loopback" });
+  });
+
+  it("cancels an in-flight official MessageStream", async () => {
+    const stream = client.messages.stream({
+      model: CHAT_MODEL,
+      max_tokens: 8,
+      messages: [{ role: "user", content: "cancel-sdk-request" }],
+    });
+    const iterator = stream[Symbol.asyncIterator]();
+    expect((await iterator.next()).done).toBe(false);
+    stream.abort();
+    await waitFor(() => harness.cancelled.chat > 0);
+    expect(harness.backendKinds).toContain("chat-stream");
   });
 });
