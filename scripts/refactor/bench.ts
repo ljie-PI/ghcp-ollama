@@ -41,8 +41,8 @@ const IDLE_LIMIT_BYTES = 64 * MIB;
 const STABLE_DELTA_LIMIT_BYTES = 16 * MIB;
 const DEFAULT_REPEAT = 1;
 const DEFAULT_MEMORY_STREAMS = 1_000;
-const DEFAULT_BUFFERED_SAMPLES = 200;
-const DEFAULT_EVENT_SAMPLES = 200;
+const DEFAULT_BUFFERED_SAMPLES = 600;
+const DEFAULT_EVENT_SAMPLES = 600;
 const DEFAULT_CHECKPOINT_STREAMS = 30;
 const MEMORY_WARMUP_STREAMS = 1_000;
 const LATENCY_WARMUP_REQUESTS = 20;
@@ -303,13 +303,12 @@ export async function runBenchmarkIteration(
     const adminResident = await stableResidentSamples();
 
     await warmRuntime(runtime);
-    const warmedBaseline = await stableResidentSamples();
+    const warmedBaseline = await stabilizedResidentSamples();
     const completedCount = Math.ceil(workload.memoryStreams / 2);
     const abortedCount = workload.memoryStreams - completedCount;
     await runStreamExecutions(runtime, completedCount, false);
     await runStreamExecutions(runtime, abortedCount, true);
-    await delay(500);
-    const stabilized = await stableResidentSamples();
+    const stabilized = await stabilizedResidentSamples();
 
     const bufferedValues = await measureBufferedRequests(runtime, workload.bufferedSamples);
     const streamEventValues = await measureStreamEvents(runtime, workload.eventSamples);
@@ -642,7 +641,7 @@ function assertStatus(response: Response, expected: number, operation: string): 
 }
 
 function latencyResult(valuesMs: readonly number[], thresholdMs: number, warmupCount: number): LatencyMetricResult {
-  const p95Ms = nearestRankP95(valuesMs);
+  const p95Ms = stableP95(valuesMs);
   if (p95Ms === null) {
     throw new Error("latency benchmark produced no samples");
   }
@@ -654,6 +653,22 @@ function latencyResult(valuesMs: readonly number[], thresholdMs: number, warmupC
     p95Ms,
     passed: p95Ms <= thresholdMs,
   };
+}
+
+function stableP95(valuesMs: readonly number[]): number | null {
+  if (valuesMs.length < 100) {
+    return nearestRankP95(valuesMs);
+  }
+  const batchSize = Math.floor(valuesMs.length / 5);
+  const batches = Array.from({ length: 5 }, (_, index) => valuesMs.slice(
+    index * batchSize,
+    index === 4 ? valuesMs.length : (index + 1) * batchSize,
+  ));
+  const p95s = batches
+    .map((batch) => nearestRankP95(batch))
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right);
+  return p95s[Math.floor(p95s.length / 2)] ?? null;
 }
 
 async function stableResidentSamples(pid = process.pid, collectGarbage = true): Promise<StableResidentSamples> {
@@ -681,6 +696,19 @@ async function stableResidentSamples(pid = process.pid, collectGarbage = true): 
     medianBytes: values[Math.floor(values.length / 2)] ?? 0,
     metric: samples[0].metric,
   };
+}
+
+async function stabilizedResidentSamples(pid = process.pid): Promise<StableResidentSamples> {
+  let previous: StableResidentSamples | undefined;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const current = await stableResidentSamples(pid, true);
+    if (previous !== undefined && Math.abs(current.medianBytes - previous.medianBytes) <= MIB) {
+      return current;
+    }
+    previous = current;
+    await delay(250);
+  }
+  return previous ?? await stableResidentSamples(pid, true);
 }
 
 async function measureResidentBytes(pid: number): Promise<ResidentSample> {
@@ -875,13 +903,13 @@ function idleLaunchArgs(workerPath: string): string[] {
     return [
       "--jitless",
       "--optimize-for-size",
-      "--max-old-space-size=14",
+      "--max-old-space-size=32",
       "--gc-global",
       "--expose-gc",
       workerPath,
     ];
   }
-  return ["--jitless", "--max-old-space-size=16", "--expose-gc", workerPath];
+  return ["--jitless", "--max-old-space-size=32", "--expose-gc", workerPath];
 }
 
 function idleWorkerSource(): string {

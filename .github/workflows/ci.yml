@@ -90,6 +90,13 @@ jobs:
         run: npm run pack
       - uses: actions/upload-artifact@v4
         if: always()
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: ""
+          NODE_OPTIONS: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
+          NO_PROXY: ""
         with:
           name: ci-${{ matrix.platform }}
           path: artifacts/**

@@ -11,7 +11,7 @@ Canonical command: `npm run pack`.
 The package gate builds from a clean `dist/`, creates an actual tarball, verifies an exact allowlisted manifest, computes SHA-256, performs an offline clean install, runs installed `ghcg --help`, probes foreground `/healthz`, and exercises detached start/status/stop. The latest local tarball SHA-256 was:
 
 ```text
-6f0fcc991b5c594418ddda536d5a99483da348c236f8598c6037b304d935870d
+63d2dbe2b98af2cd69aa9c0c881c3f0b2c4abe17e2c95eebe5b64f979da606f2
 ```
 
 The exact manifest, sizes, asset hashes, installed CLI result, foreground health result, and daemon lifecycle result are written to `artifacts/ci/package-smoke.json`. CI uploads that file for each platform.
@@ -30,7 +30,7 @@ The exact manifest, sizes, asset hashes, installed CLI result, foreground health
 ## Verification evidence
 
 - Default typecheck, lint, build, and test commands passed.
-- Default test suite: 372 passed with 3 platform-specific skips in the latest local run.
+- Default test suite: 373 passed with 3 platform-specific skips in the latest local run.
 - Fixture verification: 54 generated/verified entries.
 - Admin Playwright: exactly 7 offline flows passed.
 - Guarded offline official SDK suite: 12 tests passed during implementation.
