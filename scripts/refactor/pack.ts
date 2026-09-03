@@ -4,7 +4,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertNode24 } from "./node_version.js";
 
 const PACKAGE_NAME = "@ljie-pi/ghc-gateway";
@@ -360,7 +360,7 @@ function runCommand(
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  delete env.NODE_OPTIONS;
+  env.NODE_OPTIONS = `--import=${pathToFileURL(path.resolve("scripts", "refactor", "bootstrap.mjs")).href}`;
   for (const key of Object.keys(env)) {
     if (/^(?:GHC_GATEWAY_(?!CI_NETWORK_GUARD))/u.test(key)
       || /(?:token|secret|password|authorization|auth_token)/iu.test(key)) {

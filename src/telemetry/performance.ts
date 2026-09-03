@@ -1,5 +1,6 @@
 export const WINDOW_MS = 5 * 60 * 1000;
 export const MIN_OBSERVATIONS = 20;
+export const MAX_WINDOW_SAMPLES = 4_096;
 export const THRESHOLDS = {
   bufferedMs: 5,
   eventMs: 2,
@@ -54,19 +55,19 @@ export class PerformanceWindows {
   ) {}
 
   observeBuffered(ms: number): void {
-    this.buffered.push(ms);
+    addSample(this.buffered, ms);
   }
 
   observeEvent(ms: number): void {
-    this.event.push(ms);
+    addSample(this.event, ms);
   }
 
   observeCheckpoint(ms: number): void {
-    this.checkpoint.push(ms);
+    addSample(this.checkpoint, ms);
   }
 
   observeEventLoop(ms: number): void {
-    this.eventLoop.push(ms);
+    addSample(this.eventLoop, ms);
   }
 
   evaluateWindow(): PerformanceEvaluation {
@@ -121,6 +122,16 @@ export class PerformanceWindows {
     }
     return evaluation;
   }
+}
+
+function addSample(samples: number[], value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    return;
+  }
+  if (samples.length >= MAX_WINDOW_SAMPLES) {
+    samples.shift();
+  }
+  samples.push(value);
 }
 
 interface MetricWindows {
