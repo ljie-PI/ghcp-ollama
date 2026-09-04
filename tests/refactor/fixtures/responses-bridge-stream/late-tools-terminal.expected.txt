@@ -26,7 +26,7 @@ event: response.function_call_arguments.delta
 data: {"type":"response.function_call_arguments.delta","sequence_number":9,"item_id":"call_late","output_index":2,"delta":"ents"}
 
 event: response.function_call_arguments.done
-data: {"type":"response.function_call_arguments.done","sequence_number":10,"item_id":"call_fn","output_index":0,"arguments":"abcdefghijklmnop"}
+data: {"type":"response.function_call_arguments.done","sequence_number":10,"item_id":"call_fn","output_index":0,"arguments":"abcdefghijklmnop","name":"lookup"}
 
 event: response.output_item.done
 data: {"type":"response.output_item.done","sequence_number":11,"output_index":0,"item":{"type":"function_call","id":"call_fn","call_id":"call_fn","name":"lookup","arguments":"abcdefghijklmnop","status":"completed"}}
@@ -41,7 +41,7 @@ event: response.output_item.done
 data: {"type":"response.output_item.done","sequence_number":14,"output_index":1,"item":{"type":"custom_tool_call","id":"call_custom","call_id":"call_custom","name":"render","input":"card","status":"completed"}}
 
 event: response.function_call_arguments.done
-data: {"type":"response.function_call_arguments.done","sequence_number":15,"item_id":"call_late","output_index":2,"arguments":"late-arguments"}
+data: {"type":"response.function_call_arguments.done","sequence_number":15,"item_id":"call_late","output_index":2,"arguments":"late-arguments","name":"lookup"}
 
 event: response.output_item.done
 data: {"type":"response.output_item.done","sequence_number":16,"output_index":2,"item":{"type":"function_call","id":"call_late","call_id":"call_late","name":"lookup","arguments":"late-arguments","status":"completed"}}

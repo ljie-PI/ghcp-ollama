@@ -195,6 +195,8 @@ describe("RM-16 Responses bridge stream conversion", () => {
       || item.type === "response.custom_tool_call_input.delta")) {
       expect((event.delta as string).length).toBeLessThanOrEqual(10);
     }
+    expect(toolEvents.filter((event) => event.type === "response.function_call_arguments.done")
+      .map((event) => event.name)).toEqual(["lookup", "child", "lookup", "tool_search", "lookup"]);
 
     const completed = eventJson(emissions.at(-1)).response as { output: Array<Record<string, unknown>> };
     expect(completed.output).toEqual([

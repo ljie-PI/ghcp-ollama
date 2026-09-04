@@ -199,6 +199,26 @@ describe("RM-11 Anthropic request route", () => {
     }
   });
 
+  it("maps official Anthropic xhigh effort for reasoning-capable models", async () => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt-5",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "reason" }],
+        output_config: { effort: "xhigh" },
+      }));
+
+      expect(response.status).toBe(200);
+      expect(decodeChatBody(capturedRequests[0] as ChatRequest)).toMatchObject({
+        model: "gpt-5",
+        reasoning_effort: "xhigh",
+      });
+    } finally {
+      await close();
+    }
+  });
+
   it("keeps parallel tool_result messages adjacent and moves media into the following user message", async () => {
     const captured: ChatRequest[] = [];
     const backend = new ScriptedCopilotBackend({
