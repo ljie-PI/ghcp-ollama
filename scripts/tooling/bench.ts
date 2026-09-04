@@ -399,7 +399,7 @@ export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifac
   if (!Number.isInteger(repeat) || repeat < 1) {
     throw new Error("--repeat must be a positive integer");
   }
-  const workerPath = path.resolve("artifacts/bench/scripts/refactor/bench.js");
+  const workerPath = path.resolve("artifacts/bench/scripts/tooling/bench.js");
   await writeCompiledWorker(workerPath);
   const runs: BenchmarkRunResult[] = [];
   for (let run = 1; run <= repeat; run += 1) {
@@ -801,7 +801,7 @@ async function availablePort(): Promise<number> {
 }
 
 async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
-  const workerPath = path.resolve("artifacts/bench/scripts/refactor/bench.js");
+  const workerPath = path.resolve("artifacts/bench/scripts/tooling/bench.js");
   const { stdout, stderr } = await execFileAsync(process.execPath, [
     "--jitless",
     "--optimize-for-size",
@@ -827,7 +827,7 @@ async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
 }
 
 async function runCompiledIdleWorker(): Promise<IdleWorkerResult> {
-  const workerPath = path.resolve("artifacts/bench/scripts/refactor/bench_idle.js");
+  const workerPath = path.resolve("artifacts/bench/scripts/tooling/bench_idle.js");
   await writeFile(workerPath, idleWorkerSource(), "utf8");
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-rm22-idle-"));
   const port = await availablePort();

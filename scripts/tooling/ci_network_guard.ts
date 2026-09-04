@@ -52,7 +52,7 @@ function assertAllowed(args: readonly unknown[]): void {
   const host = args.map(hostFromUnknown).find((value) => value !== null);
 
   if (host !== undefined && host !== null && !isLoopbackHost(host)) {
-    throw new Error(`network access to ${host} is blocked by the refactor CI guard`);
+    throw new Error(`network access to ${host} is blocked by the CI network guard`);
   }
 }
 
@@ -90,7 +90,7 @@ export function installCiNetworkGuard(): void {
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = input instanceof Request ? new URL(input.url) : new URL(input.toString());
       if (!isAllowedNetworkTarget(url)) {
-        return Promise.reject(new Error(`network access to ${url.hostname} is blocked by the refactor CI guard`));
+        return Promise.reject(new Error(`network access to ${url.hostname} is blocked by the CI network guard`));
       }
 
       return originalFetch(input, init);

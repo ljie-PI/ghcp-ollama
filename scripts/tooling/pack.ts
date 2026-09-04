@@ -367,7 +367,7 @@ function safeOutput(value: string): string {
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  env.NODE_OPTIONS = `--experimental-strip-types --import=${pathToFileURL(path.resolve("scripts", "refactor", "ci_network_guard.ts")).href}`;
+  env.NODE_OPTIONS = `--experimental-strip-types --import=${pathToFileURL(path.resolve("scripts", "tooling", "ci_network_guard.ts")).href}`;
   for (const key of Object.keys(env)) {
     if (/^(?:GHC_GATEWAY_(?!CI_NETWORK_GUARD))/u.test(key)
       || /(?:token|secret|password|authorization|auth_token)/iu.test(key)) {

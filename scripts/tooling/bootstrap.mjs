@@ -4,7 +4,7 @@ const [majorText] = process.versions.node.split(".");
 const major = Number.parseInt(majorText ?? "", 10);
 
 if (!Number.isInteger(major) || major < 24) {
-  console.error(`Node.js 24 or newer is required for the refactor toolchain; current ${process.versions.node}`);
+  console.error(`Node.js 24 or newer is required for the project toolchain; current ${process.versions.node}`);
   process.exit(1);
 }
 
@@ -30,7 +30,7 @@ if (invokedAsMain) {
   }
 
   if (!target.endsWith(".ts")) {
-    console.error("usage: node scripts/refactor/bootstrap.mjs [--check | <script.ts> ...args]");
+    console.error("usage: node scripts/tooling/bootstrap.mjs [--check | <script.ts> ...args]");
     process.exit(2);
   }
 

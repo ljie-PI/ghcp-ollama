@@ -7,7 +7,7 @@ import {
   generateMigrationManifest,
   MigrationGenerateError,
   writeMigrationManifest,
-} from "../../../scripts/refactor/generate_migrations.js";
+} from "../../../scripts/tooling/generate_migrations.js";
 import { closeDatabase, openDatabase } from "../../../src/persistence/database.js";
 import { migration as runtimeConfigMigration } from "../../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../../src/persistence/migrations/010_accounts.js";

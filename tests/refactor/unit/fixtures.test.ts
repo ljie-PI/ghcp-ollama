@@ -2,7 +2,7 @@ import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { verifyFixtureManifests } from "../../../scripts/refactor/fixtures.js";
+import { verifyFixtureManifests } from "../../../scripts/tooling/fixtures.js";
 
 const FIXTURE_ROOT = path.resolve("tests/refactor/fixtures");
 

@@ -15,6 +15,6 @@ export function assertNode24(version = process.versions.node): void {
   const major = currentNodeMajor(version);
 
   if (major < NODE_24_MAJOR) {
-    throw new Error(`Node.js 24 or newer is required for the refactor toolchain; current ${version}`);
+    throw new Error(`Node.js 24 or newer is required for the project toolchain; current ${version}`);
   }
 }

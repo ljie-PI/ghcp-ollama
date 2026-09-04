@@ -316,7 +316,7 @@ tests/refactor/
   performance/
 tests/live/
   sdk/
-scripts/refactor/
+scripts/tooling/
 dist-refactor/                 # generated, never committed
 dist/                          # final package output, never committed
 ```
@@ -764,7 +764,7 @@ Migration versions are reserved to avoid conflicts between parallel slices:
 | `030` | `RM-12` | Responses History |
 
 Each migration file exports one immutable `{version,name,sql}` object and its filename begins with the same
-three-digit version。`scripts/refactor/generate_migrations.ts` performs build-time filesystem discovery, rejects
+three-digit version。`scripts/tooling/generate_migrations.ts` performs build-time filesystem discovery, rejects
 filename/export mismatch or duplicate/reserved-owner violations, computes checksums and generates an ordered manifest
 under the uncommitted build directory。Production imports that generated static manifest；it does not discover runtime
 files and npm does not need to ship loose SQL assets。A later slice registers a migration only by adding its owned
@@ -1792,7 +1792,7 @@ route。Examples fixed by `RM-09` and required for later slices：
 - **Owned scope/files**：`package.json`、`package-lock.json`、`tsconfig.refactor.json`、
   TypeScript-aware ESLint config、`vitest.refactor.config.ts`、`playwright.config.ts`、
   `vitest.sdk.config.ts`、
-  `src/version.ts`、`scripts/refactor/fixtures.ts`、`bench.ts`、`pack.ts`、`ci_network_guard.ts`、
+  `src/version.ts`、`scripts/tooling/fixtures.ts`、`bench.ts`、`pack.ts`、`ci_network_guard.ts`、
   `tests/refactor/performance/baseline.test.ts`、`tests/refactor/sdk/harness.ts`、`tests/live/sdk/harness.ts`、
   `.github/workflows/refactor-ci.yml`。
 - **Deliverables/interface**：Node `>=24` refactor scripts：
@@ -1874,7 +1874,7 @@ route。Examples fixed by `RM-09` and required for later slices：
 - **Depends on**：`RM-03`。**Parallel with**：none。
 - **Must read**：本文第 7 节、[Architecture](../architecture.md) persistence/config sections。
 - **Owned scope/files**：`src/persistence/database.ts`、`src/persistence/migrations.ts`、
-  `src/persistence/migrations/001_runtime_config.ts`、`scripts/refactor/generate_migrations.ts`、
+  `src/persistence/migrations/001_runtime_config.ts`、`scripts/tooling/generate_migrations.ts`、
   `src/config/runtime_config.ts`、
   `tests/refactor/unit/persistence_migrations.test.ts`、
   `tests/refactor/unit/runtime_config.test.ts`。
