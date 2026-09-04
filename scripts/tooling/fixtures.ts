@@ -190,7 +190,7 @@ async function main(): Promise<void> {
 
   if (command === "verify") {
     const entries = await verifyFixtureManifests();
-    console.log(`Verified ${entries.length} refactor fixture manifest entries.`);
+    console.log(`Verified ${entries.length} fixture manifest entries.`);
     return;
   }
 

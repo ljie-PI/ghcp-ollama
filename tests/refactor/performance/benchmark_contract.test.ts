@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateBenchmarkRuns,
   type BenchmarkRunResult,
-} from "../../../scripts/refactor/bench.js";
+} from "../../../scripts/tooling/bench.js";
 
 function passingRun(run: number): BenchmarkRunResult {
   const resident = {

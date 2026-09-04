@@ -20,7 +20,7 @@
   },
   "include": [
     "src/**/*.ts",
-    "scripts/refactor/**/*.ts",
+    "scripts/tooling/**/*.ts",
     "tests/refactor/**/*.ts",
     "vitest.refactor.config.ts",
     "playwright.config.ts"

@@ -21,7 +21,7 @@ import {
 import {
   verifyFixtureManifests,
   type FixtureManifestEntry,
-} from "../../../scripts/refactor/fixtures.js";
+} from "../../../scripts/tooling/fixtures.js";
 
 const FIXTURE_ROOT = path.resolve("tests/refactor/fixtures/wire-json");
 const DEFAULT_LIMITS: WireJsonParseLimits = { maxBytes: 1024, maxDepth: 8 };

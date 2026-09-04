@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { productionDependencySpecs } from "../../../scripts/refactor/production_dependency_specs.js";
+import { productionDependencySpecs } from "../../../scripts/tooling/production_dependency_specs.js";
 
 describe("RM-22 production dependency cache closure", () => {
   it("contains the runtime closure and excludes SDK/build-only packages", async () => {

@@ -13,6 +13,6 @@ export default defineConfig({
     passWithNoTests: true,
     testTimeout: 60_000,
     hookTimeout: 30_000,
-    setupFiles: ["./scripts/refactor/ci_network_guard.ts"],
+    setupFiles: ["./scripts/tooling/ci_network_guard.ts"],
   },
 });

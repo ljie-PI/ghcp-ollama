@@ -6,7 +6,7 @@ import {
   assertExactManifest,
   inspectAdminBundle,
   type NpmPackEntry,
-} from "../../../scripts/refactor/pack.js";
+} from "../../../scripts/tooling/pack.js";
 
 const temporaryDirectories: string[] = [];
 

@@ -44,7 +44,7 @@ jobs:
           mkdir -p artifacts/ci
           test "$(npm config get registry)" = "https://registry.npmjs.org/"
           npm ci
-          while IFS= read -r spec; do npm cache add "$spec"; done < <(node scripts/refactor/bootstrap.mjs scripts/refactor/production_dependency_specs.ts)
+          while IFS= read -r spec; do npm cache add "$spec"; done < <(node scripts/tooling/bootstrap.mjs scripts/tooling/production_dependency_specs.ts)
           npm ci --offline
           npx playwright install chromium
           {
@@ -62,7 +62,7 @@ jobs:
         run: |
           {
             echo "GHC_GATEWAY_CI_NETWORK_GUARD=1"
-            echo "NODE_OPTIONS=--import ./scripts/refactor/bootstrap.mjs"
+            echo "NODE_OPTIONS=--import ./scripts/tooling/bootstrap.mjs"
             echo "HTTP_PROXY=http://127.0.0.1:9"
             echo "HTTPS_PROXY=http://127.0.0.1:9"
             echo "ALL_PROXY=http://127.0.0.1:9"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runBenchmarkIteration } from "../../../scripts/refactor/bench.js";
+import { runBenchmarkIteration } from "../../../scripts/tooling/bench.js";
 
 describe("RM-22 full-gateway benchmark smoke", () => {
   it("measures production gateway, stream, and SQLite seams with scripted remotes", async () => {

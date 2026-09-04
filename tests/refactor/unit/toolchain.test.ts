@@ -5,8 +5,8 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { VERSION } from "../../../src/version.js";
-import { currentNodeMajor } from "../../../scripts/refactor/node_version.js";
-import { isAllowedNetworkTarget, isLoopbackHost } from "../../../scripts/refactor/ci_network_guard.js";
+import { currentNodeMajor } from "../../../scripts/tooling/node_version.js";
+import { isAllowedNetworkTarget, isLoopbackHost } from "../../../scripts/tooling/ci_network_guard.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -100,7 +100,7 @@ describe("RM-22 atomic package cutover", () => {
   });
 
   it("keeps official SDK commands behind manual opt-in guards", async () => {
-    const command = ["scripts/refactor/bootstrap.mjs", "scripts/refactor/require_opt_in.ts"];
+    const command = ["scripts/tooling/bootstrap.mjs", "scripts/tooling/require_opt_in.ts"];
 
     await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
       env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "" },
@@ -124,7 +124,7 @@ describe("RM-22 atomic package cutover", () => {
   });
 
   it("keeps bootstrap.mjs as the only tool JavaScript shim", async () => {
-    const files = await readdir("scripts/refactor");
+    const files = await readdir("scripts/tooling");
     expect(files.filter((file) => file.endsWith(".mjs")).sort()).toEqual(["bootstrap.mjs"]);
   });
 
@@ -144,6 +144,7 @@ describe("RM-22 atomic package cutover", () => {
       "tsconfig.build.refactor.json",
       "tsconfig.sdk.refactor.json",
       "vitest.refactor.config.ts",
+      "scripts/refactor",
       "scripts/refactor/smoke_legacy.ts",
     ]) {
       await expect(access(removed)).rejects.toThrow();
@@ -155,7 +156,7 @@ describe("RM-22 atomic package cutover", () => {
   });
 
   it("preloads the CI network guard without contacting external hosts", async () => {
-    const bootstrapUrl = pathToFileURL(path.resolve("scripts/refactor/bootstrap.mjs")).href;
+    const bootstrapUrl = pathToFileURL(path.resolve("scripts/tooling/bootstrap.mjs")).href;
 
     await expect(execFileAsync(process.execPath, [
       "--import",
