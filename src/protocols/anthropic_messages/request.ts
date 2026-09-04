@@ -510,7 +510,7 @@ function convertReasoning(request: WireJsonObject, model: string): string | unde
   if (isWireJsonObject(outputConfig)) {
     const effort = firstMember(outputConfig, "effort");
     if (typeof effort === "string") {
-      if (effort === "low" || effort === "medium" || effort === "high") {
+      if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh") {
         return effort;
       }
       if (effort === "max") {

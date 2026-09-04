@@ -17,7 +17,17 @@ import { bootstrapGateway } from "../../../src/main.js";
 
 export const SDK_TEST_GUARD = "GHC_GATEWAY_SDK_TESTS";
 export const CHAT_MODEL = "chat-sdk";
+export const REASONING_MODEL = "gpt-5";
 export const NATIVE_RESPONSES_MODEL = "responses-sdk";
+export const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+export const PNG_DATA_URL = `data:image/png;base64,${PNG_BASE64}`;
+
+export function getWeather(city: string): Readonly<{ city: string; condition: "sunny"; temperature_c: 22 }> {
+  if (city !== "Tokyo") {
+    throw new Error("get_weather offline scenario expected Tokyo");
+  }
+  return { city, condition: "sunny", temperature_c: 22 };
+}
 
 const encoder = new TextEncoder();
 const nativeFetch = globalThis.fetch;
@@ -64,6 +74,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       return {
         data: [
           { id: CHAT_MODEL, name: "SDK Chat", vendor: "github", model_picker_enabled: true, model_info: { mode: "chat" } },
+          { id: REASONING_MODEL, name: "SDK Reasoning", vendor: "github", model_picker_enabled: true, model_info: { mode: "chat" } },
           { id: NATIVE_RESPONSES_MODEL, name: "SDK Responses", vendor: "github", model_picker_enabled: true, model_info: { mode: "responses", supported_endpoints: ["/v1/responses"] } },
         ],
       };
@@ -79,28 +90,28 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       return {
         status: 200,
         headers: new Headers({ "x-scripted-remote": "chat" }),
-        body: jsonBytes(chatCompletion()),
+        body: jsonBytes(scriptedChatCompletion(request.body)),
       };
     },
     chatStream(request) {
       chatRequests.push(request);
       return isCancellationRequest(request.body)
         ? cancellableChatStream(request.signal, cancellation)
-        : [chatSse(chatCompletionChunk(modelFromBody(request.body))), encoder.encode("data: [DONE]\n\n")];
+        : scriptedChatStream(request.body);
     },
     responses(request) {
       responsesRequests.push(request);
       return {
         status: 200,
         headers: new Headers({ "x-scripted-remote": "responses" }),
-        body: jsonBytes(responsesObject("completed")),
+        body: jsonBytes(scriptedResponsesObject(request.body)),
       };
     },
     responsesStream(request) {
       responsesRequests.push(request);
       return isCancellationRequest(request.body)
         ? cancellableResponsesStream(request.signal, cancellation)
-        : [responsesSse("response.completed", { type: "response.completed", response: responsesObject("completed") })];
+        : scriptedResponsesStream(request.body);
     },
   });
   let databaseClosed = false;
@@ -122,6 +133,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       tokenCounter: () => 0,
       modelMetadata: new Map([
         [CHAT_MODEL, { mode: "chat", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],
+        [REASONING_MODEL, { mode: "chat", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],
         [NATIVE_RESPONSES_MODEL, { mode: "responses", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],
       ]),
       async close() {
@@ -196,15 +208,42 @@ async function reserveLoopbackPort(): Promise<number> {
   return address.port;
 }
 
-function chatCompletion(): Record<string, unknown> {
+function chatCompletion(
+  content: string | null = "pong",
+  model = CHAT_MODEL,
+  extraMessage: Readonly<Record<string, unknown>> = {},
+  finishReason = "stop",
+): Record<string, unknown> {
   return {
     id: "chatcmpl_sdk",
     object: "chat.completion",
     created: 1_700_000_000,
-    model: CHAT_MODEL,
-    choices: [{ index: 0, message: { role: "assistant", content: "pong" }, finish_reason: "stop" }],
+    model,
+    choices: [{ index: 0, message: { role: "assistant", content, ...extraMessage }, finish_reason: finishReason }],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   };
+}
+
+function scriptedChatCompletion(body: Uint8Array): Record<string, unknown> {
+  const request = decodedBody(body);
+  const model = typeof request.model === "string" ? request.model : CHAT_MODEL;
+  if (containsRole(request, "tool")) {
+    return chatCompletion("Tool result accepted.", model);
+  }
+  if (Array.isArray(request.tools)) {
+    return chatCompletion(null, model, {
+      tool_calls: [{
+        id: "call_weather",
+        index: 0,
+        type: "function",
+        function: { name: "get_weather", arguments: "{\"city\":\"Tokyo\"}" },
+      }],
+    }, "tool_calls");
+  }
+  if (typeof request.reasoning_effort === "string") {
+    return chatCompletion("Reasoned answer.", model, { reasoning_content: `reason-${request.reasoning_effort}` });
+  }
+  return chatCompletion(serialized(body).includes("image_url") ? "Image accepted." : "pong", model);
 }
 
 function chatCompletionChunk(model = CHAT_MODEL): Record<string, unknown> {
@@ -217,7 +256,39 @@ function chatCompletionChunk(model = CHAT_MODEL): Record<string, unknown> {
   };
 }
 
-function responsesObject(status: "in_progress" | "completed"): Record<string, unknown> {
+function scriptedChatStream(body: Uint8Array): Uint8Array[] {
+  const request = decodedBody(body);
+  const model = typeof request.model === "string" ? request.model : CHAT_MODEL;
+  if (Array.isArray(request.tools)) {
+    return [
+      chatSse(chatToolChunk(model, {
+        index: 0,
+        id: "call_stream",
+        type: "function",
+        function: { name: "get_weather", arguments: "{\"city\":" },
+      })),
+      chatSse(chatToolChunk(model, { index: 0, function: { arguments: "\"Tokyo\"}" } })),
+      chatSse({
+        ...chatCompletionChunk(model),
+        choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+      }),
+      encoder.encode("data: [DONE]\n\n"),
+    ];
+  }
+  return [chatSse(chatCompletionChunk(model)), encoder.encode("data: [DONE]\n\n")];
+}
+
+function chatToolChunk(model: string, toolCall: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  return {
+    ...chatCompletionChunk(model),
+    choices: [{ index: 0, delta: { tool_calls: [toolCall] }, finish_reason: null }],
+  };
+}
+
+function responsesObject(
+  status: "in_progress" | "completed",
+  output?: readonly Record<string, unknown>[],
+): Record<string, unknown> {
   const completed = status === "completed";
   return {
     id: "resp_sdk",
@@ -231,14 +302,14 @@ function responsesObject(status: "in_progress" | "completed"): Record<string, un
     max_output_tokens: 8,
     metadata: null,
     model: NATIVE_RESPONSES_MODEL,
-    output: completed ? [{
+    output: output ?? (completed ? [{
       id: "msg_sdk",
       type: "message",
       status: "completed",
       role: "assistant",
       content: [{ type: "output_text", text: "pong", annotations: [] }],
-    }] : [],
-    output_text: completed ? "pong" : "",
+    }] : []),
+    output_text: completed && output === undefined ? "pong" : "",
     parallel_tool_calls: true,
     previous_response_id: null,
     reasoning: { effort: null, summary: null },
@@ -253,6 +324,86 @@ function responsesObject(status: "in_progress" | "completed"): Record<string, un
       ? { input_tokens: 1, input_tokens_details: { cached_tokens: 0 }, output_tokens: 1, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 2 }
       : null,
   };
+}
+
+function scriptedResponsesObject(body: Uint8Array): Record<string, unknown> {
+  const request = decodedBody(body);
+  if (hasFunctionCallOutput(request)) {
+    return responsesObject("completed");
+  }
+  if (Array.isArray(request.tools)) {
+    return responsesObject("completed", [{
+      id: "fc_weather",
+      type: "function_call",
+      call_id: "call_weather",
+      name: "get_weather",
+      arguments: "{\"city\":\"Tokyo\"}",
+      status: "completed",
+    }]);
+  }
+  return responsesObject("completed");
+}
+
+function scriptedResponsesStream(body: Uint8Array): Uint8Array[] {
+  const request = decodedBody(body);
+  if (Array.isArray(request.tools)) {
+    const inProgress = responsesObject("in_progress");
+    const item = {
+      id: "fc_stream",
+      type: "function_call",
+      call_id: "call_stream",
+      name: "get_weather",
+      arguments: "{\"city\":\"Tokyo\"}",
+      status: "completed",
+    };
+    return [
+      responsesSse("response.created", { type: "response.created", sequence_number: 0, response: inProgress }),
+      responsesSse("response.output_item.added", {
+        type: "response.output_item.added",
+        sequence_number: 1,
+        output_index: 0,
+        item: { ...item, arguments: "", status: "in_progress" },
+      }),
+      responsesSse("response.function_call_arguments.delta", {
+        type: "response.function_call_arguments.delta",
+        sequence_number: 2,
+        item_id: item.id,
+        output_index: 0,
+        delta: "{\"city\":" ,
+      }),
+      responsesSse("response.function_call_arguments.delta", {
+        type: "response.function_call_arguments.delta",
+        sequence_number: 3,
+        item_id: item.id,
+        output_index: 0,
+        delta: "\"Tokyo\"}",
+      }),
+      responsesSse("response.function_call_arguments.done", {
+        type: "response.function_call_arguments.done",
+        sequence_number: 4,
+        item_id: item.id,
+        output_index: 0,
+        name: item.name,
+        arguments: item.arguments,
+      }),
+      responsesSse("response.output_item.done", {
+        type: "response.output_item.done",
+        sequence_number: 5,
+        output_index: 0,
+        item,
+      }),
+      responsesSse("response.completed", {
+        type: "response.completed",
+        sequence_number: 6,
+        response: responsesObject("completed", [item]),
+      }),
+    ];
+  }
+  return [responsesSse("response.completed", {
+    type: "response.completed",
+    sequence_number: 0,
+    response: scriptedResponsesObject(body),
+  })];
 }
 
 async function* cancellableChatStream(
@@ -295,9 +446,37 @@ function isCancellationRequest(body: Uint8Array): boolean {
   return new TextDecoder().decode(body).includes("cancel-sdk-request");
 }
 
-function modelFromBody(body: Uint8Array): string {
-  const decoded = JSON.parse(new TextDecoder().decode(body)) as { readonly model?: unknown };
-  return typeof decoded.model === "string" ? decoded.model : CHAT_MODEL;
+function decodedBody(body: Uint8Array): Record<string, unknown> {
+  const value = JSON.parse(serialized(body)) as unknown;
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function serialized(body: Uint8Array): string {
+  return new TextDecoder().decode(body);
+}
+
+function containsRole(value: unknown, role: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => containsRole(item, role));
+  }
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return record.role === role || Object.values(record).some((item) => containsRole(item, role));
+}
+
+function hasFunctionCallOutput(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(hasFunctionCallOutput);
+  }
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return record.type === "function_call_output" || Object.values(record).some(hasFunctionCallOutput);
 }
 
 function jsonBytes(value: unknown): Uint8Array {

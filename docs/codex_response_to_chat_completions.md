@@ -923,6 +923,9 @@ response.function_call_arguments.done
 response.output_item.done
 ```
 
+`response.function_call_arguments.done` 必须包含最终 `arguments` 和下游可见的最终 function `name`；
+namespace call 使用 namespace 内的 child name，tool-search call 使用映射后的 name。
+
 Custom call 不发送 `response.function_call_arguments.*`。结束时按第 9.4 节解包 input：
 
 ```text

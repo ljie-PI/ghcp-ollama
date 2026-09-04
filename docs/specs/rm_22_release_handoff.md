@@ -30,11 +30,11 @@ The exact manifest, sizes, asset hashes, installed CLI result, foreground health
 ## Verification evidence
 
 - Default typecheck, lint, build, and test commands passed.
-- Default test suite: 378 passed with three platform-specific skips in the latest local release candidate.
+- Default test suite: 379 passed with three platform-specific skips in the latest local release candidate.
 - Fixture verification: 54 generated/verified entries.
 - Admin Playwright: exactly 7 offline flows passed.
-- Guarded offline official SDK suite: 13 tests passed, including native and Chat-bridge Responses plans.
-- Guarded live official SDK suite: 4 tests passed at 2026-09-03T14:49Z against `github.com`, using OpenAI SDK 7.5.0, Anthropic SDK 0.120.0, and Ollama SDK 0.6.3. The selected shared Chat model was `gpt-5-mini`; the selected native Responses model was `gpt-5.3-codex`. Only sanitized status and model IDs were retained.
+- Guarded offline official SDK suite: 43 tests passed, including system and ordinary multi-turn input, PNG images, tool calls, actual second-request tool results, mixed image/tool input, streamed tool parsing, reasoning parameters, and native plus Chat-bridge Responses plans.
+- Guarded live official SDK suite: 9 tests passed at 2026-09-04T02:34Z against `github.com`, using OpenAI SDK 7.5.0, Anthropic SDK 0.120.0, and Ollama SDK 0.6.3. The selected shared Chat and vision model was `gemini-3.5-flash`; the selected reasoning model was `gpt-5-mini`; the selected native Responses model was `gpt-5.3-codex`. The same rich scenario families as the offline suite were exercised through the real provider. Only sanitized status and model IDs were retained.
 - Three-run full benchmark passed all documented RSS, stream-stability, buffered, stream-event, checkpoint, and event-loop thresholds. Raw local values are in `rm_22_performance_handoff.md` and generated benchmark artifacts.
 - Fresh and partially migrated new-v1 databases passed the production migration set.
 - Official-registry `npm ci` and `npm ci --offline` passed.
@@ -56,7 +56,7 @@ Each platform runs default typecheck, lint, build, tests, fixtures, seven Admin 
 1. Check out the merged `refactor` commit in a clean workspace.
 2. Rerun all default gates and retain package, benchmark, route, daemon, and Admin evidence.
 3. Run `GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk` with scripted remotes.
-4. Run `GHC_GATEWAY_LIVE_TESTS=1 npm run test:live:sdk` only in the approved live environment and retain the sanitized result. Set `GHC_GATEWAY_LIVE_RESPONSES_MODEL` to a verified native model, or set `GHC_GATEWAY_LIVE_NATIVE_RESPONSES_NOT_AVAILABLE=1` only after verifying the catalog has none.
+4. Run `GHC_GATEWAY_LIVE_TESTS=1 GHC_GATEWAY_LIVE_CHAT_MODEL=<shared-chat-model> GHC_GATEWAY_LIVE_VISION_MODEL=<shared-vision-model> GHC_GATEWAY_LIVE_REASONING_MODEL=<shared-reasoning-model> GHC_GATEWAY_LIVE_RESPONSES_MODEL=<native-responses-model> npm run test:live:sdk` only in the approved live environment and retain the sanitized result. Use `GHC_GATEWAY_LIVE_NATIVE_RESPONSES_NOT_AVAILABLE=1` instead of `GHC_GATEWAY_LIVE_RESPONSES_MODEL` only after verifying the catalog has no native-capable model.
 5. Review and merge the single `refactor` to `main` promotion.
 6. Rename the repository to `ljie-PI/ghc-gateway` and verify redirects/default branch/remote metadata.
 7. Publish `@ljie-pi/ghc-gateway@0.1.0` from the verified promoted commit.

@@ -358,9 +358,12 @@ function tool 处理。
 
 | input | output |
 |---|---|
-| `low` / `medium` / `high` | 原值 |
+| `low` / `medium` / `high` / `xhigh` | 原值 |
 | `max` | `xhigh` |
 | 其他 | 不输出 |
+
+当前官方 Anthropic SDK 还允许 `xhigh`；本接口将其原样映射为 `xhigh`。这是对固定 cc-switch
+source 的有意兼容扩展，生产行为以本规范为准。
 
 只有该字段是 string 时才抑制 `thinking` fallback；未知 string 不输出且不 fallback。字段为
 non-string 时忽略并继续读取 `thinking`。

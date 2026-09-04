@@ -1,6 +1,50 @@
 export const LIVE_SDK_TEST_GUARD = "GHC_GATEWAY_LIVE_TESTS";
+export const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+export const PNG_DATA_URL = `data:image/png;base64,${PNG_BASE64}`;
 
 export type LiveStatus = "passing" | "not_available";
+
+export interface WeatherArguments {
+  readonly city: string;
+}
+
+export interface WeatherResult {
+  readonly city: string;
+  readonly condition: "sunny";
+  readonly temperature_c: 22;
+}
+
+export function parseWeatherArguments(value: unknown): WeatherArguments {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) as unknown : value;
+  } catch (_error: unknown) {
+    throw new Error("get_weather arguments must be valid JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || !("city" in parsed) || typeof parsed.city !== "string") {
+    throw new Error("get_weather arguments must contain a city string");
+  }
+  return { city: parsed.city };
+}
+
+export function getWeather(city: string): WeatherResult {
+  if (city !== "Tokyo") {
+    throw new Error("get_weather live scenario expected Tokyo");
+  }
+  return { city, condition: "sunny", temperature_c: 22 };
+}
+
+export function assertNonEmptyText(value: unknown, message: string): void {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(message);
+  }
+}
+
+export function assertNonEmptyArray(value: unknown, message: string): void {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(message);
+  }
+}
 
 export function assertLiveSdkTestsEnabled(env: NodeJS.ProcessEnv = process.env): void {
   if (env[LIVE_SDK_TEST_GUARD] !== "1") {
@@ -56,7 +100,12 @@ export function isManagedBridgeResponseId(id: string): boolean {
 
 export async function consumeAtLeastOne<T>(stream: AsyncIterable<T>): Promise<number> {
   let count = 0;
-  for await (const _item of stream) {
+  const iterator = stream[Symbol.asyncIterator]();
+  for (;;) {
+    const item = await iterator.next();
+    if (item.done === true) {
+      break;
+    }
     count += 1;
   }
   return count;

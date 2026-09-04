@@ -504,6 +504,7 @@ function* closeTool(state: ConversionState, tool: ToolState): Iterable<Responses
       ["item_id", tool.id],
       ["output_index", number(outputIndex)],
       ["arguments", tool.arguments],
+      ["name", finalToolName(tool)],
     ]));
   }
   tool.done = true;
@@ -704,6 +705,16 @@ function toolItem(tool: ToolState, status: "in_progress" | "completed"): WireJso
 
 function toolKind(tool: ToolState): ToolBinding["kind"] {
   return tool.binding?.kind ?? "function";
+}
+
+function finalToolName(tool: ToolState): string {
+  if (tool.binding?.kind === "namespace") {
+    return tool.binding.originalName;
+  }
+  if (toolKind(tool) === "tool_search") {
+    return "tool_search";
+  }
+  return tool.binding?.originalName ?? tool.name;
 }
 
 function eventWithResponse(state: ConversionState, type: string, response: WireJsonObject): WireJsonObject {
