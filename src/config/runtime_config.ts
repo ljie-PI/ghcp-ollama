@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "../persistence/sqlite.js";
 import {
   defaultRuntimeConfigSnapshot,
   parseRuntimeConfigSnapshot,
@@ -22,7 +22,7 @@ export class RuntimeConfigStore {
   private revision: number;
 
   constructor(
-    private readonly database: Database.Database,
+    private readonly database: SqliteDatabase,
     private readonly nowMs: () => number = Date.now,
   ) {
     const row = this.readRow();

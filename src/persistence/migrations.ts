@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "./sqlite.js";
 
 export interface MigrationModule {
   readonly version: number;
@@ -35,7 +35,7 @@ export function embedMigration(module: MigrationModule): EmbeddedMigration {
 }
 
 export function applyMigrations(
-  database: Database.Database,
+  database: SqliteDatabase,
   migrations: readonly EmbeddedMigration[],
   nowMs: () => number = Date.now,
 ): void {
@@ -77,7 +77,7 @@ interface AppliedRow {
   readonly checksum: string;
 }
 
-function readApplied(database: Database.Database): readonly AppliedRow[] {
+function readApplied(database: SqliteDatabase): readonly AppliedRow[] {
   const exists = database.prepare(
     "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
   ).get() as { ok: number } | undefined;

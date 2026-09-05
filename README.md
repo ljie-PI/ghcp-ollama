@@ -4,9 +4,11 @@ GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI, Anthropic, an
 
 ## Requirements
 
-- Node.js 24 or newer
+- Node.js 24.20.0 or newer
 - A GitHub Copilot subscription
 - Windows x64, Linux x64/arm64, or macOS x64/arm64
+
+Storage uses Node.js built-in SQLite. Neither package installation nor source installation requires Python or a local C++ compiler. SQLite's version follows the installed Node.js release; no extra runtime flags are required. Earlier Node.js 24 releases are not supported because Windows file-identity differences can prevent secure daemon startup.
 
 ## Installation
 
@@ -15,6 +17,16 @@ npm install --global @ljie-pi/ghc-gateway
 ```
 
 The package installs one executable: `ghcg`.
+
+To build and run a source checkout, use Node.js 24.20.0 or newer:
+
+```bash
+npm ci
+npm run build
+npm start
+```
+
+`npm start` runs the built gateway in the foreground. Pass startup options after `--`, for example `npm start -- --port 31401`.
 
 ## Start The Gateway
 
@@ -173,9 +185,9 @@ Credentials and daemon identity use protected atomic files. Prompts, responses, 
 
 Responses History stores only completed bridge checkpoints, at most 512 responses, with a seven-day default TTL. Usage is content-free and retained for 90 days by default. Operational Events retain at most 512 sanitized entries for seven days by default.
 
-## Clean Break
+## Existing Installations
 
-This release does not import previous credentials, configuration, data directories, PID files, or process state. Reauthenticate and configure the new gateway after installation. No compatibility executable, environment, data-path, or runtime fallback aliases are provided.
+The switch to Node.js built-in SQLite preserves the current `state.db` and `credentials.json` files. It requires no database reset, export/import, or reauthentication. Older, incompatible gateway data layouts and process state are not imported. No compatibility executable, environment, data-path, or runtime fallback aliases are provided.
 
 ## Automation
 
@@ -194,6 +206,7 @@ npm ci
 npm run typecheck
 npm run lint
 npm run build
+npm run smoke:sqlite
 npm test
 npm run fixtures:verify
 npm run e2e

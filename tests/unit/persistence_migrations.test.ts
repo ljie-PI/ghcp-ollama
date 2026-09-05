@@ -1,5 +1,5 @@
-import Database from "better-sqlite3";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { SqliteDatabase as Database } from "../../src/persistence/sqlite.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -27,6 +27,43 @@ async function tempDbPath(): Promise<string> {
 }
 
 describe("migrations", () => {
+  it("releases the database file when opening fails during migration", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ghc-gateway-failed-open-"));
+    try {
+      expect(() => openDatabase({
+        path: path.join(directory, "state.db"),
+        migrations: [embedMigration({ version: 1, name: "invalid", sql: "CREATE TABLE broken (" })],
+        nowMs,
+      })).toThrow(MigrationError);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps deferred write acquisition until the transaction first accesses the database", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ghc-gateway-deferred-"));
+    const dbPath = path.join(directory, "state.db");
+    const first = openDatabase({ path: dbPath, migrations: [] });
+    let second: ReturnType<typeof openDatabase> | undefined;
+    try {
+      first.exec("CREATE TABLE sample (value TEXT)");
+      second = openDatabase({ path: dbPath, migrations: [] });
+      const writeSecond = second.prepare("INSERT INTO sample VALUES (?)");
+      first.transaction(() => {
+        writeSecond.run("other connection");
+        first.prepare("INSERT INTO sample VALUES (?)").run("transaction");
+      })();
+      expect(first.prepare("SELECT value FROM sample").all()).toEqual([
+        { value: "other connection" },
+        { value: "transaction" },
+      ]);
+    } finally {
+      second?.close();
+      first.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("opens WAL/FULL/FK with documented busy timeout and journal limits", async () => {
     const database = openDatabase({
       path: await tempDbPath(),

@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "../persistence/sqlite.js";
 import { withCredentialGenerationLock } from "./credential_generation_lock.js";
 import { AccountModelPreferences } from "./model_preferences.js";
 import type { CredentialStore, SecretCredential } from "./credential_store.js";
@@ -48,7 +48,7 @@ export class AccountDirectory {
   readonly preferences: AccountModelPreferences;
 
   constructor(
-    private readonly database: Database.Database,
+    private readonly database: SqliteDatabase,
     private readonly credentials: CredentialStore,
     private readonly nowMs: () => number = Date.now,
     maxAuthenticated = 8,

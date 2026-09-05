@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertNode24 } from "./node_version.js";
@@ -48,6 +47,10 @@ export interface PackSmokeResult {
   readonly help: true;
   readonly foregroundHealth: true;
   readonly daemonLifecycle: true;
+  readonly installScriptsEnabled: true;
+  readonly nativeBuildAudit: "passed";
+  readonly runtimeDependencies: readonly string[];
+  readonly nodeVersion: string;
 }
 
 function packagePath(relativePath: string): string {
@@ -137,9 +140,96 @@ export function assertExactManifest(
   }
 }
 
+interface RuntimeManifest {
+  readonly name?: string;
+  readonly version?: string;
+  readonly dependencies?: Readonly<Record<string, string>>;
+  readonly optionalDependencies?: Readonly<Record<string, string>>;
+  readonly peerDependencies?: Readonly<Record<string, string>>;
+  readonly peerDependenciesMeta?: Readonly<Record<string, { readonly optional?: boolean }>>;
+  readonly scripts?: Readonly<Record<string, string>>;
+  readonly gypfile?: boolean;
+}
+
+const NATIVE_BUILD_PACKAGES = new Set([
+  "better-sqlite3", "node-gyp", "node-gyp-build", "node-pre-gyp", "@mapbox/node-pre-gyp",
+  "prebuild-install", "prebuildify", "cmake-js", "bindings", "node-addon-api",
+]);
+
+async function hasNativeFiles(directory: string, recursive = true): Promise<boolean> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.isFile() && (entry.name === "binding.gyp" || entry.name.endsWith(".node"))) return true;
+    if (recursive && entry.isDirectory() && entry.name !== "node_modules"
+      && await hasNativeFiles(path.join(directory, entry.name))) return true;
+  }
+  return false;
+}
+
+export async function auditRuntimeDependencies(root: string): Promise<readonly string[]> {
+  const boundary = path.resolve(root);
+  const visited = new Set<string>();
+  const specs = new Set<string>();
+
+  async function visit(directory: string): Promise<void> {
+    if (visited.has(directory)) return;
+    visited.add(directory);
+    const manifest = JSON.parse(await readFile(path.join(directory, "package.json"), "utf8")) as RuntimeManifest;
+    if (NATIVE_BUILD_PACKAGES.has(manifest.name ?? "") || manifest.gypfile === true
+      || await hasNativeFiles(directory, directory !== boundary)) {
+      throw new Error(`native runtime dependency is forbidden: ${manifest.name ?? "root"}`);
+    }
+    const hooks = ["preinstall", "install", "postinstall"];
+    // Registry/tarball dependencies do not execute the source root's preparation hooks.
+    if (directory === boundary) hooks.push("prepare", "prepublish");
+    for (const hook of hooks) {
+      if (manifest.scripts?.[hook] !== undefined) {
+        throw new Error(`runtime dependency has an install hook: ${manifest.name ?? "root"} (${hook})`);
+      }
+    }
+    if (directory !== boundary) specs.add(`${manifest.name}@${manifest.version}`);
+    const dependencies = { ...manifest.peerDependencies, ...manifest.dependencies, ...manifest.optionalDependencies };
+    for (const name of Object.keys(dependencies)) {
+      let location = directory;
+      let resolved = false;
+      while (location === boundary || location.startsWith(`${boundary}${path.sep}`)) {
+        const candidate = path.join(location, "node_modules", name);
+        try {
+          await access(path.join(candidate, "package.json"));
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          location = path.dirname(location);
+          continue;
+        }
+        await visit(candidate);
+        resolved = true;
+        break;
+      }
+      const optional = manifest.optionalDependencies?.[name] !== undefined
+        || (manifest.dependencies?.[name] === undefined && manifest.peerDependenciesMeta?.[name]?.optional === true);
+      if (!resolved && !optional) {
+        throw new Error(`runtime dependency is not installed: ${name}`);
+      }
+    }
+  }
+
+  await visit(boundary);
+  return [...specs].sort();
+}
+
 export async function runPackSmoke(): Promise<PackSmokeResult> {
-  const temporaryRoot = await mkdtemp(path.join(tmpdir(), "ghc-gateway-pack-"));
+  await auditRuntimeDependencies(process.cwd());
+  const temporaryParent = path.resolve("artifacts", "test-data");
+  await mkdir(temporaryParent, { recursive: true });
+  const temporaryRoot = await mkdtemp(path.join(temporaryParent, "ghc-gateway-pack-"));
   try {
+    if (process.platform === "win32") {
+      const identity = await runCommand("whoami", ["/user", "/fo", "csv", "/nh"], temporaryRoot);
+      const sid = /^"[^"]+","(S-\d+(?:-\d+)+)"$/u.exec(identity.stdout.trim())?.[1];
+      if (sid === undefined) throw new Error("unable to resolve package smoke directory owner");
+      await runCommand("icacls", [
+        temporaryRoot, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)(F)`,
+      ], temporaryRoot);
+    }
     const packDirectory = path.join(temporaryRoot, "tarball");
     const installDirectory = path.join(temporaryRoot, "install");
     await mkdir(packDirectory);
@@ -165,10 +255,12 @@ export async function runPackSmoke(): Promise<PackSmokeResult> {
       "--offline",
       "--no-audit",
       "--no-fund",
+      "--ignore-scripts=false",
       "--prefix",
       installDirectory,
       tarballPath,
     ], temporaryRoot);
+    const runtimeDependencies = await auditRuntimeDependencies(installDirectory);
     const installedRoot = path.join(installDirectory, "node_modules", "@ljie-pi", "ghc-gateway");
     await verifyInstalledPackage(installedRoot, installDirectory, temporaryRoot);
 
@@ -183,6 +275,10 @@ export async function runPackSmoke(): Promise<PackSmokeResult> {
       help: true,
       foregroundHealth: true,
       daemonLifecycle: true,
+      installScriptsEnabled: true,
+      nativeBuildAudit: "passed",
+      runtimeDependencies,
+      nodeVersion: process.versions.node,
     };
     const artifactDirectory = path.resolve("artifacts", "ci");
     await mkdir(artifactDirectory, { recursive: true });

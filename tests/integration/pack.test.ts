@@ -1,14 +1,23 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertExactManifest,
+  auditRuntimeDependencies,
   inspectAdminBundle,
   type NpmPackEntry,
 } from "../../scripts/tooling/pack.js";
+import { runSqliteWalSmoke } from "../../scripts/tooling/sqlite_smoke.js";
 
 const temporaryDirectories: string[] = [];
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const parent = path.resolve("artifacts", "test-data");
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(path.join(parent, prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map(async (directory) => {
@@ -18,8 +27,7 @@ afterEach(async () => {
 
 describe("package evidence", () => {
   it("requires the index, Vite manifest, and hashed JavaScript and CSS in the package", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-pack-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("ghc-gateway-pack-");
     await mkdir(path.join(root, ".vite"));
     await mkdir(path.join(root, "assets"));
     await writeFile(path.join(root, "index.html"), "<script src=\"/admin/assets/index-AbCd1234.js\"></script>");
@@ -48,8 +56,7 @@ describe("package evidence", () => {
   });
 
   it("fails when npm dry-run omits a required built asset", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-pack-missing-"));
-    temporaryDirectories.push(root);
+    const root = await temporaryDirectory("ghc-gateway-pack-missing-");
     await mkdir(path.join(root, ".vite"));
     await mkdir(path.join(root, "assets"));
     await writeFile(path.join(root, "index.html"), "admin");
@@ -70,5 +77,92 @@ describe("package evidence", () => {
       ["package.json", "dist/src/main.js", "src/main.ts"],
       ["package.json", "dist/src/main.js", "dist/admin/index.html"],
     )).toThrow("unexpected=[src/main.ts], missing=[dist/admin/index.html]");
+  });
+
+  it.each(["preinstall", "install", "postinstall"])("rejects a transitive runtime %s hook before packaging can invoke a native build", async (hook) => {
+    const root = await temporaryDirectory("ghc-gateway-pack-native-");
+    const dependency = path.join(root, "node_modules", "runtime");
+    const transitive = path.join(dependency, "node_modules", "native-runtime");
+    await mkdir(transitive, { recursive: true });
+    await writeFile(path.join(root, "package.json"), JSON.stringify({
+      dependencies: { runtime: "1.0.0" },
+    }));
+    await writeFile(path.join(dependency, "package.json"), JSON.stringify({
+      name: "runtime", version: "1.0.0", dependencies: { "native-runtime": "1.0.0" },
+    }));
+    await writeFile(path.join(transitive, "package.json"), JSON.stringify({
+      name: "native-runtime", version: "1.0.0", scripts: { [hook]: "node-gyp rebuild" },
+    }));
+
+    await expect(auditRuntimeDependencies(root)).rejects.toThrow(`runtime dependency has an install hook: native-runtime (${hook})`);
+  });
+
+  it.each([
+    { name: "node-gyp", manifest: {}, file: undefined },
+    { name: "better-sqlite3", manifest: {}, file: undefined },
+    { name: "native-runtime", manifest: { gypfile: true }, file: undefined },
+    { name: "native-runtime", manifest: {}, file: "binding.gyp" },
+    { name: "native-runtime", manifest: {}, file: path.join("prebuilds", "addon.node") },
+  ])("rejects native runtime dependency evidence without explicit hooks: $name $file $manifest", async ({ name, manifest, file }) => {
+    const root = await temporaryDirectory("ghc-gateway-pack-native-");
+    const dependency = path.join(root, "node_modules", name);
+    await mkdir(dependency, { recursive: true });
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ dependencies: { [name]: "1.0.0" } }));
+    await writeFile(path.join(dependency, "package.json"), JSON.stringify({ name, version: "1.0.0", ...manifest }));
+    if (file !== undefined) {
+      await mkdir(path.dirname(path.join(dependency, file)), { recursive: true });
+      await writeFile(path.join(dependency, file), "");
+    }
+
+    await expect(auditRuntimeDependencies(root)).rejects.toThrow("native runtime dependency is forbidden: ");
+  });
+
+  it("audits installed production dependencies without including development-only native tools", async () => {
+    const dependencies = await auditRuntimeDependencies(process.cwd());
+
+    expect(dependencies).toEqual([
+      "@hono/node-server@2.1.1",
+      "@sinclair/typebox@0.34.52",
+      "hono@4.13.4",
+      "undici@8.10.0",
+    ]);
+  });
+
+  it("includes hoisted peer and installed optional dependencies while allowing absent optional packages", async () => {
+    const root = await temporaryDirectory("ghc-gateway-pack-closure-");
+    const manifests = {
+      runtime: {
+        peerDependencies: { peer: "1.0.0" },
+        optionalDependencies: { present: "1.0.0", absent: "1.0.0" },
+      },
+      peer: { scripts: { prepare: "build-release-only" } },
+      present: {},
+    };
+    await writeFile(path.join(root, "package.json"), JSON.stringify({
+      dependencies: { runtime: "1.0.0" },
+      devDependencies: { "node-gyp": "1.0.0" },
+      scripts: { prepack: "build" },
+    }));
+    for (const [name, manifest] of Object.entries(manifests)) {
+      const dependency = path.join(root, "node_modules", name);
+      await mkdir(dependency, { recursive: true });
+      await writeFile(path.join(dependency, "package.json"), JSON.stringify({ name, version: "1.0.0", ...manifest }));
+    }
+
+    await expect(auditRuntimeDependencies(root)).resolves.toEqual(["peer@1.0.0", "present@1.0.0", "runtime@1.0.0"]);
+    await writeFile(path.join(root, "node_modules", "peer", "binding.gyp"), "");
+    await expect(auditRuntimeDependencies(root)).rejects.toThrow("native runtime dependency is forbidden: peer");
+    await rm(path.join(root, "node_modules", "peer"), { recursive: true });
+    await expect(auditRuntimeDependencies(root)).rejects.toThrow("runtime dependency is not installed: peer");
+  });
+
+  it("smokes durable synchronous transactions through the production database opener", async () => {
+    await expect(runSqliteWalSmoke()).resolves.toMatchObject({
+      journalMode: "wal",
+      rowCount: 1,
+      rollback: true,
+      nestedRollback: true,
+      reopened: true,
+    });
   });
 });

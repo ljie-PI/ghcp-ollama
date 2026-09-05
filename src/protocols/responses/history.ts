@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "../../persistence/sqlite.js";
 import {
   isWireJsonArray,
   isWireJsonObject,
@@ -123,7 +123,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   private readonly maxResponses: number;
 
   constructor(
-    private readonly database: Database.Database,
+    private readonly database: SqliteDatabase,
     options: ResponsesHistoryOptions = {},
   ) {
     this.nowMs = options.nowMs ?? Date.now;
