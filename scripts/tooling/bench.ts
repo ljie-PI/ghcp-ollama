@@ -124,7 +124,7 @@ export interface BenchmarkRunResult {
 }
 
 export interface BenchmarkArtifact {
-  readonly kind: "rm-22-full-gateway";
+  readonly kind: "full-gateway";
   readonly generatedAt: string;
   readonly repeat: number;
   readonly requiredRepeat: number;
@@ -417,7 +417,7 @@ export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifac
     });
   }
   return {
-    kind: "rm-22-full-gateway",
+    kind: "full-gateway",
     generatedAt: new Date().toISOString(),
     repeat,
     requiredRepeat: 3,
@@ -427,7 +427,7 @@ export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifac
 }
 
 async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-rm22-bench-"));
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-bench-"));
   const port = await availablePort();
   const nowMs = (): number => 1_700_000_000_000;
   const database = openDatabase({
@@ -829,7 +829,7 @@ async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
 async function runCompiledIdleWorker(): Promise<IdleWorkerResult> {
   const workerPath = path.resolve("artifacts/bench/scripts/tooling/bench_idle.js");
   await writeFile(workerPath, idleWorkerSource(), "utf8");
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-rm22-idle-"));
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-idle-"));
   const port = await availablePort();
   return await new Promise<IdleWorkerResult>((resolve, reject) => {
     const launchArgs = idleLaunchArgs(workerPath);
@@ -1039,7 +1039,7 @@ async function main(): Promise<void> {
   const artifact = await runFullBenchmark(parsed.repeat);
   const artifactDir = path.resolve("artifacts", "bench");
   await mkdir(artifactDir, { recursive: true });
-  const artifactPath = path.join(artifactDir, "rm-22-full.json");
+  const artifactPath = path.join(artifactDir, "full-gateway.json");
   await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
   console.log(JSON.stringify({
     artifactPath,

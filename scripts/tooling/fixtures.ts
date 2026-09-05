@@ -45,14 +45,31 @@ import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.j
 
 export interface FixtureManifestEntry {
   readonly caseId: string;
-  readonly owner: string;
+  readonly family: string;
   readonly input: string;
   readonly expected: string;
   readonly encoder: string;
 }
 
-const FIXTURE_ROOT = path.resolve("tests/refactor/fixtures");
+const FIXTURE_ROOT = path.resolve("tests/fixtures");
 const fixtureRoots = new Map<FixtureManifestEntry, string>();
+type FixtureVerifier = (entry: FixtureManifestEntry) => Promise<string | Uint8Array | undefined>;
+const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, FixtureVerifier>([
+  ["wire-json", expectedWireJsonFixture],
+  ["gateway-http-host", expectedGatewayHttpHostFixture],
+  ["accounts", expectedAccountFixture],
+  ["copilot-transport", expectedCopilotTransportFixture],
+  ["model-catalog", expectedModelCatalogFixture],
+  ["openai-chat", expectedOpenAiChatFixture],
+  ["ollama", expectedOllamaFixture],
+  ["anthropic", expectedAnthropicFixture],
+  ["responses-history", expectedResponsesHistoryFixture],
+  ["responses-native", expectedResponsesNativeFixture],
+  ["responses-bridge-request", expectedResponsesBridgeRequestFixture],
+  ["responses-bridge-nonstream", expectedResponsesBridgeNonstreamFixture],
+  ["responses-bridge-stream", expectedResponsesBridgeStreamFixture],
+  ["responses-endpoint", expectedResponsesEndpointFixture],
+]);
 
 type GoReferenceJson =
   | null
@@ -96,7 +113,7 @@ function assertManifestEntry(value: unknown, manifestPath: string, index: number
   }
 
   const candidate = value as Record<string, unknown>;
-  const fields = ["caseId", "owner", "input", "expected", "encoder"] as const;
+  const fields = ["caseId", "family", "input", "expected", "encoder"] as const;
 
   for (const field of fields) {
     if (typeof candidate[field] !== "string" || candidate[field].length === 0) {
@@ -110,8 +127,8 @@ function assertManifestEntry(value: unknown, manifestPath: string, index: number
   if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/u.test(candidate.caseId as string)) {
     throw new Error(`${manifestPath} entry ${index} caseId must be lowercase and stable`);
   }
-  if (!/^RM-[0-9]{2}$/u.test(candidate.owner as string)) {
-    throw new Error(`${manifestPath} entry ${index} owner must be an RM slice`);
+  if (typeof candidate.family !== "string" || !fixtureVerifiers.has(candidate.family)) {
+    throw new Error(`${manifestPath} entry ${index} family must name a registered fixture family`);
   }
   for (const field of ["input", "expected"] as const) {
     const fixturePath = candidate[field] as string;
@@ -177,10 +194,10 @@ export async function writeFixtureReport(entries: readonly FixtureManifestEntry[
   return reportPath;
 }
 
-export function assertFixtureGeneratorAvailable(caseId: string, entries: readonly FixtureManifestEntry[]): never {
+function throwFixtureGenerationError(caseId: string, entries: readonly FixtureManifestEntry[]): never {
   const known = entries.some((entry) => entry.caseId === caseId);
-  const reason = known ? "does not have an RM-01 generator" : "is not registered in a manifest";
-  throw new Error(`fixture case ${caseId} ${reason}; golden generation is implemented by the owning protocol slice`);
+  const reason = known ? "has no registered generator" : "is not registered in a manifest";
+  throw new Error(`fixture case ${caseId} ${reason}`);
 }
 
 async function main(): Promise<void> {
@@ -213,33 +230,14 @@ async function main(): Promise<void> {
         return;
       }
     }
-    assertFixtureGeneratorAvailable(caseId, entries);
+    throwFixtureGenerationError(caseId, entries);
   }
 
   throw new Error("usage: fixtures.ts verify | generate --case <caseId> --accept");
 }
 
 function fixtureFamilyRoot(entry: FixtureManifestEntry): string {
-  const familyByOwner: Readonly<Record<string, string>> = {
-    "RM-02": "wire-json",
-    "RM-03": "gateway-http-host",
-    "RM-06": "accounts",
-    "RM-07": "copilot-transport",
-    "RM-08": "model-catalog",
-    "RM-09": "openai-chat",
-    "RM-10": "ollama",
-    "RM-11": "anthropic",
-    "RM-12": "responses-history",
-    "RM-13": "responses-native",
-    "RM-14": "responses-bridge-request",
-    "RM-15": "responses-bridge-nonstream",
-    "RM-16": "responses-bridge-stream",
-    "RM-17": "responses-endpoint",
-  };
-  const family = familyByOwner[entry.owner];
-  if (family === undefined) {
-    throw new Error(`fixture case ${entry.caseId} has unknown owner ${entry.owner}`);
-  }
+  const family = entry.family;
   const root = fixtureRoots.get(entry) ?? path.join(FIXTURE_ROOT, family);
   if (path.basename(root) !== family) {
     throw new Error(`fixture case ${entry.caseId} must be in canonical family ${family}`);
@@ -248,36 +246,11 @@ function fixtureFamilyRoot(entry: FixtureManifestEntry): string {
 }
 
 async function expectedFixture(entry: FixtureManifestEntry): Promise<Uint8Array | undefined> {
-  let expected: string | Uint8Array | undefined;
-  if (entry.owner === "RM-02") {
-    expected = await expectedWireJsonFixture(entry);
-  } else if (entry.owner === "RM-03") {
-    expected = await expectedGatewayHttpHostFixture(entry);
-  } else if (entry.owner === "RM-06") {
-    expected = await expectedAccountFixture(entry);
-  } else if (entry.owner === "RM-07") {
-    expected = await expectedCopilotTransportFixture(entry);
-  } else if (entry.owner === "RM-08") {
-    expected = await expectedModelCatalogFixture(entry);
-  } else if (entry.owner === "RM-09") {
-    expected = await expectedOpenAiChatFixture(entry);
-  } else if (entry.owner === "RM-10") {
-    expected = await expectedOllamaFixture(entry);
-  } else if (entry.owner === "RM-11") {
-    expected = await expectedAnthropicFixture(entry);
-  } else if (entry.owner === "RM-12") {
-    expected = await expectedResponsesHistoryFixture(entry);
-  } else if (entry.owner === "RM-13") {
-    expected = await expectedResponsesNativeFixture(entry);
-  } else if (entry.owner === "RM-14") {
-    expected = await expectedResponsesBridgeRequestFixture(entry);
-  } else if (entry.owner === "RM-15") {
-    expected = await expectedResponsesBridgeNonstreamFixture(entry);
-  } else if (entry.owner === "RM-16") {
-    expected = await expectedResponsesBridgeStreamFixture(entry);
-  } else if (entry.owner === "RM-17") {
-    expected = await expectedResponsesEndpointFixture(entry);
+  const verify = fixtureVerifiers.get(entry.family);
+  if (verify === undefined) {
+    throw new Error(`fixture case ${entry.caseId} has unknown family ${entry.family}`);
   }
+  const expected = await verify(entry);
   return typeof expected === "string" ? new TextEncoder().encode(expected) : expected;
 }
 

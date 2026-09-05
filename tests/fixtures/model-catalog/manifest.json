@@ -1,0 +1,9 @@
+[
+  {
+    "caseId": "model-catalog.openai.empty",
+    "family": "model-catalog",
+    "input": "empty.input.json",
+    "expected": "empty.expected.json",
+    "encoder": "openai-models"
+  }
+]

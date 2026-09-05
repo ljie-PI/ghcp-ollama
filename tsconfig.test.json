@@ -21,15 +21,14 @@
   "include": [
     "src/**/*.ts",
     "scripts/tooling/**/*.ts",
-    "tests/refactor/**/*.ts",
-    "vitest.refactor.config.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts",
     "playwright.config.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "dist",
-    "tests/refactor/sdk/**",
+    "tests/sdk/**",
     "tests/live/**"
   ]
 }

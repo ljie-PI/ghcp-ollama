@@ -10,8 +10,8 @@ if (live && offline) {
 export default defineConfig({
   test: {
     name: live ? "live-sdk" : "offline-sdk",
-    include: [live ? "tests/live/sdk/**/*.sdk.test.ts" : "tests/refactor/sdk/**/*.sdk.test.ts"],
-    exclude: ["node_modules/**", live ? "tests/refactor/**" : "tests/live/**"],
+    include: [live ? "tests/live/sdk/**/*.sdk.test.ts" : "tests/sdk/**/*.sdk.test.ts"],
+    exclude: ["node_modules/**", live ? "tests/sdk/**" : "tests/live/**"],
     globals: true,
     fileParallelism: false,
     testTimeout: 120_000,

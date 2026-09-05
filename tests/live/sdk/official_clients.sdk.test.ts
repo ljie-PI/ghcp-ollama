@@ -81,7 +81,7 @@ const OLLAMA_WEATHER_TOOL = {
 const CHAT_SCENARIO_TOKENS = 256;
 const NATIVE_RESPONSES_SCENARIO_TOKENS = 512;
 
-describe("RM-22 guarded live official SDK smoke", () => {
+describe("guarded live official SDK smoke", () => {
   let openai: OpenAI;
   let anthropic: Anthropic;
   let ollama: Ollama;

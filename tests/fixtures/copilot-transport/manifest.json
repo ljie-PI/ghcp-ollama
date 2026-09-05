@@ -1,0 +1,9 @@
+[
+  {
+    "caseId": "copilot-transport.sse.done",
+    "family": "copilot-transport",
+    "input": "sse/done.input.txt",
+    "expected": "sse/done.expected.txt",
+    "encoder": "chat-sse"
+  }
+]

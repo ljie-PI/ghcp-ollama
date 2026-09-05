@@ -1,9 +1,0 @@
-[
-  {
-    "caseId": "responses-history.enrich.previous-response",
-    "owner": "RM-12",
-    "input": "previous-response.input.json",
-    "expected": "previous-response.expected.json",
-    "encoder": "responses-history"
-  }
-]

@@ -1,9 +1,0 @@
-[
-  {
-    "caseId": "copilot-transport.sse.done",
-    "owner": "RM-07",
-    "input": "sse/done.input.txt",
-    "expected": "sse/done.expected.txt",
-    "encoder": "chat-sse"
-  }
-]

@@ -1,9 +1,0 @@
-[
-  {
-    "caseId": "accounts.identity.github.com",
-    "owner": "RM-06",
-    "input": "identity/github.com.input.txt",
-    "expected": "identity/github.com.expected.txt",
-    "encoder": "account-id"
-  }
-]

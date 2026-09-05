@@ -1,0 +1,30 @@
+[
+  {
+    "caseId": "responses-native.routing.matrix",
+    "family": "responses-native",
+    "input": "routing/matrix.input.json",
+    "expected": "routing/matrix.expected.json",
+    "encoder": "responses-plan-object"
+  },
+  {
+    "caseId": "responses-native.request.preservation",
+    "family": "responses-native",
+    "input": "request/preservation.input.json",
+    "expected": "request/preservation.expected.json",
+    "encoder": "ordered-compact-json-bytes"
+  },
+  {
+    "caseId": "responses-native.nonstream.object",
+    "family": "responses-native",
+    "input": "nonstream/object.input.json",
+    "expected": "nonstream/object.expected.json",
+    "encoder": "native-response-object-bytes"
+  },
+  {
+    "caseId": "responses-native.stream.stable-item-ids",
+    "family": "responses-native",
+    "input": "stream/stable-item-ids.input.txt",
+    "expected": "stream/stable-item-ids.expected.txt",
+    "encoder": "responses-sse-bytes"
+  }
+]

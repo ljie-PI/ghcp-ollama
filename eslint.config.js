@@ -66,8 +66,7 @@ export default [
     files: [
       "src/**/*.ts",
       "scripts/tooling/**/*.ts",
-      "tests/refactor/**/*.ts",
-      "tests/live/**/*.ts",
+      "tests/**/*.ts",
       "web/**/*.ts",
       "*.config.ts",
     ],

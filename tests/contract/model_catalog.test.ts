@@ -1,0 +1,513 @@
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import type { Socket } from "node:net";
+import { gzipSync } from "node:zlib";
+import path from "node:path";
+import { Agent } from "undici";
+import { describe, expect, it } from "vitest";
+import { AccountDirectory } from "../../src/accounts/account_directory.js";
+import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
+import {
+  CopilotModelCatalog,
+  parseCapiModels,
+} from "../../src/copilot/model_catalog.js";
+import { productionModelInfoLookup } from "../../src/copilot/model_metadata.js";
+import { CapiFetchError, HttpCopilotModelsSource } from "../../src/copilot/models_source.js";
+import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
+import { parseStartupConfig } from "../../src/config/startup_config.js";
+import { createGateway } from "../../src/gateway/create_gateway.js";
+import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
+import { embedMigration } from "../../src/persistence/migrations.js";
+import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
+import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
+import { createModelCatalogRoutes } from "../../src/protocols/model_catalog/routes.js";
+import { resolveModel } from "../../src/protocols/model_catalog/resolver.js";
+import { serializeAnthropicModels, serializeOllamaTags, serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
+
+const nowMs = (): number => 1_700_000_000_000;
+
+const CAPI = {
+  data: [
+    { id: "keep", name: "Keep", vendor: "x", model_picker_enabled: true },
+    { id: "hidden", name: "Hidden", vendor: "x", model_picker_enabled: false },
+    { id: "keep", name: "Dup", vendor: "x", model_picker_enabled: true },
+  ],
+};
+
+describe("CAPI parse and cache", () => {
+  it("provides pinned production getModelInfo metadata without guessing unknown models", () => {
+    expect(productionModelInfoLookup.get("gpt-5.1-codex-max")).toEqual({
+      mode: "responses",
+      max_input_tokens: 128_000,
+      max_output_tokens: 128_000,
+      supported_endpoints: ["/v1/responses"],
+    });
+    expect(productionModelInfoLookup.get("claude-opus-4.6-fast")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 16_000,
+      supported_endpoints: ["/v1/chat/completions"],
+    });
+    expect(productionModelInfoLookup.get("gemini-3-pro-preview")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+    });
+    expect(productionModelInfoLookup.get("gpt-5.3-codex")).toEqual({
+      mode: "responses",
+      max_input_tokens: 128_000,
+      max_output_tokens: 128_000,
+      supported_endpoints: ["/v1/responses"],
+    });
+    expect(productionModelInfoLookup.get("mai-code-1-flash")).toEqual({
+      mode: "chat",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+      supported_endpoints: ["/v1/chat/completions"],
+    });
+    expect(productionModelInfoLookup.get("mai-code-1-flash-internal")).toEqual(
+      productionModelInfoLookup.get("mai-code-1-flash"),
+    );
+    expect(productionModelInfoLookup.get("unknown-model")).toBeNull();
+  });
+
+  it("keeps picker-enabled models in upstream order including duplicates", () => {
+    const models = parseCapiModels(CAPI);
+    expect(models.map((model) => model.id)).toEqual(["keep", "keep"]);
+    expect(models[0]?.routing).toBeUndefined();
+  });
+
+  it("rejects incomplete CAPI items", () => {
+    expect(() => parseCapiModels({ data: [{ id: "x" }] })).toThrow(/invalid/u);
+  });
+
+  it("composes injected getModelInfo metadata into catalog routing and one shared public map", async () => {
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(JSON.stringify({ data: [{
+        id: "native",
+        name: "Native",
+        vendor: "openai",
+        model_picker_enabled: true,
+        capabilities: { mode: "chat", max_input_tokens: 1 },
+      }] })),
+      { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 1_024 },
+      () => new Agent(),
+      {
+        get: () => ({
+          mode: "responses",
+          max_input_tokens: "128000",
+          max_output_tokens: 64_000.9,
+          supported_endpoints: ["/v1/responses", 1],
+        }),
+      },
+    );
+    const catalog = new CopilotModelCatalog(source);
+    const snapshot = await catalog.get("github.com/1", new AbortController().signal);
+    expect(snapshot.models[0]?.routing).toEqual({
+      mode: "responses",
+      supportedEndpoints: ["/v1/responses"],
+    });
+    expect(source.modelMetadata.get("native")).toEqual({
+      mode: "responses",
+      maxInputTokens: 128_000,
+      maxOutputTokens: 64_000,
+      supportedEndpoints: ["/v1/responses"],
+    });
+    expect(JSON.parse(serializeOpenAiModels(snapshot, source.modelMetadata)).data[0]).toMatchObject({
+      mode: "responses",
+      max_input_tokens: 128_000,
+      max_output_tokens: 64_000,
+    });
+  });
+
+  it("does not write cache after invalidate generation change", async () => {
+    let fetches = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        fetches += 1;
+        return CAPI;
+      },
+    }, () => new Date("2026-08-30T05:00:00.000Z"));
+    const first = catalog.get("github.com/1", new AbortController().signal);
+    catalog.invalidate("github.com/1");
+    const snapshot = await first;
+    expect(snapshot.models[0]?.id).toBe("keep");
+    await catalog.get("github.com/1", new AbortController().signal);
+    expect(fetches).toBe(2);
+  });
+
+  it("caches empty catalogs per account and does not share them", async () => {
+    const seen: string[] = [];
+    const catalog = new CopilotModelCatalog({
+      async fetch(accountId) {
+        seen.push(accountId);
+        return { data: [] };
+      },
+    });
+    const a = await catalog.get("github.com/1", new AbortController().signal);
+    const b = await catalog.get("github.com/1", new AbortController().signal);
+    const c = await catalog.get("github.com/2", new AbortController().signal);
+    expect(a.models).toEqual([]);
+    expect(b.models).toEqual([]);
+    expect(c.accountId).toBe("github.com/2");
+    expect(seen).toEqual(["github.com/1", "github.com/2"]);
+  });
+
+  it("maps CAPI redirects, Retry-After, body limits, and timeouts safely", async () => {
+    const source = (fetchImpl: typeof fetch) => new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      fetchImpl,
+      { connectTimeoutMs: 1, totalTimeoutMs: 20, bodyLimitBytes: 32 },
+    );
+
+    await expect(source(async () => new Response(null, { status: 302 })).fetch("github.com/1", new AbortController().signal))
+      .rejects.toMatchObject({ status: 502 });
+
+    for (const headers of [
+      new Headers({ "retry-after": "120, 240" }),
+      duplicateRetryAfterHeaders(),
+      new Headers({ "retry-after": "Foo, 06 Nov 1994 08:49:37 GMT" }),
+    ]) {
+      await expect(source(async () => new Response("{}", { status: 429, headers })).fetch("github.com/1", new AbortController().signal))
+        .rejects.toMatchObject({ status: 429, retryAfter: undefined });
+    }
+
+    await expect(source(async () => new Response("{}", {
+      status: 429,
+      headers: { "retry-after": "Sun, 06 Nov 1994 08:49:37 GMT" },
+    })).fetch("github.com/1", new AbortController().signal))
+      .rejects.toMatchObject({ status: 429, retryAfter: "Sun, 06 Nov 1994 08:49:37 GMT" });
+
+    await expect(source(async () => new Response(`{"data":"${"x".repeat(40)}"}`)).fetch("github.com/1", new AbortController().signal))
+      .rejects.toBeInstanceOf(CapiFetchError);
+
+    await expect(source(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return new Response("{\"data\":[]}");
+    }).fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+  });
+
+  function duplicateRetryAfterHeaders(): Headers {
+    const headers = new Headers();
+    headers.append("retry-after", "120");
+    headers.append("retry-after", "240");
+    return headers;
+  }
+
+  it("cleans up CAPI bodies on invalid redirects, body timeout, and caller abort", async () => {
+    let redirectCanceled = false;
+    const redirectSource = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(new ReadableStream<Uint8Array>({
+        cancel(): void {
+          redirectCanceled = true;
+        },
+      }), { status: 302, headers: { location: "http://[invalid" } }),
+      { connectTimeoutMs: 20, totalTimeoutMs: 20, bodyLimitBytes: 32 },
+    );
+    await expect(redirectSource.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    expect(redirectCanceled).toBe(true);
+
+    let timeoutCanceled = false;
+    const timeoutSource = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(new ReadableStream<Uint8Array>({
+        cancel(): void {
+          timeoutCanceled = true;
+        },
+      }), { status: 200 }),
+      { connectTimeoutMs: 20, totalTimeoutMs: 1, bodyLimitBytes: 32 },
+    );
+    await expect(timeoutSource.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    for (let index = 0; index < 20 && !timeoutCanceled; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(timeoutCanceled).toBe(true);
+
+    let abortCanceled = false;
+    const abortController = new AbortController();
+    const abortSource = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async () => new Response(new ReadableStream<Uint8Array>({
+        cancel(): void {
+          abortCanceled = true;
+        },
+      }), { status: 200 }),
+      { connectTimeoutMs: 20, totalTimeoutMs: 20, bodyLimitBytes: 32 },
+    );
+    const pending = abortSource.fetch("github.com/1", abortController.signal);
+    abortController.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    for (let index = 0; index < 20 && !abortCanceled; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(abortCanceled).toBe(true);
+  });
+
+  it("uses the default Undici request path without automatic decompression", async () => {
+    const server = createServer((request, response) => {
+      if (request.url === "/models") {
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "content-encoding": "gzip",
+        });
+        response.end(gzipSync("{\"data\":[]}"));
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    try {
+      const source = new HttpCopilotModelsSource(
+        async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      );
+      await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("reuses a bounded CAPI dispatcher and closes it on gateway shutdown", async () => {
+    const sockets = new Set<Socket>();
+    let createdDispatchers = 0;
+    let requests = 0;
+    const server = createServer((request, response) => {
+      requests += 1;
+      expect(request.url).toBe("/models");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"data\":[]}");
+    });
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-cat-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      fetch,
+      { connectTimeoutMs: 100, totalTimeoutMs: 1_000, bodyLimitBytes: 32 },
+      (limits) => {
+        createdDispatchers += 1;
+        return new Agent({
+          connectTimeout: limits.connectTimeoutMs,
+          connections: 1,
+          pipelining: 1,
+        });
+      },
+    );
+    const catalog = new CopilotModelCatalog(source);
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: dir }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      catalog,
+      preferences: accounts.preferences,
+    }), { onClose: () => catalog.close() });
+    try {
+      expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"))).status).toBe(200);
+      catalog.invalidate("github.com/1");
+      expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"))).status).toBe(200);
+      expect(requests).toBe(2);
+      expect(createdDispatchers).toBe(1);
+      expect(sockets.size).toBeLessThanOrEqual(1);
+
+      await gw.close();
+      for (let index = 0; index < 20 && sockets.size > 0; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      expect(sockets.size).toBe(0);
+      await expect(catalog.get("github.com/1", new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" });
+      await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      await gw.close();
+      closeDatabase(database);
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("strips sensitive CAPI headers on cross-host redirects", async () => {
+    let calls = 0;
+    let redirectedHeaders: Headers | undefined;
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
+      async (_input, init) => {
+        calls += 1;
+        if (calls === 1) {
+          return new Response(null, {
+            status: 302,
+            headers: { location: "https://copilot.example.com/models" },
+          });
+        }
+        redirectedHeaders = new Headers(init?.headers);
+        return new Response("{\"data\":[]}", { status: 200 });
+      },
+      { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 32 },
+    );
+    await source.fetch("github.com/1", new AbortController().signal);
+    expect(calls).toBe(2);
+    expect(redirectedHeaders?.has("authorization")).toBe(false);
+    expect(redirectedHeaders?.has("cookie")).toBe(false);
+    expect(redirectedHeaders?.has("cookie2")).toBe(false);
+    expect(redirectedHeaders?.has("proxy-authorization")).toBe(false);
+    expect(redirectedHeaders?.has("www-authenticate")).toBe(false);
+  });
+
+  it("enforces timeout on the default Undici request path", async () => {
+    const server = createServer((_request, response) => {
+      setTimeout(() => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("{\"data\":[]}");
+      }, 20);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    try {
+      const source = new HttpCopilotModelsSource(
+        async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+        fetch,
+        { connectTimeoutMs: 100, totalTimeoutMs: 1, bodyLimitBytes: 32 },
+      );
+      await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe("model resolver", () => {
+  const catalog = {
+    accountId: "github.com/1",
+    fetchedAt: "t",
+    generation: 1,
+    models: [{ id: "gpt", name: "GPT", vendor: "x", modelPickerEnabled: true }],
+  };
+
+  it("uses valid visible preference only when model is missing", () => {
+    const resolved = resolveModel(catalog, undefined, { modelId: "gpt", validity: "valid" });
+    expect(resolved).toMatchObject({ source: "preferred", upstreamModel: "gpt" });
+    expect(resolveModel(catalog, undefined, { modelId: "gpt", validity: "invalid" })).toEqual({ kind: "invalid_request" });
+    expect(resolveModel(catalog, "nope", { modelId: "gpt", validity: "valid" })).toEqual({ kind: "model_not_found" });
+    expect(resolveModel(catalog, "", null)).toEqual({ kind: "invalid_request" });
+  });
+});
+
+describe("listing routes", () => {
+  it("serializes one snapshot as OpenAI, Anthropic, and Ollama shapes", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-cat-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return CAPI;
+      },
+    }, () => new Date("2026-08-30T05:00:00.000Z"));
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: dir }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      catalog,
+      preferences: accounts.preferences,
+    }));
+    try {
+      const openai = await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      expect(openai.status).toBe(200);
+      const openaiBody = JSON.parse(await openai.text()) as { object: string; data: Array<{ id: string; owned_by: string; created: number }> };
+      expect(openaiBody.object).toBe("list");
+      expect(openaiBody.data[0]).toMatchObject({ id: "keep", owned_by: "openai", created: 1_677_610_602 });
+      expect(openai.headers.get("cache-control")).toBe("no-store");
+
+      const anthropic = await gw.fetch(new Request("http://127.0.0.1:31400/v1/models", {
+        headers: { "anthropic-version": "" },
+      }));
+      const anthropicBody = JSON.parse(await anthropic.text()) as { first_id: string; data: Array<{ type: string; max_tokens: null }> };
+      expect(anthropicBody.first_id).toBe("keep");
+      expect(anthropicBody.data[0]?.type).toBe("model");
+      expect(anthropicBody.data[0]?.max_tokens).toBeNull();
+
+      const tags = await gw.fetch(new Request("http://127.0.0.1:31400/api/tags"));
+      const tagsBody = JSON.parse(await tags.text()) as { models: Array<{ name: string; digest: string }> };
+      expect(tagsBody.models[0]?.name).toBe("keep");
+      expect(tagsBody.models[0]?.digest).toBe("copilot-keep");
+
+      expect((await gw.fetch(new Request("http://127.0.0.1:31400/models"))).status).toBe(404);
+    } finally {
+      await gw.close();
+      closeDatabase(database);
+    }
+  });
+});
+
+describe("serializers", () => {
+  it("omits routing metadata from public OpenAI objects", () => {
+    const catalog = {
+      accountId: "a",
+      fetchedAt: "2026-08-30T05:00:00Z",
+      generation: 1,
+      models: [{
+        id: "m",
+        name: "M",
+        vendor: "v",
+        modelPickerEnabled: true,
+        routing: { mode: "responses", supportedEndpoints: ["/v1/responses"] },
+      }],
+    };
+    const openai = JSON.parse(serializeOpenAiModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
+    expect(openai.data[0]?.supported_endpoints).toBeUndefined();
+    expect(openai.data[0]?.supportedEndpoints).toBeUndefined();
+    expect(openai.data[0]?.routing).toBeUndefined();
+    expect(openai.data[0]?.mode).toBeUndefined();
+
+    const anthropic = JSON.parse(serializeAnthropicModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
+    expect(anthropic.data[0]?.display_name).toBe("m");
+    expect(anthropic.data[0]?.supported_endpoints).toBeUndefined();
+    expect(anthropic.data[0]?.supportedEndpoints).toBeUndefined();
+    expect(anthropic.data[0]?.routing).toBeUndefined();
+    expect(anthropic.data[0]?.mode).toBeUndefined();
+
+    const ollama = JSON.parse(serializeOllamaTags(catalog)) as { models: Array<Record<string, unknown>> };
+    expect(ollama.models[0]?.modified_at).toBe("2026-08-30T05:00:00Z");
+    expect(ollama.models[0]?.supported_endpoints).toBeUndefined();
+    expect(ollama.models[0]?.supportedEndpoints).toBeUndefined();
+    expect(ollama.models[0]?.routing).toBeUndefined();
+    expect(ollama.models[0]?.mode).toBeUndefined();
+  });
+});
