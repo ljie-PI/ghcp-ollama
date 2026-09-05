@@ -5,7 +5,7 @@ describe("production dependency cache closure", () => {
   it("contains the runtime closure and excludes SDK/build-only packages", async () => {
     const specs = await productionDependencySpecs();
     expect(specs).toContain("@hono/node-server@2.1.1");
-    expect(specs).toContain("better-sqlite3@13.0.3");
+    expect(specs.some((spec) => /^(?:better-sqlite3|node-gyp|bindings|node-addon-api)@/u.test(spec))).toBe(false);
     expect(specs).toContain("undici@8.10.0");
     expect(specs.some((spec) => spec.startsWith("openai@"))).toBe(false);
     expect(specs.some((spec) => spec.startsWith("vite@"))).toBe(false);

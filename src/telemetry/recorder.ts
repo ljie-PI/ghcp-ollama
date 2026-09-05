@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "../persistence/sqlite.js";
 import { metadataJsonOrRejected, sanitizeMetadata, sanitizeOperationalEventMetadata } from "./sanitize.js";
 
 export const TELEMETRY_QUEUE_CAP = 1024;
@@ -102,7 +102,7 @@ export class TelemetryRecorder {
   private eventRetentionMs: number;
 
   constructor(
-    private readonly database: Database.Database,
+    private readonly database: SqliteDatabase,
     private readonly nowMs: () => number = Date.now,
     private readonly usageRowCap = USAGE_ROW_CAP,
     private readonly eventRowCap = EVENT_ROW_CAP,

@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { VERSION } from "../../src/version.js";
-import { currentNodeMajor } from "../../scripts/tooling/node_version.js";
+import { assertNode24, currentNodeMajor } from "../../scripts/tooling/node_version.js";
 import { isAllowedNetworkTarget, isLoopbackHost } from "../../scripts/tooling/ci_network_guard.js";
 
 const execFileAsync = promisify(execFile);
@@ -45,7 +45,7 @@ describe("package entrypoints and toolchain", () => {
     });
     expect(pkg.bin).toEqual({ ghcg: "dist/src/cli/main.js" });
     expect(pkg.files).toEqual(["dist/src/", "dist/admin/", "README.md", "LICENSE"]);
-    expect(pkg.engines.node).toBe(">=24");
+    expect(pkg.engines.node).toBe(">=24.20.0");
     expect(pkg.repository.url).toBe("git+https://github.com/ljie-PI/ghc-gateway.git");
   });
 
@@ -91,8 +91,14 @@ describe("package entrypoints and toolchain", () => {
     }
   });
 
-  it("requires Node.js 24 or newer", () => {
+  it("requires Node.js 24.20.0 or newer", () => {
     expect(currentNodeMajor()).toBeGreaterThanOrEqual(24);
+    for (const version of ["22.20.0", "24.0.0", "24.19.9"]) {
+      expect(() => assertNode24(version)).toThrow(/24\.20\.0/u);
+    }
+    for (const version of ["24.20.0", "24.21.0", "25.0.0", "26.8.1"]) {
+      expect(() => assertNode24(version)).not.toThrow();
+    }
   });
 
   it("locks registry dependencies to the official npm registry", async () => {

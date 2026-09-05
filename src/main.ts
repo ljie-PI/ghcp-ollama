@@ -38,7 +38,7 @@ import { SqliteAdminTelemetry } from "./telemetry/admin.js";
 import { TelemetryRuntime } from "./telemetry/runtime.js";
 import type { ProtocolPerformanceObserver } from "./telemetry/runtime.js";
 import { VERSION } from "./version.js";
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "./persistence/sqlite.js";
 
 export interface BootstrapOptions {
   readonly argv?: readonly string[];
@@ -56,7 +56,7 @@ export interface ProductionDaemonCompositionOptions {
 }
 
 export interface ApplicationContext {
-  readonly database?: Database.Database;
+  readonly database?: SqliteDatabase;
   readonly credentials?: CredentialStore;
   readonly directory: AccountDirectory;
   readonly catalog: CopilotModelCatalog;

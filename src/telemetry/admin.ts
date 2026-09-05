@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "../persistence/sqlite.js";
 import type { PerformanceEvaluation, PerformanceSnapshot } from "./performance.js";
 import { EVENT_ROW_CAP, type RecordedOperationalEvent, type TelemetryOutcome, type TelemetryProtocol } from "./recorder.js";
 import type { TelemetryRecorder } from "./recorder.js";
@@ -201,7 +201,7 @@ export class SqliteAdminTelemetry implements AdminTelemetry {
   private latestPerformance: PerformanceSnapshot = emptyPerformanceSnapshot();
 
   constructor(
-    private readonly database: Database.Database,
+    private readonly database: SqliteDatabase,
     private readonly options: Readonly<SqliteAdminTelemetryOptions> = {},
   ) {}
 

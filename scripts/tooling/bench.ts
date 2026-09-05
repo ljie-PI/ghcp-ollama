@@ -33,6 +33,7 @@ import {
 } from "../../src/protocols/responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 import { nearestRankP95, THRESHOLDS } from "../../src/telemetry/performance.js";
+import { assertNode24 } from "./node_version.js";
 import type { PerformanceMeasurement, ProtocolPerformanceObserver } from "../../src/telemetry/runtime.js";
 import "./ci_network_guard.js";
 
@@ -897,14 +898,16 @@ async function writeCompiledWorker(workerPath: string): Promise<void> {
     compilerOptions,
     fileName: sourcePath,
   });
-  const guardSource = fileURLToPath(new URL("./ci_network_guard.ts", import.meta.url));
-  const guardOutput = ts.transpileModule(await readFile(guardSource, "utf8"), {
-    compilerOptions,
-    fileName: guardSource,
-  });
   await mkdir(path.dirname(workerPath), { recursive: true });
   await writeFile(workerPath, output.outputText.replaceAll("../../src/", "../../../../dist/src/"), "utf8");
-  await writeFile(path.join(path.dirname(workerPath), "ci_network_guard.js"), guardOutput.outputText, "utf8");
+  for (const name of ["ci_network_guard", "node_version"]) {
+    const helperSource = fileURLToPath(new URL(`./${name}.ts`, import.meta.url));
+    const helperOutput = ts.transpileModule(await readFile(helperSource, "utf8"), {
+      compilerOptions,
+      fileName: helperSource,
+    });
+    await writeFile(path.join(path.dirname(workerPath), `${name}.js`), helperOutput.outputText, "utf8");
+  }
 }
 
 function benchmarkEnvironment(): BenchmarkEnvironment {
@@ -1029,7 +1032,7 @@ function parseArgs(argv: readonly string[]): { readonly command: "full" | "worke
 }
 
 async function main(): Promise<void> {
-  assertSupportedNode();
+  assertNode24();
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.command === "worker") {
     const result = await runBenchmarkIteration(parsed.repeat);
@@ -1058,13 +1061,6 @@ async function main(): Promise<void> {
   }));
   if (!artifact.passed) {
     process.exitCode = 1;
-  }
-}
-
-function assertSupportedNode(): void {
-  const major = Number.parseInt(process.versions.node.split(".")[0] ?? "", 10);
-  if (!Number.isInteger(major) || major < 24) {
-    throw new Error(`Node.js 24 or newer is required; current ${process.versions.node}`);
   }
 }
 

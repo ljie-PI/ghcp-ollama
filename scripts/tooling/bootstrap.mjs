@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-const [majorText] = process.versions.node.split(".");
+const [majorText, minorText] = process.versions.node.split(".");
 const major = Number.parseInt(majorText ?? "", 10);
+const minor = Number.parseInt(minorText ?? "", 10);
 
-if (!Number.isInteger(major) || major < 24) {
-  console.error(`Node.js 24 or newer is required for the project toolchain; current ${process.versions.node}`);
+if (!Number.isInteger(major) || !Number.isInteger(minor) || major < 24 || (major === 24 && minor < 20)) {
+  console.error(`Node.js 24.20.0 or newer is required for the project toolchain; current ${process.versions.node}`);
   process.exit(1);
 }
 

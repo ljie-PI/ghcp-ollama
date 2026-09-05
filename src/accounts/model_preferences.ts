@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { SqliteDatabase } from "../persistence/sqlite.js";
 
 export interface ModelPreference {
   readonly accountId: string;
@@ -17,7 +17,7 @@ export class PreferenceRevisionError extends Error {
 
 export class AccountModelPreferences {
   constructor(
-    private readonly database: Database.Database,
+    private readonly database: SqliteDatabase,
     private readonly nowMs: () => number = Date.now,
   ) {}
 

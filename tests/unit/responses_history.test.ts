@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { SqliteDatabase as Database } from "../../src/persistence/sqlite.js";
 import { describe, expect, it } from "vitest";
 import { applyMigrations, embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
@@ -36,7 +36,7 @@ function outputFromJson(json: string): readonly WireJson[] {
 }
 
 function history(nowMs = 1_700_000_000_000): {
-  readonly database: Database.Database;
+  readonly database: Database;
   readonly store: SqliteResponsesHistory;
 } {
   const database = new Database(":memory:");

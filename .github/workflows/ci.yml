@@ -110,3 +110,79 @@ jobs:
         with:
           name: ci-${{ matrix.platform }}
           path: artifacts/**
+
+  runtime:
+    name: Node.js ${{ matrix.node }} runtime and install
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["24.20.0", "26"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use current Node.js 24 for build tools
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Provision dependencies and build the release
+        shell: bash
+        run: |
+          mkdir -p artifacts/ci
+          test "$(npm config get registry)" = "https://registry.npmjs.org/"
+          npm ci
+          while IFS= read -r spec; do npm cache add "$spec"; done < <(node scripts/tooling/bootstrap.mjs scripts/tooling/production_dependency_specs.ts)
+          npm run build
+          echo "build_node=$(node --version)" > artifacts/ci/runtime-provenance.txt
+      - name: Use target runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          registry-url: https://registry.npmjs.org
+      - name: Record runtime and block outbound network
+        shell: bash
+        run: |
+          {
+            echo "runtime_node=$(node --version)"
+            echo "runtime_npm=$(npm --version)"
+          } >> artifacts/ci/runtime-provenance.txt
+          {
+            echo "GHC_GATEWAY_CI_NETWORK_GUARD=1"
+            echo "NODE_OPTIONS=--import ./scripts/tooling/bootstrap.mjs"
+            echo "HTTP_PROXY=http://127.0.0.1:9"
+            echo "HTTPS_PROXY=http://127.0.0.1:9"
+            echo "ALL_PROXY=http://127.0.0.1:9"
+            echo "NO_PROXY=localhost,127.0.0.1,::1"
+          } >> "$GITHUB_ENV"
+      - name: Focused persistence and packaging tests
+        run: >-
+          npm test --
+          tests/unit/sqlite_database.test.ts
+          tests/unit/persistence_migrations.test.ts
+          tests/unit/runtime_config.test.ts
+          tests/unit/responses_history.test.ts
+          tests/unit/telemetry_runtime.test.ts
+          tests/unit/production_dependencies.test.ts
+          tests/integration/production_migrations.test.ts
+          tests/integration/legacy_sqlite.test.ts
+          tests/integration/responses_history_sqlite.test.ts
+          tests/integration/daemon_lifecycle.test.ts
+          tests/integration/pack.test.ts
+      - name: Production SQLite transaction and reopen smoke
+        shell: bash
+        run: node scripts/tooling/bootstrap.mjs scripts/tooling/sqlite_smoke.ts | tee artifacts/ci/sqlite-smoke.json
+      - name: Installed release smoke with lifecycle scripts enabled
+        run: node scripts/tooling/bootstrap.mjs scripts/tooling/pack.ts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: ""
+          NODE_OPTIONS: ""
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          ALL_PROXY: ""
+          NO_PROXY: ""
+        with:
+          name: ci-node-${{ matrix.node }}
+          path: artifacts/**
