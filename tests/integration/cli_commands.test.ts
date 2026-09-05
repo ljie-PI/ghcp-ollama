@@ -58,19 +58,27 @@ async function runCmd(
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
     const timeout = setTimeout(() => {
-      child.kill();
-      reject(new Error(`${path.basename(command)} did not exit before timeout`));
+      settled = true;
+      void terminateProcessTree(child.pid).then(
+        () => reject(new Error(`${path.basename(command)} did not exit before timeout`)),
+        (error: unknown) => reject(error),
+      );
     }, 15_000);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => { stdout += chunk; });
     child.stderr.on("data", (chunk: string) => { stderr += chunk; });
     child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       reject(error);
     });
     child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       if (code !== 0) {
         reject(new Error(`${path.basename(command)} failed with exit code ${String(code)}; stdout=${safeOutput(stdout)}; stderr=${safeOutput(stderr)}`));
@@ -78,6 +86,25 @@ async function runCmd(
       }
       resolve({ stdout, stderr });
     });
+  });
+}
+
+async function terminateProcessTree(pid: number | undefined): Promise<void> {
+  if (pid === undefined) return;
+  await new Promise<void>((resolve, reject) => {
+    const script = [
+      "function Stop-Tree([int]$id) {",
+      "  Get-CimInstance Win32_Process -Filter \"ParentProcessId=$id\" | ForEach-Object { Stop-Tree ([int]$_.ProcessId) }",
+      "  Stop-Process -Id $id -Force -ErrorAction SilentlyContinue",
+      "}",
+      `Stop-Tree ${pid}`,
+    ].join("; ");
+    const killer = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.once("error", reject);
+    killer.once("close", () => resolve());
   });
 }
 
@@ -128,12 +155,12 @@ describe("CLI commands", () => {
         "",
       ].join("\r\n"));
 
-      const result = await runCmd(shim, ["--json", "--help"], directory);
+      const result = await runCmd(shim, ["--json", "auth", "login", "--help"], directory);
 
       expect(result.stderr).toBe("");
       expect(JSON.parse(result.stdout)).toMatchObject({
         ok: true,
-        data: { help: expect.stringContaining("Usage: ghcg") },
+        data: { help: expect.stringContaining("Usage: ghcg [--data-dir <path>] [--json] auth login [--host <domain>]") },
       });
     } finally {
       await rm(directory, { recursive: true, force: true });

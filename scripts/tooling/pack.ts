@@ -416,7 +416,9 @@ function runNode(
 
 function runBin(binPath: string, args: readonly string[], cwd: string): Promise<CommandResult> {
   return process.platform === "win32"
-    ? runCommand(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", windowsCmdCommandLine(binPath, args)], cwd, [0], true)
+    ? runCommand(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", windowsCmdCommandLine(binPath, args)], cwd, [0], {
+      windowsVerbatimArguments: true,
+    })
     : runCommand(binPath, args, cwd);
 }
 
@@ -425,12 +427,16 @@ interface CommandResult {
   readonly stderr: string;
 }
 
+interface CommandOptions {
+  readonly windowsVerbatimArguments?: boolean;
+}
+
 function runCommand(
   command: string,
   args: readonly string[],
   cwd: string,
   allowedExitCodes: readonly number[] = [0],
-  windowsVerbatimArguments = false,
+  options: CommandOptions = {},
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -438,7 +444,7 @@ function runCommand(
       env: sanitizedEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-      windowsVerbatimArguments,
+      windowsVerbatimArguments: options.windowsVerbatimArguments === true,
     });
     let stdout = "";
     let stderr = "";
