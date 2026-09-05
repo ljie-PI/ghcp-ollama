@@ -193,7 +193,9 @@ ghcg --json config get limits.requestBodyBytes
 
 ## Development
 
-### Source Checkout Workflow
+Use [Run from Source](#run-from-source) for a local instance, or [Validate Changes](#validate-changes) when preparing code changes.
+
+### Run from Source
 
 Run these commands from the repository root using a supported Node.js version. No global `ghcg` installation or `npm link` is needed.
 
@@ -243,7 +245,9 @@ node dist/src/cli/main.js stop
 
 Do not run the foreground process and detached daemon simultaneously for the same data directory and port. Later starts can reuse the existing dependencies and build until they change.
 
-### Checks
+### Validate Changes
+
+Install dependencies before checking types or linting, then build before running the runtime and packaging checks. This is a separate validation workflow, not an extra step required for every ordinary startup.
 
 ```sh
 npm ci
