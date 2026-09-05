@@ -62,41 +62,52 @@ jobs:
         run: |
           {
             echo "GHC_GATEWAY_CI_NETWORK_GUARD=1"
-            echo "NODE_OPTIONS=--import ./scripts/tooling/bootstrap.mjs"
             echo "HTTP_PROXY=http://127.0.0.1:9"
             echo "HTTPS_PROXY=http://127.0.0.1:9"
             echo "ALL_PROXY=http://127.0.0.1:9"
             echo "NO_PROXY=localhost,127.0.0.1,::1"
           } >> "$GITHUB_ENV"
       - name: Typecheck
+        env:
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run typecheck
       - name: Lint
+        env:
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run lint
       - name: Build
+        env:
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run build
       - name: Test
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm test
       - name: Verify fixtures
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run fixtures:verify
       - name: E2E
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run e2e
       - name: SQLite smoke
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run smoke:sqlite
       - name: Benchmark
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run bench -- full --repeat 3
       - name: Installed package smoke
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run pack
       - uses: actions/upload-artifact@v4
         if: always()
@@ -149,13 +160,14 @@ jobs:
           } >> artifacts/ci/runtime-provenance.txt
           {
             echo "GHC_GATEWAY_CI_NETWORK_GUARD=1"
-            echo "NODE_OPTIONS=--import ./scripts/tooling/bootstrap.mjs"
             echo "HTTP_PROXY=http://127.0.0.1:9"
             echo "HTTPS_PROXY=http://127.0.0.1:9"
             echo "ALL_PROXY=http://127.0.0.1:9"
             echo "NO_PROXY=localhost,127.0.0.1,::1"
           } >> "$GITHUB_ENV"
       - name: Focused persistence and packaging tests
+        env:
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: >-
           npm test --
           tests/unit/sqlite_database.test.ts
@@ -170,9 +182,13 @@ jobs:
           tests/integration/daemon_lifecycle.test.ts
           tests/integration/pack.test.ts
       - name: Production SQLite transaction and reopen smoke
+        env:
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         shell: bash
         run: node scripts/tooling/bootstrap.mjs scripts/tooling/sqlite_smoke.ts | tee artifacts/ci/sqlite-smoke.json
       - name: Installed release smoke with lifecycle scripts enabled
+        env:
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: node scripts/tooling/bootstrap.mjs scripts/tooling/pack.ts
       - uses: actions/upload-artifact@v4
         if: always()
