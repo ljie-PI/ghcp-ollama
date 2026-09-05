@@ -2,7 +2,7 @@
   {
     "caseId": "ollama.request.capture",
     "owner": "RM-10",
-    "source": "docs/ollama_chat_to_chat_completions.md#request-conversion",
+    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/ollama_chat_to_chat_completions.md#request-conversion",
     "input": "request/capture.input.json",
     "expected": "request/capture.expected.json",
     "encoder": "ollama-chat-request"
@@ -10,7 +10,7 @@
   {
     "caseId": "ollama.nonstream.success",
     "owner": "RM-10",
-    "source": "docs/ollama_chat_to_chat_completions.md#nonstream-chat-response",
+    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/ollama_chat_to_chat_completions.md#nonstream-chat-response",
     "input": "nonstream/success.input.json",
     "expected": "nonstream/success.expected.json",
     "encoder": "go-encoding-json-reference-bytes"
@@ -18,7 +18,7 @@
   {
     "caseId": "ollama.stream.success",
     "owner": "RM-10",
-    "source": "docs/ollama_chat_to_chat_completions.md#7-stream-reducer",
+    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/ollama_chat_to_chat_completions.md#7-stream-reducer",
     "input": "stream/success.input.txt",
     "expected": "stream/success.expected.txt",
     "encoder": "go-encoding-json-reference-bytes"

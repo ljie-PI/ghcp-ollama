@@ -2,7 +2,7 @@
   {
     "caseId": "copilot-transport.sse.done",
     "owner": "RM-07",
-    "source": "docs/architecture.md#91-pipeline",
+    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/architecture.md#91-pipeline",
     "input": "sse/done.input.txt",
     "expected": "sse/done.expected.txt",
     "encoder": "chat-sse"
