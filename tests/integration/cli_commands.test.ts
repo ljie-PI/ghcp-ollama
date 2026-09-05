@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { DeviceFlowService, type DeviceOAuthClient } from "../../src/accounts/device_flow.js";
@@ -30,6 +30,7 @@ import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js
 import { windowsCmdCommandLine } from "../../scripts/tooling/windows_cmd.js";
 
 const encoder = new TextEncoder();
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 afterEach(() => {
   vi.useRealTimers();
@@ -110,13 +111,28 @@ async function terminateProcessTree(pid: number | undefined): Promise<void> {
 
 function testProcessEnvironment(): NodeJS.ProcessEnv {
   const env = { ...process.env };
+  env.NODE_OPTIONS = absoluteNodeOptionsPreloads(env.NODE_OPTIONS);
   for (const key of Object.keys(env)) {
-    if (/^(?:GHC_GATEWAY_)/u.test(key)
+    if (/^(?:GHC_GATEWAY_(?!CI_NETWORK_GUARD))/u.test(key)
       || /(?:token|secret|password|authorization|auth_token)/iu.test(key)) {
       delete env[key];
     }
   }
   return env;
+}
+
+function absoluteNodeOptionsPreloads(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const tokens = value.split(/\s+/u);
+  return tokens.map((token, index) => {
+    if (token.startsWith("--import=./scripts/tooling/")) {
+      return `--import=${pathToFileURL(path.join(repoRoot, token.slice("--import=./".length))).href}`;
+    }
+    if (tokens[index - 1] === "--import" && token.startsWith("./scripts/tooling/")) {
+      return pathToFileURL(path.join(repoRoot, token.slice(2))).href;
+    }
+    return token;
+  }).join(" ");
 }
 
 function safeOutput(value: string): string {
@@ -125,10 +141,10 @@ function safeOutput(value: string): string {
 
 describe("CLI commands", () => {
   it("recognizes the direct CLI entrypoint only when argv names that module", () => {
-    const entry = path.resolve("src", "cli", "main.ts");
+    const entry = path.join(repoRoot, "src", "cli", "main.ts");
 
     expect(isMainModule(pathToFileURL(entry).href, entry)).toBe(true);
-    expect(isMainModule(pathToFileURL(entry).href, path.resolve("src", "main.ts"))).toBe(false);
+    expect(isMainModule(pathToFileURL(entry).href, path.join(repoRoot, "src", "main.ts"))).toBe(false);
     expect(isMainModule(pathToFileURL(entry).href, undefined)).toBe(false);
   });
 
@@ -151,7 +167,7 @@ describe("CLI commands", () => {
     try {
       await writeFile(shim, [
         "@echo off",
-        `"${process.execPath}" "${path.resolve("scripts", "tooling", "bootstrap.mjs")}" "${path.resolve("src", "cli", "main.ts")}" %*`,
+        `"${process.execPath}" "${path.join(repoRoot, "scripts", "tooling", "bootstrap.mjs")}" "${path.join(repoRoot, "src", "cli", "main.ts")}" %*`,
         "",
       ].join("\r\n"));
 
