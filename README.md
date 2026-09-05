@@ -18,15 +18,7 @@ npm install --global @ljie-pi/ghc-gateway
 
 The package installs one executable: `ghcg`.
 
-To build and run a source checkout, use Node.js 24.20.0 or newer:
-
-```bash
-npm ci
-npm run build
-npm start
-```
-
-`npm start` runs the built gateway in the foreground. Pass startup options after `--`, for example `npm start -- --port 31401`.
+To build and run a source checkout instead, see [Development](#development).
 
 ## Start The Gateway
 
@@ -201,7 +193,50 @@ ghcg --json config get limits.requestBodyBytes
 
 ## Development
 
-```bash
+### Source Checkout Workflow
+
+Install dependencies once after cloning and again only when dependencies change:
+
+```sh
+npm ci
+```
+
+Build after source changes:
+
+```sh
+npm run build
+```
+
+Run the built gateway in the foreground:
+
+```sh
+npm start
+```
+
+This listens on `127.0.0.1:31400` by default. Press `Ctrl+C` to stop it. Pass startup options after `--`, for example `npm start -- --port 31401`.
+
+In a second terminal, use the built CLI for authentication and the Admin UI:
+
+```sh
+node dist/src/cli/main.js auth login
+node dist/src/cli/main.js admin open
+```
+
+OpenAI-compatible clients can use `http://127.0.0.1:31400/v1` as their base URL. The current release does not require a separate gateway API key.
+
+As an alternative to the foreground process, start one detached, self-managed daemon and stop it later:
+
+```sh
+node dist/src/cli/main.js start
+node dist/src/cli/main.js status
+node dist/src/cli/main.js stop
+```
+
+Do not run the foreground process and detached daemon simultaneously for the same data directory and port.
+
+### Checks
+
+```sh
 npm ci
 npm run typecheck
 npm run lint
