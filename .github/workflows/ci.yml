@@ -26,11 +26,11 @@ jobs:
             os: macos-14
     steps:
       - uses: actions/checkout@v4
-      - name: Use Node.js 24
+      - name: Use Node.js 24.20.0
         id: node
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: "24.20.0"
           registry-url: https://registry.npmjs.org
       - name: Restore dependency cache
         id: npm-cache
@@ -120,10 +120,10 @@ jobs:
         node: ["24.20.0", "26"]
     steps:
       - uses: actions/checkout@v4
-      - name: Use current Node.js 24 for build tools
+      - name: Use Node.js 24.20.0 for build tools
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: "24.20.0"
           registry-url: https://registry.npmjs.org
           cache: npm
       - name: Provision dependencies and build the release
