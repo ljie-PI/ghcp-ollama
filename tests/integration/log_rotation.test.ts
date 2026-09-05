@@ -65,6 +65,26 @@ describe("daemon JSONL logger", () => {
     expect(vi.mocked(security.assertFile).mock.calls.length).toBeGreaterThan(afterFirst);
   });
 
+  it.runIf(process.platform === "win32")("fails closed when an existing log becomes unsafe before append", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-log-windows-unsafe-"));
+    const security: WindowsLogSecurity = {
+      restrict: vi.fn(),
+      assertDirectory: vi.fn(),
+      assertFile: vi.fn(),
+    };
+    const logger = new JsonlLogger(path.join(root, "logs"), () => 1_700_000_000_000, security);
+    logger.write({ category: "first" });
+    vi.mocked(security.assertFile).mockImplementation(() => {
+      throw new Error("unsafe log");
+    });
+
+    expect(() => logger.write({ category: "second" })).toThrow("unsafe log");
+    const active = path.join(root, "logs", "gateway.jsonl");
+    const content = readFileSync(active, "utf8");
+    expect(content).toContain("first");
+    expect(content).not.toContain("second");
+  });
+
   it.skipIf(process.platform === "win32")("protects JSONL files, rotates before overflow, and applies count and age retention", async () => {
     let now = 1_700_000_000_000;
     const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-log-protected-"));

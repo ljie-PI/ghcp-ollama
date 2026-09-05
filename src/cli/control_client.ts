@@ -12,6 +12,7 @@ import { captureProcessStartIdentity } from "../daemon/process_identity.js";
 export type CliErrorCode =
   | "internal_error"
   | "usage_error"
+  | "unsupported_runtime"
   | "validation_error"
   | "not_found"
   | "revision_conflict"
@@ -35,6 +36,7 @@ export class CliError extends Error {
 export const CLI_ERROR_EXIT: Readonly<Record<CliErrorCode, number>> = {
   internal_error: 1,
   usage_error: 2,
+  unsupported_runtime: 2,
   validation_error: 2,
   not_found: 3,
   revision_conflict: 3,
@@ -52,6 +54,7 @@ export const CLI_ERROR_EXIT: Readonly<Record<CliErrorCode, number>> = {
 export const SAFE_ERROR_MESSAGES: Readonly<Record<CliErrorCode, string>> = {
   internal_error: "internal error",
   usage_error: "usage error",
+  unsupported_runtime: "Node.js 24.20.0 or newer is required",
   validation_error: "validation error",
   not_found: "not found",
   revision_conflict: "revision conflict",

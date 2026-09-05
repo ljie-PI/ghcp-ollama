@@ -364,6 +364,7 @@ function failureDetails(code: ControlFailureCode): { readonly status: number; re
 function cliStatus(code: CliErrorCode): number {
   switch (code) {
   case "usage_error":
+  case "unsupported_runtime":
   case "validation_error":
     return 400;
   case "not_found":

@@ -6,6 +6,35 @@ import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { runDaemonRuntime } from "../../src/daemon/runtime.js";
 
 describe("daemon runtime listener", () => {
+  it("rejects unsupported Node.js runtimes before publishing daemon identity", async () => {
+    const events: string[] = [];
+    await expect(runDaemonRuntime({
+      startup: parseStartupConfig(["--data-dir", "runtime-unsupported"], {}),
+      env: {},
+      managed: true,
+      shutdownSignal: new AbortController().signal,
+      stderr: { write: () => undefined },
+      composeGateway: async () => { throw new Error("must not compose"); },
+      dependencies: {
+        nodeVersion: "24.0.0",
+        pid: 123,
+        captureProcessIdentity: async () => {
+          events.push("process-identity");
+          return "windows:1";
+        },
+        acquireIdentity: () => {
+          events.push("acquire");
+          throw new Error("must not acquire");
+        },
+        createLogger: () => {
+          events.push("logger");
+          return { write() {} };
+        },
+      },
+    })).rejects.toThrow("Node.js 24.20.0 or newer is required");
+    expect(events).toEqual([]);
+  });
+
   it("holds the identity lease before composition and cleans only its lease after shutdown", async () => {
     const events: string[] = [];
     const shutdown = new AbortController();
