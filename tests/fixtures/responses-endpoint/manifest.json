@@ -1,0 +1,23 @@
+[
+  {
+    "caseId": "responses-endpoint.native-bridge-commit",
+    "family": "responses-endpoint",
+    "input": "native-bridge-commit.input.txt",
+    "expected": "native-bridge-commit.expected.json",
+    "encoder": "responses-endpoint-object"
+  },
+  {
+    "caseId": "responses-endpoint.presenter-and-aliases",
+    "family": "responses-endpoint",
+    "input": "presenter-and-aliases.input.txt",
+    "expected": "presenter-and-aliases.expected.json",
+    "encoder": "responses-endpoint-object"
+  },
+  {
+    "caseId": "responses-endpoint.post-commit-failure",
+    "family": "responses-endpoint",
+    "input": "post-commit-failure.input.txt",
+    "expected": "post-commit-failure.expected.json",
+    "encoder": "responses-endpoint-object"
+  }
+]

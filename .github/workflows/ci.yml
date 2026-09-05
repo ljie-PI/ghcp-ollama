@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: ["main", "refactor"]
+    branches: ["main"]
   push:
-    branches: ["refactor"]
+    branches: ["main"]
 
 jobs:
   platform:

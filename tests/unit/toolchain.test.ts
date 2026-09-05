@@ -1,0 +1,185 @@
+import { execFile } from "node:child_process";
+import path from "node:path";
+import { access, readdir, readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import { describe, expect, it } from "vitest";
+import { VERSION } from "../../src/version.js";
+import { currentNodeMajor } from "../../scripts/tooling/node_version.js";
+import { isAllowedNetworkTarget, isLoopbackHost } from "../../scripts/tooling/ci_network_guard.js";
+
+const execFileAsync = promisify(execFile);
+
+interface PackageJson {
+  readonly name: string;
+  readonly version: string;
+  readonly main: string;
+  readonly exports: Record<string, string>;
+  readonly bin: Record<string, string>;
+  readonly scripts: Record<string, string>;
+  readonly files: readonly string[];
+  readonly engines: { readonly node: string };
+  readonly repository: { readonly url: string };
+  readonly dependencies: Record<string, string>;
+}
+
+interface PackageLock {
+  readonly packages: Record<string, { readonly resolved?: string }>;
+}
+
+async function readPackageJson(): Promise<PackageJson> {
+  return JSON.parse(await readFile("package.json", "utf8")) as PackageJson;
+}
+
+describe("package entrypoints and toolchain", () => {
+  it("exposes the production package identity and entrypoints", async () => {
+    const pkg = await readPackageJson();
+
+    expect(VERSION).toBe("0.1.0");
+    expect(pkg.name).toBe("@ljie-pi/ghc-gateway");
+    expect(pkg.version).toBe(VERSION);
+    expect(pkg.main).toBe("./dist/src/main.js");
+    expect(pkg.exports).toEqual({
+      ".": "./dist/src/main.js",
+      "./cli": "./dist/src/cli/main.js",
+    });
+    expect(pkg.bin).toEqual({ ghcg: "dist/src/cli/main.js" });
+    expect(pkg.files).toEqual(["dist/src/", "dist/admin/", "README.md", "LICENSE"]);
+    expect(pkg.engines.node).toBe(">=24");
+    expect(pkg.repository.url).toBe("git+https://github.com/ljie-PI/ghc-gateway.git");
+  });
+
+  it("uses TypeScript defaults and keeps SDK suites manual", async () => {
+    const pkg = await readPackageJson();
+    const requiredScripts = [
+      "start",
+      "build",
+      "typecheck",
+      "lint",
+      "test",
+      "test:sdk",
+      "test:live:sdk",
+      "e2e",
+      "fixtures:verify",
+      "fixtures:generate",
+      "bench",
+      "pack",
+      "prepack",
+    ];
+
+    for (const script of requiredScripts) {
+      expect(pkg.scripts[script], script).toBeTypeOf("string");
+    }
+    expect(Object.keys(pkg.scripts).some((name) => name.includes("legacy"))).toBe(false);
+    expect(pkg.scripts.start).toBe("node dist/src/cli/main.js serve");
+    expect(pkg.scripts.build).toContain("tsc -p tsconfig.json");
+    expect(pkg.scripts.test).toContain("vitest run --config vitest.config.ts");
+    expect(pkg.scripts.prepack).toBe("npm run build");
+    expect(pkg.scripts.test).not.toContain("sdk");
+    expect(pkg.scripts.e2e).not.toContain("sdk");
+    for (const script of ["test:sdk", "test:live:sdk", "typecheck:sdk"]) {
+      const command = pkg.scripts[script];
+      expect(command, script).toBeTypeOf("string");
+      if (command === undefined) {
+        throw new Error(`missing package script: ${script}`);
+      }
+      expect(command).toContain("require_opt_in.ts");
+      expect(command).toContain("generate_migrations.ts");
+      expect(command.indexOf("require_opt_in.ts")).toBeLessThan(
+        command.indexOf("generate_migrations.ts"),
+      );
+    }
+  });
+
+  it("requires Node.js 24 or newer", () => {
+    expect(currentNodeMajor()).toBeGreaterThanOrEqual(24);
+  });
+
+  it("locks registry dependencies to the official npm registry", async () => {
+    const lock = JSON.parse(await readFile("package-lock.json", "utf8")) as PackageLock;
+    const resolved = Object.values(lock.packages).flatMap((entry) => entry.resolved === undefined ? [] : [entry.resolved]);
+    expect(resolved.length).toBeGreaterThan(0);
+    expect(resolved.every((url) => url.startsWith("https://registry.npmjs.org/"))).toBe(true);
+  });
+
+  it("keeps official SDK commands behind manual opt-in guards", async () => {
+    const command = ["scripts/tooling/bootstrap.mjs", "scripts/tooling/require_opt_in.ts"];
+
+    await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
+      env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "" },
+    })).rejects.toMatchObject({ code: 2 });
+
+    await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_LIVE_TESTS"], {
+      env: { ...process.env, GHC_GATEWAY_LIVE_TESTS: "" },
+    })).rejects.toMatchObject({ code: 2 });
+
+    await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
+      env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "1" },
+    })).resolves.toMatchObject({ stdout: "" });
+  });
+
+  it("classifies loopback network targets for the CI network guard", () => {
+    expect(isLoopbackHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackHost("localhost")).toBe(true);
+    expect(isLoopbackHost("github.com")).toBe(false);
+    expect(isAllowedNetworkTarget("http://127.0.0.1:31400/healthz")).toBe(true);
+    expect(isAllowedNetworkTarget("https://github.com/login/device/code")).toBe(false);
+  });
+
+  it("keeps bootstrap.mjs as the only tool JavaScript shim", async () => {
+    const files = await readdir("scripts/tooling");
+    expect(files.filter((file) => file.endsWith(".mjs")).sort()).toEqual(["bootstrap.mjs"]);
+  });
+
+  it("uses the supported configuration and test layout without compatibility aliases", async () => {
+    const pkg = await readPackageJson();
+    const sourceFiles = await readdir("src", { recursive: true });
+    expect(sourceFiles.filter((file) => file.endsWith(".js"))).toEqual([]);
+    expect(Object.keys(pkg.dependencies)).not.toEqual(expect.arrayContaining([
+      "express",
+      "minimist",
+      "eslint_d",
+    ]));
+    const configurationFiles = (await readdir(".")).filter((file) =>
+      (file.startsWith("tsconfig") && file.endsWith(".json"))
+      || /^(?:vitest|playwright).*\.config\.[cm]?[jt]s$/u.test(file));
+    expect(configurationFiles.sort()).toEqual([
+      "playwright.config.ts",
+      "tsconfig.json",
+      "tsconfig.sdk.json",
+      "tsconfig.test.json",
+      "vitest.config.ts",
+      "vitest.sdk.config.ts",
+    ]);
+    expect((await readdir("scripts", { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()).toEqual(["tooling"]);
+    expect((await readdir("tests", { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()).toEqual([
+      "contract", "e2e", "fixtures", "integration", "live", "performance", "sdk", "unit",
+    ]);
+    for (const current of [
+      "scripts/tooling/bootstrap.mjs",
+      "tests/unit",
+      "tests/fixtures",
+    ]) {
+      await expect(access(current)).resolves.toBeUndefined();
+    }
+    const productionText = `${await readFile("package.json", "utf8")}\n${await Promise.all(
+      sourceFiles.filter((file) => file.endsWith(".ts")).map((file) => readFile(path.join("src", file), "utf8")),
+    )}`;
+    expect(productionText).not.toMatch(/ghcp-ollama|ghcp-gateway|ghcpo-server|GHCPO_|\.ghcpo/u);
+  });
+
+  it("preloads the CI network guard without contacting external hosts", async () => {
+    const bootstrapUrl = pathToFileURL(path.resolve("scripts/tooling/bootstrap.mjs")).href;
+
+    await expect(execFileAsync(process.execPath, [
+      "--import",
+      bootstrapUrl,
+      "--eval",
+      "fetch('https://github.com').catch((error) => { console.error(error.message); process.exit(2); })",
+    ], {
+      env: { ...process.env, GHC_GATEWAY_CI_NETWORK_GUARD: "1" },
+    })).rejects.toMatchObject({ code: 2 });
+  });
+});

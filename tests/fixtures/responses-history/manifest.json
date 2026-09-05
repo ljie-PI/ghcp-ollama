@@ -1,0 +1,9 @@
+[
+  {
+    "caseId": "responses-history.enrich.previous-response",
+    "family": "responses-history",
+    "input": "previous-response.input.json",
+    "expected": "previous-response.expected.json",
+    "encoder": "responses-history"
+  }
+]

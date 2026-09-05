@@ -1,0 +1,79 @@
+[
+  {
+    "caseId": "openai-chat.request.model-rewrite",
+    "family": "openai-chat",
+    "input": "request/model-rewrite.input.json",
+    "expected": "request/model-rewrite.expected.json",
+    "encoder": "openai-chat-request"
+  },
+  {
+    "caseId": "openai-chat.stream.done",
+    "family": "openai-chat",
+    "input": "stream/done.input.txt",
+    "expected": "stream/done.expected.txt",
+    "encoder": "openai-chat-sse"
+  },
+  {
+    "caseId": "openai-chat.request.capture",
+    "family": "openai-chat",
+    "input": "request/capture.input.json",
+    "expected": "request/capture.expected.json",
+    "encoder": "openai-chat-request-capture"
+  },
+  {
+    "caseId": "openai-chat.presenter.model-not-found",
+    "family": "openai-chat",
+    "input": "presenter/model-not-found.input.txt",
+    "expected": "presenter/model-not-found.expected.json",
+    "encoder": "openai-error-presenter"
+  },
+  {
+    "caseId": "openai-chat.buffered.success",
+    "family": "openai-chat",
+    "input": "buffered/success.input.json",
+    "expected": "buffered/success.expected.json",
+    "encoder": "openai-chat-buffered"
+  },
+  {
+    "caseId": "openai-chat.buffered.limit-boundary",
+    "family": "openai-chat",
+    "input": "buffered/limit-boundary.input.txt",
+    "expected": "buffered/limit-boundary.expected.json",
+    "encoder": "openai-chat-limit"
+  },
+  {
+    "caseId": "openai-chat.stream.limit-boundary",
+    "family": "openai-chat",
+    "input": "stream/limit-boundary.input.txt",
+    "expected": "stream/limit-boundary.expected.json",
+    "encoder": "openai-chat-limit"
+  },
+  {
+    "caseId": "openai-chat.usage.observation",
+    "family": "openai-chat",
+    "input": "usage/observation.input.json",
+    "expected": "usage/observation.expected.json",
+    "encoder": "openai-chat-usage"
+  },
+  {
+    "caseId": "openai-chat.model.preferred",
+    "family": "openai-chat",
+    "input": "model/preferred.input.json",
+    "expected": "model/preferred.expected.json",
+    "encoder": "openai-chat-request"
+  },
+  {
+    "caseId": "openai-chat.stream.truncated",
+    "family": "openai-chat",
+    "input": "stream/truncated.input.txt",
+    "expected": "stream/truncated.expected.json",
+    "encoder": "openai-error-presenter"
+  },
+  {
+    "caseId": "openai-chat.abort.zero-bytes",
+    "family": "openai-chat",
+    "input": "abort/zero-bytes.input.txt",
+    "expected": "abort/zero-bytes.expected.txt",
+    "encoder": "openai-chat-abort"
+  }
+]

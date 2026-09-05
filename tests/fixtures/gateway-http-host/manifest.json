@@ -1,0 +1,23 @@
+[
+  {
+    "caseId": "gateway-http-host.probe.version",
+    "family": "gateway-http-host",
+    "input": "probe/version.input.txt",
+    "expected": "probe/version.expected.json",
+    "encoder": "probe"
+  },
+  {
+    "caseId": "gateway-http-host.probe.healthz",
+    "family": "gateway-http-host",
+    "input": "probe/healthz.input.txt",
+    "expected": "probe/healthz.expected.json",
+    "encoder": "probe"
+  },
+  {
+    "caseId": "gateway-http-host.probe.readyz",
+    "family": "gateway-http-host",
+    "input": "probe/readyz.input.txt",
+    "expected": "probe/readyz.expected.json",
+    "encoder": "probe"
+  }
+]
