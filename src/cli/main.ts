@@ -16,6 +16,7 @@ import {
   type DaemonRuntimeDependencies,
   type RunDaemonRuntimeOptions,
 } from "../daemon/runtime.js";
+import { composeLazyProductionDaemonGateway } from "../daemon/production_gateway.js";
 
 export interface RunCliOptions {
   readonly argv?: readonly string[];
@@ -170,7 +171,7 @@ async function runServe(
   const shutdownSignal = options.shutdownSignal ?? shutdown?.signal ?? new AbortController().signal;
   const composeGateway: ComposeDaemonGateway = options.composeGateway
     ?? (options.createGateway === undefined
-      ? async (context) => await (await import("../main.js")).composeProductionDaemonGateway(context)
+      ? composeLazyProductionDaemonGateway
       : async (context) => await options.createGateway?.(context.startup, context.env) as HostedGateway);
   try {
     await (options.runDaemonRuntime ?? runDaemonRuntime)({

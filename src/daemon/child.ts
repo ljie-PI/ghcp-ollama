@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
 import { parseStartupConfig } from "../config/startup_config.js";
+import { composeLazyProductionDaemonGateway } from "./production_gateway.js";
 import { runDaemonRuntime } from "./runtime.js";
 
 export async function runManagedChild(argv = process.argv.slice(2), env = process.env): Promise<void> {
@@ -14,7 +15,7 @@ export async function runManagedChild(argv = process.argv.slice(2), env = proces
       startup,
       env,
       managed: true,
-      composeGateway: async (context) => await (await import("../main.js")).composeProductionDaemonGateway(context),
+      composeGateway: composeLazyProductionDaemonGateway,
       shutdownSignal: shutdown.signal,
       stderr: process.stderr,
     });
