@@ -2,7 +2,6 @@
   {
     "caseId": "responses-endpoint.native-bridge-commit",
     "owner": "RM-17",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/openai_responses_routing.md#8-history-ownership",
     "input": "native-bridge-commit.input.txt",
     "expected": "native-bridge-commit.expected.json",
     "encoder": "responses-endpoint-object"
@@ -10,7 +9,6 @@
   {
     "caseId": "responses-endpoint.presenter-and-aliases",
     "owner": "RM-17",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/openai_responses_routing.md#scope",
     "input": "presenter-and-aliases.input.txt",
     "expected": "presenter-and-aliases.expected.json",
     "encoder": "responses-endpoint-object"
@@ -18,7 +16,6 @@
   {
     "caseId": "responses-endpoint.post-commit-failure",
     "owner": "RM-17",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/openai_responses_routing.md#75-downstream-responses-sse-wire",
     "input": "post-commit-failure.input.txt",
     "expected": "post-commit-failure.expected.json",
     "encoder": "responses-endpoint-object"

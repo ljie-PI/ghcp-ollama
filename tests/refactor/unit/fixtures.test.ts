@@ -7,11 +7,14 @@ import { verifyFixtureManifests } from "../../../scripts/tooling/fixtures.js";
 const FIXTURE_ROOT = path.resolve("tests/refactor/fixtures");
 
 describe("RM-22 fixture family closure", () => {
-  it("byte-verifies every manifest entry and closes the canonical protocol families", async () => {
+  it("byte-verifies executable manifests without documentation metadata", async () => {
     const entries = await verifyFixtureManifests();
     const count = (owner: string): number => entries.filter((entry) => entry.owner === owner).length;
 
     expect(entries).toHaveLength(54);
+    for (const entry of entries) {
+      expect(entry).not.toHaveProperty("source");
+    }
     expect(count("RM-11")).toBe(4);
     expect(count("RM-13")).toBe(4);
     expect(count("RM-14")).toBe(3);

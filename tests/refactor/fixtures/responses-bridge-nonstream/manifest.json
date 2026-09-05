@@ -2,7 +2,6 @@
   {
     "caseId": "responses-bridge-nonstream.envelope-items-tools-usage",
     "owner": "RM-15",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/codex_response_to_chat_completions.md#nonstream-chat-response",
     "input": "envelope-items-tools-usage.input.json",
     "expected": "envelope-items-tools-usage.expected.json",
     "encoder": "responses-object-bytes"
@@ -10,7 +9,6 @@
   {
     "caseId": "responses-bridge-nonstream.images-managed-id",
     "owner": "RM-15",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/codex_response_to_chat_completions.md#output-order-and-ids",
     "input": "images-managed-id.input.json",
     "expected": "images-managed-id.expected.json",
     "encoder": "responses-object-bytes"

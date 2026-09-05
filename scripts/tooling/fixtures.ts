@@ -46,7 +46,6 @@ import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.j
 export interface FixtureManifestEntry {
   readonly caseId: string;
   readonly owner: string;
-  readonly source: string;
   readonly input: string;
   readonly expected: string;
   readonly encoder: string;
@@ -97,7 +96,7 @@ function assertManifestEntry(value: unknown, manifestPath: string, index: number
   }
 
   const candidate = value as Record<string, unknown>;
-  const fields = ["caseId", "owner", "source", "input", "expected", "encoder"] as const;
+  const fields = ["caseId", "owner", "input", "expected", "encoder"] as const;
 
   for (const field of fields) {
     if (typeof candidate[field] !== "string" || candidate[field].length === 0) {

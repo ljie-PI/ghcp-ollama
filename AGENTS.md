@@ -6,7 +6,7 @@
 - **Naming:** use the vocabulary in `CONTEXT.md`.
 - **Implementation changes:** inspect the relevant module interfaces in `src/`, their tests in `tests/`, and the commands in `package.json`.
 
-Keep documentation limited to usage and concise contributor guidance. Do not recreate removed protocol, architecture, source-analysis or ADR documents unless explicitly requested. Fixture source URLs preserve historical provenance; they are not dependencies on local documentation.
+Keep documentation limited to usage and concise contributor guidance. Do not recreate removed protocol, architecture, source-analysis or ADR documents unless explicitly requested.
 
 ## Delivery workflow
 
@@ -35,12 +35,6 @@ Review requested behavior, API compatibility and module ownership before opening
 
 Classify findings as must-fix, safe-to-defer, or no-action. A safe deferral requires a linked follow-up issue recording the finding, affected files, safety rationale and concrete acceptance criteria; list it in the PR's deferred follow-ups and leave no broken or fail-open dependency. Explain false positives with evidence; clarify ambiguous requirements before changing behavior.
 
-## Agent skills
-
-### Issue tracker
+## Issue tracking
 
 Tasks are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
-
-### Domain docs
-
-Use root `CONTEXT.md` for shared vocabulary. See `docs/agents/domain.md`.

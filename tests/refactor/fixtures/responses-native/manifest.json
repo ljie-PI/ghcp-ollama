@@ -2,7 +2,6 @@
   {
     "caseId": "responses-native.routing.matrix",
     "owner": "RM-13",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/openai_responses_routing.md#3-native-capability",
     "input": "routing/matrix.input.json",
     "expected": "routing/matrix.expected.json",
     "encoder": "responses-plan-object"
@@ -10,7 +9,6 @@
   {
     "caseId": "responses-native.request.preservation",
     "owner": "RM-13",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/openai_responses_routing.md#5-native-request",
     "input": "request/preservation.input.json",
     "expected": "request/preservation.expected.json",
     "encoder": "ordered-compact-json-bytes"
@@ -18,7 +16,6 @@
   {
     "caseId": "responses-native.nonstream.object",
     "owner": "RM-13",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/openai_responses_routing.md#71-non-stream",
     "input": "nonstream/object.input.json",
     "expected": "nonstream/object.expected.json",
     "encoder": "native-response-object-bytes"
@@ -26,7 +23,6 @@
   {
     "caseId": "responses-native.stream.stable-item-ids",
     "owner": "RM-13",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/openai_responses_routing.md#72-stream",
     "input": "stream/stable-item-ids.input.txt",
     "expected": "stream/stable-item-ids.expected.txt",
     "encoder": "responses-sse-bytes"

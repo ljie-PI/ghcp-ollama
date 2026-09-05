@@ -2,7 +2,6 @@
   {
     "caseId": "responses-bridge-stream.lifecycle-sequence-checkpoints",
     "owner": "RM-16",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/codex_response_to_chat_completions.md#112-text",
     "input": "lifecycle-sequence-checkpoints.input.json",
     "expected": "lifecycle-sequence-checkpoints.expected.txt",
     "encoder": "responses-sse-bytes"
@@ -10,7 +9,6 @@
   {
     "caseId": "responses-bridge-stream.late-tools-terminal",
     "owner": "RM-16",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/codex_response_to_chat_completions.md#114-tools",
     "input": "late-tools-terminal.input.json",
     "expected": "late-tools-terminal.expected.txt",
     "encoder": "responses-sse-bytes"

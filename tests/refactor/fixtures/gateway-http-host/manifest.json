@@ -2,7 +2,6 @@
   {
     "caseId": "gateway-http-host.probe.version",
     "owner": "RM-03",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/gateway_http_contracts.md#23-probe-routes",
     "input": "probe/version.input.txt",
     "expected": "probe/version.expected.json",
     "encoder": "probe"
@@ -10,7 +9,6 @@
   {
     "caseId": "gateway-http-host.probe.healthz",
     "owner": "RM-03",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/gateway_http_contracts.md#23-probe-routes",
     "input": "probe/healthz.input.txt",
     "expected": "probe/healthz.expected.json",
     "encoder": "probe"
@@ -18,7 +16,6 @@
   {
     "caseId": "gateway-http-host.probe.readyz",
     "owner": "RM-03",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/gateway_http_contracts.md#23-probe-routes",
     "input": "probe/readyz.input.txt",
     "expected": "probe/readyz.expected.json",
     "encoder": "probe"

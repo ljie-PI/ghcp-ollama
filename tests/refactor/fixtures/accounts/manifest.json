@@ -2,7 +2,6 @@
   {
     "caseId": "accounts.identity.github.com",
     "owner": "RM-06",
-    "source": "https://github.com/ljie-PI/ghc-gateway/blob/c11b8aadab7a873f0d204ac4898655b0512c872f/docs/architecture.md#github-environments",
     "input": "identity/github.com.input.txt",
     "expected": "identity/github.com.expected.txt",
     "encoder": "account-id"
