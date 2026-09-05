@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { DeviceFlowService, type DeviceOAuthClient } from "../../src/accounts/device_flow.js";
@@ -26,8 +27,10 @@ import { migration as historyMigration } from "../../src/persistence/migrations/
 import { bootstrapGateway, createPublicRouteRegistrations } from "../../src/main.js";
 import { litellmStyleTokenCounter } from "../../src/protocols/ollama_chat/token_counter.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { windowsCmdCommandLine } from "../../scripts/tooling/windows_cmd.js";
 
 const encoder = new TextEncoder();
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 afterEach(() => {
   vi.useRealTimers();
@@ -41,8 +44,111 @@ class CaptureStream {
   }
 }
 
+async function runCmd(
+  command: string,
+  args: readonly string[],
+  cwd: string,
+): Promise<Readonly<{ stdout: string; stderr: string }>> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", windowsCmdCommandLine(command, args)], {
+      cwd,
+      env: testProcessEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      settled = true;
+      void terminateProcessTree(child.pid).then(
+        () => reject(new Error(`${path.basename(command)} did not exit before timeout`)),
+        (error: unknown) => reject(error),
+      );
+    }, 15_000);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(`${path.basename(command)} failed with exit code ${String(code)}; stdout=${safeOutput(stdout)}; stderr=${safeOutput(stderr)}`));
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function terminateProcessTree(pid: number | undefined): Promise<void> {
+  if (pid === undefined) return;
+  await new Promise<void>((resolve, reject) => {
+    const script = [
+      "function Stop-Tree([int]$id) {",
+      "  Get-CimInstance Win32_Process -Filter \"ParentProcessId=$id\" | ForEach-Object { Stop-Tree ([int]$_.ProcessId) }",
+      "  Stop-Process -Id $id -Force -ErrorAction SilentlyContinue",
+      "}",
+      `Stop-Tree ${pid}`,
+    ].join("; ");
+    const killer = spawn("powershell.exe", ["-NoProfile", "-Command", script], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.once("error", reject);
+    killer.once("close", () => resolve());
+  });
+}
+
+function testProcessEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  env.NODE_OPTIONS = absoluteNodeOptionsPreloads(env.NODE_OPTIONS);
+  for (const key of Object.keys(env)) {
+    if (/^(?:GHC_GATEWAY_(?!CI_NETWORK_GUARD))/u.test(key)
+      || /(?:token|secret|password|authorization|auth_token)/iu.test(key)) {
+      delete env[key];
+    }
+  }
+  return env;
+}
+
+function absoluteNodeOptionsPreloads(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const tokens = value.split(/\s+/u);
+  return tokens.map((token, index) => {
+    if (token.startsWith("--import=./scripts/tooling/")) {
+      return `--import=${pathToFileURL(path.join(repoRoot, token.slice("--import=./".length))).href}`;
+    }
+    if (tokens[index - 1] === "--import" && token.startsWith("./scripts/tooling/")) {
+      return pathToFileURL(path.join(repoRoot, token.slice(2))).href;
+    }
+    return token;
+  }).join(" ");
+}
+
+function safeOutput(value: string): string {
+  return value.trim().replaceAll(/[\r\n]+/gu, " ").slice(0, 512);
+}
+
 describe("CLI commands", () => {
-  it("recognizes an executable symlink as the CLI main module", async () => {
+  it("recognizes the direct CLI entrypoint only when argv names that module", () => {
+    const entry = path.join(repoRoot, "src", "cli", "main.ts");
+
+    expect(isMainModule(pathToFileURL(entry).href, entry)).toBe(true);
+    expect(isMainModule(pathToFileURL(entry).href, path.join(repoRoot, "src", "main.ts"))).toBe(false);
+    expect(isMainModule(pathToFileURL(entry).href, undefined)).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("recognizes a POSIX executable symlink as the CLI main module", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "ghcg-bin-link-"));
     const target = path.join(directory, "main.js");
     const link = path.join(directory, "ghcg");
@@ -54,6 +160,29 @@ describe("CLI commands", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform === "win32")("dispatches through a Windows command shim and forwards arguments", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ghcg-bin-shim-"));
+    const shim = path.join(directory, "ghcg.cmd");
+    try {
+      await writeFile(shim, [
+        "@echo off",
+        `"${process.execPath}" "${path.join(repoRoot, "scripts", "tooling", "bootstrap.mjs")}" "${path.join(repoRoot, "src", "cli", "main.ts")}" %*`,
+        "",
+      ].join("\r\n"));
+
+      const result = await runCmd(shim, ["--json", "auth", "login", "--help"], directory);
+
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        ok: true,
+        data: { help: expect.stringContaining("Usage: ghcg [--data-dir <path>] [--json] auth login [--host <domain>]") },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("separates human stdout/stderr, JSON envelopes, and exit codes", async () => {
     const client = new ScriptedControlClient({
       "accounts.list": [{ defaultRevision: 1, defaultAccountId: null, items: [] }],
