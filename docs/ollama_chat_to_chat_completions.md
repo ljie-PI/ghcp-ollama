@@ -153,6 +153,8 @@ OllamaChatResponse {
 Duration 单位为 nanoseconds。所有 metrics 使用 Go `omitempty` 语义；0 不输出。普通 remote Chat bridge
 不生成 duration、debug 或 remote 字段。
 
+<a id="request-conversion"></a>
+
 ## 4. Request 转换
 
 ### 4.1 顶层字段
@@ -378,6 +380,8 @@ Chat：
   "stop": ["END"]
 }
 ```
+
+<a id="nonstream-chat-response"></a>
 
 ## 5. Nonstream Chat response
 

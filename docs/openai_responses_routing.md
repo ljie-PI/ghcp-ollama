@@ -7,6 +7,8 @@
 > Chat bridge 采用
 > [Responses → Chat Completions 桥接规范](./codex_response_to_chat_completions.md)
 
+<a id="scope"></a>
+
 ## 1. 范围
 
 本文定义 `POST /v1/responses` 在以下两种执行方式之间的确定性选择：
@@ -34,6 +36,31 @@ POST /v1/responses
 ```
 
 不注册 `/responses`、`/openai/v1/responses` 或 `/v1/responses/compact` aliases。
+
+### 1.1 Pinned source index and evidence boundary
+
+The LiteLLM references below are pinned to
+`BerriAI/litellm@ae7e50f096a8722bad14d63b6a0d4634d59bf475`. They supply the selected Copilot
+behavior; this contract owns request preservation, native ID ownership, terminal rules and the
+project's fixed client identity.
+
+| Contract area | Exact primary source |
+|---|---|
+| Metadata-first capability (§§3–4) | [`litellm/llms/github_copilot/responses/transformation.py::github_copilot_supports_responses_api`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/llms/github_copilot/responses/transformation.py#L42-L75) |
+| Native URL, headers, reasoning preservation, initiator and vision (§§5–6) | [`litellm/llms/github_copilot/responses/transformation.py::GithubCopilotResponsesAPIConfig`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/llms/github_copilot/responses/transformation.py): `get_complete_url`, `validate_environment`, `_handle_reasoning_item`, `_get_initiator`, `_has_vision_input`, `_contains_vision_content` |
+| Stable stream item IDs (§7.2) | [Same adapter, `transform_streaming_response` and `_normalize_stream_item_id`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/llms/github_copilot/responses/transformation.py#L127-L180) |
+| Compact evidence limit (§9) | [`litellm/responses/main.py`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/responses/main.py#L1959-L2079) and [`litellm/llms/openai/responses/transformation.py`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/llms/openai/responses/transformation.py#L623-L686): provider configuration and URL construction do not prove CAPI compact support |
+
+The alternative cc-switch flow cited in §6 is pinned to
+`farion1231/cc-switch@3217f72596f2d1c0f879f0a05f83803825d9809f`:
+[`src-tauri/src/proxy/providers/claude.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/claude.rs#L401-L453)
+and [`src-tauri/src/proxy/forwarder.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/forwarder.rs#L2655-L2757).
+It starts with Anthropic Messages and uses managed Copilot vendor routing; it is not evidence of
+an OpenAI Responses inbound flow using managed Copilot credentials.
+
+These conclusions came from pinned source and tests, not a credentialed live CAPI probe. The selected
+`/responses` path remains normative; the source comparison is not a live-compatibility guarantee,
+does not enable `/v1/responses` upstream fallback, and does not establish compact capability.
 
 ## 2. Planning interface
 
@@ -80,8 +107,8 @@ Planning 发生在 request converter 之前。Planner 可以读取已绑定账�
 `ResolvedModel`。Capability gate 只读取该 resolved model 的 metadata；alias、默认模型或
 deployment mapping 不得在 planning 后再次改变 model。
 
-以上 signature 与 two plan shapes 是唯一 canonical definition。Architecture、master spec 和
-implementation 只引用它们，不重新定义另一种 prepared plan。
+以上 signature 与 two plan shapes 是唯一 canonical definition。
+Architecture and implementation reference them rather than defining another prepared plan.
 
 Model property 缺失时只使用 Bound Account 的 valid、仍存在于 captured catalog 的 preferred model。
 显式 model 必须是 non-empty string 且精确存在于 catalog；未知显式 ID 返回 HTTP 404，不 fallback

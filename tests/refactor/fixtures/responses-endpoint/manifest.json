@@ -10,7 +10,7 @@
   {
     "caseId": "responses-endpoint.presenter-and-aliases",
     "owner": "RM-17",
-    "source": "docs/openai_responses_routing.md#1-scope",
+    "source": "docs/openai_responses_routing.md#scope",
     "input": "presenter-and-aliases.input.txt",
     "expected": "presenter-and-aliases.expected.json",
     "encoder": "responses-endpoint-object"

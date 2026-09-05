@@ -28,10 +28,9 @@
 3. [GitHub Copilot model listing](./github_copilot_model_listing_apis.md) 独占 account-scoped
    CAPI catalog、catalog cache/generation、credential、endpoint discovery 和 catalog item
    filtering。其 model-list public presenter 不用于本 route。
-4. [Architecture](./architecture.md)、[Refactor master spec](./specs/refactor_master_spec.md)、
-   [CONTEXT](../CONTEXT.md) 和
+4. [Architecture](./architecture.md)、[CONTEXT](../CONTEXT.md) 和
    [ADR-0001](./adr/0001-protocol-endpoint-modules.md) 独占 module interface、state
-   ownership、canonical vocabulary、delivery order 和 file ownership。
+   ownership 与 canonical vocabulary。
 5. [AGENTS](../AGENTS.md) 独占 repository delivery workflow。
 6. 其他 protocol specs 只在其自身 route 生效。尤其是
    [Ollama](./ollama_chat_to_chat_completions.md) 的 model default、response reducer 和
@@ -41,7 +40,7 @@
    [Responses bridge](./codex_response_to_chat_completions.md) 的 planning/conversion/history
    rules，都不得进入本 route。
 
-Architecture 或 master spec 中的 “raw fast path” 只表示“不经过其他 downstream protocol
+“raw fast path” 只表示“不经过其他 downstream protocol
 converter”。它不允许 byte-blind SSE passthrough；第 10–11 节的 incremental parser 和
 OpenAI SSE re-encoder 对本 route 优先。
 
@@ -113,7 +112,7 @@ OpenAiChatRequestContext {
 
 `PreparedOpenAiChatRequest.body` 必须仍是 ordered `WireJsonObject`，不能先转成会重排
 integer-like keys、折叠 duplicate members 或改变 number lexeme 的普通 JavaScript object。
-`ResolvedModel` 使用 master spec 的 shared model resolver contract；本 route 只消费 immutable
+`ResolvedModel` 使用 [shared model resolution contract](./architecture.md#model-resolution)；本 route 只消费 immutable
 `source` 与 `upstreamModel`，不使用其 Responses routing metadata 做第二次 planning。
 
 一次 admitted request 的 execution order 是：
@@ -260,6 +259,8 @@ boolean value。Truthiness、string `"true"`、number `1` 和 coercion 均禁止
    `400 invalid_request_error`。
 
 Unknown nested members，包括它们的 ordered values，不得因 gateway 注入 usage 而丢失。
+
+<a id="request-reserialization-and-vision"></a>
 
 ## 7. Request reserialization 与 vision analysis
 
@@ -455,6 +456,8 @@ body。Normal iterator exhaustion 不是 `done`。
 
 即使先前 chunk 已含 non-null `finish_reason`，也不能把 EOF 当成 `[DONE]`。
 
+<a id="downstream-sse-wire-and-terminal"></a>
+
 ## 11. OpenAI downstream SSE wire 与 terminal
 
 Stream success 使用：
@@ -603,6 +606,8 @@ pre-first-byte、mid-stream 或 terminal write 的任意阶段都必须：
 
 Abort 不是 timeout，也不能触发 account/model retry。
 
+<a id="usage-and-telemetry"></a>
+
 ## 13. Usage 与 telemetry ownership
 
 OpenAI Chat module 可以从 valid upstream object/chunk 的 top-level `usage` 生成 content-free
@@ -678,6 +683,8 @@ developer credential、本机 provider checkout 或 remote API。
 - Catalog retrieval failure 保持真实 failure category，不伪装 404；
 - Final captured upstream body 中只有一个 resolved `model`。
 
+<a id="request-capture-tests"></a>
+
 ### 14.3 Stream selection、options、vision 与 request capture
 
 - `stream` missing/false/true 与每种 wrong type；
@@ -701,6 +708,8 @@ developer credential、本机 provider checkout 或 remote API。
 - Response model/ID/choices/reasoning/tools 不改写；
 - Usage absent/valid/malformed/duplicate：wire不变，side observation符合第 13 节；
 - Invalid response 在 commit 前为 exact 502，且不返回 partial body。
+
+<a id="stream-parser-and-wire-tests"></a>
 
 ### 14.5 Stream parser 与 exact wire
 

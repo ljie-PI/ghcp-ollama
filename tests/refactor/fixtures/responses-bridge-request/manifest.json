@@ -18,7 +18,7 @@
   {
     "caseId": "responses-bridge-request.history.enrichment",
     "owner": "RM-14",
-    "source": "docs/codex_response_to_chat_completions.md#3-request-preprocessing",
+    "source": "docs/codex_response_to_chat_completions.md#request-preprocessing",
     "input": "history/enrichment.input.json",
     "expected": "history/enrichment.expected.json",
     "encoder": "responses-chat-request-object"

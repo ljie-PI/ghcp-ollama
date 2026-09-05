@@ -94,8 +94,8 @@ Probe routes do not bind an account、consume inference admission or contact ups
 | `GET /readyz` when ready | 200 | `{"status":"ready"}` |
 | `GET /readyz` when not ready | 503 | `{"status":"not_ready"}` |
 
-Version is the target `ghc-gateway` package version from the refactor build's single version source；it is not an Ollama
-compatibility version and must equal `package.json` at final cutover。
+Version comes from the production build's single `ghc-gateway` version source; it is not an Ollama
+compatibility version and must equal `package.json`.
 
 Ready means startup config is valid、SQLite is open at the current migration set、the protected credential-store path
 has passed permission checks、runtime config snapshot exists and the host can accept requests。It does not require an
@@ -166,7 +166,8 @@ headers 或 body；model-list failure 始终使用 OpenAI model-list presenter�
 
 本节数值是 runtime config defaults，不是 immutable constants。每个 request 在 admission 时捕获一个
 immutable snapshot；同一 Stream Execution 不观察后续修改。Config keys、hard min/max 与 fixed
-process capacities 由 [Master Spec](./specs/refactor_master_spec.md#72-config) 的 registry 定义。
+process capacities 由 [runtime configuration](./architecture.md#runtime-configuration) 和
+[fixed capacities](./architecture.md#fixed-capacities) 定义。
 本节所有 boundary assertions 同时适用于 default 和一个非默认合法 snapshot。
 
 ### 4.1 Inference admission
@@ -315,6 +316,8 @@ Ollama error line 是其生产规范明确要求的 stream error，不是 succes
 URL、header、upstream body、request content 或 tool content。
 
 ## 7. Protocol error presenters
+
+<a id="openai-error-presenter"></a>
 
 ### 7.1 OpenAI Chat 与 Responses
 

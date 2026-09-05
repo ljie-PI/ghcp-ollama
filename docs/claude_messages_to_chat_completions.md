@@ -22,9 +22,10 @@
 | nonstream response | LiteLLM | 采用 LiteLLM |
 | streaming response | LiteLLM + 第 8.6 节 | 采用 LiteLLM event fields与本文 terminal closure |
 
-`docs/cc-switch/claude_messages_to_chat_completions.md` 和
-`docs/litellm/claude_messages_to_chat_completions.md` 只作为来源说明，不是可选运行时 profile。
-固定源码提交与说明文档冲突时，以固定源码提交为准。
+The pinned primary sources below supply the selected algorithms, not optional runtime profiles.
+This contract's explicit composition rules and extensions still apply.
+For delegated algorithm details, the selected source commit takes precedence over a conflicting
+descriptive summary; the explicit composition rules, including §8.6 terminal closure, remain authoritative.
 
 目标仓库已有 adapter、HTTP helper、错误类型和测试不参与行为选择。与本文冲突的旧实现必须替换。
 
@@ -38,6 +39,23 @@
 进入 converter 前，宿主按 captured Bound Account catalog 解析 model：property 缺失时只使用 valid
 preferred model；显式 model 必须是 non-empty string 且精确可见，未知显式 ID 返回 404，且不 fallback
 preference。Resolved model 写入 converter input，并在请求期间保持不变。
+
+### 1.1 Pinned source index
+
+Request references use `farion1231/cc-switch@3217f72596f2d1c0f879f0a05f83803825d9809f`;
+response references use `BerriAI/litellm@ae7e50f096a8722bad14d63b6a0d4634d59bf475`.
+Read the indicated function when implementing a detail delegated to it.
+
+| Contract area | Primary source and selected symbols |
+|---|---|
+| Provider context and thinking-history selection (§§2, 4.5) | [cc-switch `src-tauri/src/proxy/providers/claude.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/claude.rs) |
+| Request, messages, schema and effort (§§3–6) | [cc-switch `src-tauri/src/proxy/providers/transform.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/transform.rs): `anthropic_to_openai_with_reasoning_content`, `strip_leading_anthropic_billing_header`, `clean_schema`, `supports_reasoning_effort`, `resolve_reasoning_effort`, `inject_openai_stream_include_usage` |
+| Canonical JSON (§4.3) | [cc-switch `src-tauri/src/proxy/json_canonical.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/json_canonical.rs): `canonical_json_string` |
+| Shared tool-result media (§4.4) | [Retained media contract](./codex_response_to_chat_completions.md#tool-output-media), including pinned `src-tauri/src/proxy/tool_media.rs` helpers |
+| Nonstream content, usage and streaming event fields (§§7–8) | [LiteLLM `litellm/llms/anthropic/experimental_pass_through/adapters/transformation.py`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/llms/anthropic/experimental_pass_through/adapters/transformation.py): `LiteLLMAnthropicMessagesAdapter.translate_openai_response_to_anthropic`, `_translate_openai_content_to_anthropic`, `_translate_openai_usage_to_anthropic_usage_delta`, `translate_streaming_openai_response_to_anthropic` |
+| Tool argument repair (§7.2) | [LiteLLM `litellm/litellm_core_utils/prompt_templates/common_utils.py`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/litellm_core_utils/prompt_templates/common_utils.py#L1848): `parse_tool_call_arguments` |
+| Web-search usage (§7.4) | [LiteLLM `litellm/litellm_core_utils/llm_cost_calc/utils.py`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/litellm_core_utils/llm_cost_calc/utils.py#L109): `get_web_search_requests_from_usage` |
+| Stream state and chunk splitting (§8) | [LiteLLM `litellm/llms/anthropic/experimental_pass_through/adapters/streaming_iterator.py`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/llms/anthropic/experimental_pass_through/adapters/streaming_iterator.py): `AnthropicStreamWrapper` (async path), `_CombinedChunkSplitter`; terminal closure remains §8.6 |
 
 ## 2. 逻辑接口
 
@@ -78,6 +96,8 @@ ProviderContext {
 
 request 转换不截断 tool name，因此 response 转换使用空的 tool-name reverse map；tool name 原样进入
 LiteLLM response 算法。
+
+<a id="request-top-level-conversion"></a>
 
 ## 3. Request 顶层转换
 
@@ -266,15 +286,20 @@ Canonical JSON：
 2. 可选 synthetic media user message；
 3. 剩余 text/image/tool_use 形成的普通 message。
 
-Tool-result media 必须加载并严格应用
-`docs/cc-switch/codex_response_to_chat_completions.md` 的 tool-result media extraction 规则：
+Apply the shared [tool-output media contract](./codex_response_to_chat_completions.md#tool-output-media)
+with `ToolMediaScope::AllSupported` to each `tool_result.content`; use `tool_use_id` for its call marker.
+That section owns recursive recognition, depth and size boundaries, replacements, residual clamping and
+media-part ordering. Ordinary message content in §4.2 remains image-only.
 
-```text
-[cc-switch: tool result media moved to the following user message]
-[cc-switch: media output of tool call <tool_use_id>]
-```
+Keep this section's Anthropic text fallback and wrapping: without extracted media, a string remains
+byte-for-byte unchanged even when it contains parseable JSON; a missing content becomes `""`; other
+JSON uses §4.3. With extracted media, preserve the replaced scalar string or canonical JSON skeleton.
+Do not apply the Responses-only canonicalization of a no-media JSON string or its custom/tool-search
+whole-item wrapper to Anthropic results.
 
-多个并行 tool result 的媒体合入同一 synthetic user message，且不得插入连续 tool messages 中间。
+Merge media from this Anthropic message's parallel tool results into one synthetic user message,
+with one call marker before each result's media. Emit it after all those tool messages and before
+the remaining ordinary message; never between consecutive tool messages.
 
 ### 4.5 thinking history
 
@@ -383,6 +408,8 @@ non-string 时忽略并继续读取 `thinking`。
 unsigned range 的值按缺失处理，因此 enabled thinking 映射为 `high`。
 
 原 `thinking`、`output_config` 和 structured-output fields 均不透传。
+
+<a id="nonstream-chat-response"></a>
 
 ## 7. 非流式 Chat response
 
@@ -506,6 +533,10 @@ output_tokens = completion_tokens
 
 Cache 值大于 0 时才输出相应 Anthropic 字段。Web-search request count 优先采用 LiteLLM helper
 已计算值，否则读取正整数 `prompt_tokens_details.web_search_requests`。
+
+When that count is positive, emit it as `usage.server_tool_use.web_search_requests`; otherwise omit
+`server_tool_use`. The source is `_get_web_search_request_count` and
+`_translate_openai_usage_to_anthropic_usage_delta` in the pinned adapter above.
 
 `prompt_tokens` 与 `completion_tokens` 来自 typed Chat usage，缺失时按 0。Cache/web-search helper
 只接受正 integer，或数值为正整数的 float；bool、负数、0 和有小数部分的 float 按 0。

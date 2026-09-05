@@ -28,9 +28,11 @@
 | nonstream response | LiteLLM + cc-switch | LiteLLM envelope/content/usage/ID；cc-switch ToolContext restoration |
 | streaming response | LiteLLM + cc-switch | LiteLLM response events；cc-switch ToolContext 与独立 item lifecycle |
 
-`docs/cc-switch/codex_response_to_chat_completions.md` 和
-`docs/litellm/codex_response_to_chat_completions.md` 是来源说明，不是运行时 profile。来源说明与固定
-提交冲突时，以固定提交为准。
+The pinned primary sources below supply the selected algorithms, not optional runtime profiles.
+This contract's explicit composition rules still apply; source-only routing, transport and framework
+behavior is outside the conversion boundary.
+For delegated algorithm details, the selected source commit takes precedence over a conflicting
+descriptive summary; this contract still owns its explicit composition and lifecycle extensions.
 
 目标仓库已有 adapter、ID、error、SSE parser 和测试不参与行为选择；冲突的旧实现必须替换。
 
@@ -40,6 +42,24 @@
 [Gateway HTTP contracts](./gateway_http_contracts.md) 定义。
 Typed Responses events 的 downstream media type、`event:`/`data:` bytes、terminal 与 EOF behavior 由
 [Responses 上游路由规范](./openai_responses_routing.md#75-downstream-responses-sse-wire) 定义。
+
+### 1.1 Pinned source index
+
+cc-switch references use `farion1231/cc-switch@3217f72596f2d1c0f879f0a05f83803825d9809f`;
+LiteLLM references use `BerriAI/litellm@ae7e50f096a8722bad14d63b6a0d4634d59bf475`.
+Read the indicated source for details delegated to a helper; apply only the direction selected above.
+
+| Contract area | Primary source and selected symbols |
+|---|---|
+| Request, ToolContext and tool restoration (§§3–7, 9.4, 12) | [cc-switch `src-tauri/src/proxy/providers/transform_codex_chat.rs`][cc-responses-transform]: `build_codex_tool_context_from_request`, `responses_to_chat_completions_with_reasoning`, `apply_reasoning_options`, `CodexToolContext` |
+| Request preprocessing and prompt-cache injection (§3) | [cc-switch `src-tauri/src/proxy/forwarder.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/forwarder.rs); model resolution and planning remain owned by the retained routing contract |
+| Reasoning extraction and append (§5.5) | [cc-switch `src-tauri/src/proxy/providers/codex_chat_common.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/codex_chat_common.rs): `extract_reasoning_field_text`, `extract_reasoning_summary_text`, `append_reasoning_content` |
+| Request history (§8) | [cc-switch `src-tauri/src/proxy/providers/codex_chat_history.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/codex_chat_history.rs): `CodexChatHistoryStore`; this contract owns persistence, TTL and checkpoint extensions |
+| Tool item lifecycle (§11) | [cc-switch `src-tauri/src/proxy/providers/streaming_codex_chat.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/streaming_codex_chat.rs): `create_responses_sse_stream_from_chat_with_context`; not its raw SSE parser or response envelope |
+| Canonical JSON and name hashing (§§5.4, 6.2) | [cc-switch `src-tauri/src/proxy/json_canonical.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/json_canonical.rs) |
+| Response envelope, content, tools and usage (§§9–10) | [LiteLLM `litellm/responses/litellm_completion_transformation/transformation.py`][litellm-response-transform]: `LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response`, `_transform_chat_completion_choices_to_responses_output`, `_extract_reasoning_output_items`, `_extract_message_output_items`, `_extract_tool_result_output_items`, `transform_chat_completion_tools_to_responses_tools`, `_transform_chat_completion_usage_to_responses_usage` |
+| Stream response fields and reconstruction (§11) | [LiteLLM `litellm/responses/litellm_completion_transformation/streaming_iterator.py`][litellm-response-stream]: `LiteLLMCompletionStreamingIterator`, `_transform_chat_completion_chunk_to_response_api_chunk`, `create_litellm_model_response`, `_emit_response_completed_event` |
+| Managed response IDs (§11.1) | [LiteLLM `litellm/responses/utils.py`][litellm-response-utils]: `ResponsesAPIRequestUtils._update_responses_api_response_id_with_model_id`, `_build_responses_api_response_id`, `_decode_responses_api_response_id`, `_is_litellm_encoded_response_id` |
 
 ## 2. 逻辑接口与上下文
 
@@ -103,6 +123,8 @@ effortValueMode = "passthrough"
 `BridgeError` DTO。请求和响应各自使用其来源实现实际需要的状态，不强制共享一个 context。
 进入 `convertResponsesRequest` 前必须完成 model selection；`request.model` 与
 `RequestContext.resolvedModel` 必须相同。转换器不读取 provider catalog 或默认 model。
+
+<a id="request-preprocessing"></a>
 
 ## 3. Request 预处理
 
@@ -362,6 +384,10 @@ Arguments normalization：
 3. `reasoning.content`、`.text`、`.summary`；
 4. `reasoning_details` string/object/parts，parts 用 `\n\n` 连接。
 
+For an object, inspect `text`, `content`, then `summary`; a `reasoning_details` array or object
+`parts[]` uses the pinned `extract_reasoning_field_text` helper. This is not a search for arbitrary
+reasoning-like keys.
+
 独立 `type=="reasoning"` item：
 
 1. `reasoning_content`、`content`、`text`；
@@ -378,36 +404,82 @@ Arguments normalization：
 6. input 结束同样回填；
 7. 有 tool calls 但无非空 reasoning 的 assistant 最终补 `reasoning_content:"tool call"`。
 
+Embedded reasoning and trailing reasoning on the same assistant message are joined with `\n\n`.
+At a non-assistant boundary, clear pending reasoning after backfilling so it cannot leak across a
+user turn. For example, assistant reasoning `"embedded"` followed by a standalone reasoning item
+`"trailing"` produces `"embedded\n\ntrailing"` on that assistant before the next user.
+
+<a id="tool-output-media"></a>
+
 ### 5.6 Tool-output media
 
-递归扫描最大深度 32。媒体位置替换为：
+Use the shared cc-switch
+[`src-tauri/src/proxy/tool_media.rs`][cc-tool-media] at the pinned commit in §1.1:
+`plan_chat_tool_output_media`, `chat_media_part_from_tool_part`,
+`strip_and_clamp_media_from_tool_value`, `strip_media_from_tool_value_at_depth`,
+`whole_string_image_data_url`, `clamp_base64ish_strings`,
+`queue_chat_tool_output_media` and `flush_pending_chat_tool_media`.
+Both Responses and [Anthropic tool results](./claude_messages_to_chat_completions.md#44-tool_result)
+use `ToolMediaScope::AllSupported`; their text fallback and outer wrappers remain protocol-local.
+
+1. Recursively scan supported tool-output shapes, including arrays, nested `content` and JSON-encoded
+   strings. The maximum traversal depth is 32; the pinned helper defines depth counting, including
+   recursive JSON decoding.
+2. Extract recognized native Chat media parts, preserving their traversal order and the original
+   text/JSON skeleton. A structured media block becomes a text block containing the exact marker
+   below; a whole scalar data-URL string becomes the marker string without extra JSON quotes.
+3. Accumulate media in call order. After all current parallel tool outputs, emit one synthetic user
+   message. Put each call's marker before its media parts; do not insert a user message between
+   parallel tool messages.
+4. Flush pending media before the next assistant tool-call batch or real user message, and at the
+   end of input.
+
+Replacement marker:
 
 ```text
 [cc-switch: tool result media moved to the following user message]
 ```
 
-并在当前并行 outputs 后生成 synthetic user message，每个 call 的媒体前加入：
+Synthetic message shape (repeat the marker/parts group for each media-bearing call):
 
-```text
-[cc-switch: media output of tool call <call_id>]
+```json
+{
+  "role": "user",
+  "content": [
+    {"type":"text","text":"[cc-switch: media output of tool call <call_id>]"},
+    "<native Chat media parts...>"
+  ]
+}
 ```
 
-支持：
+Supported shapes:
 
-- Responses/Chat image URL；
-- Anthropic base64 image；
-- MCP image；
-- 含 `file_id` 或 `file_data` 的 `input_file`；
-- `input_audio.input_audio`；
-- trim 后至少 8 KiB、整个 string 都是 image data URL；
-- JSON 编码 string 内的上述结构。
+- Responses/Chat image URL shapes;
+- Anthropic `{"type":"image","source":{"media_type":...,"data":...}}`;
+- MCP `{"type":"image","mimeType":...,"data":...}`;
+- `input_file` containing `file_id` or `file_data` (URL-only files are not extracted);
+- `input_audio.input_audio`;
+- a whole image data-URL string whose trimmed UTF-8 length is at least 8 KiB;
+- the same structures inside JSON-encoded strings.
 
-不扫描 HTML/CSS/SVG 内嵌 data URL。只有确实找到媒体后，残留超长 data/base64-like string
-替换为：
+The 8 KiB boundary applies to a bare whole-string match, not to an explicit recognized
+`image`/`input_image`/`image_url` block. Small bare data URLs remain text. Embedded data URLs in
+HTML/CSS/SVG are not scanned. Image normalization and overlapping-shape precedence are defined by
+`chat_media_part_from_tool_part` and its image helpers in the same pinned file.
+
+只有确定发现媒体后，才把残留的超长 data/base64-like 字符串替换为：
 
 ```text
 [cc-switch: omitted <byte_len> bytes]
 ```
+
+`byte_len` is the original string's UTF-8 byte length, not its character count. Keep the pinned
+`clamp_base64ish_strings`/`looks_like_base64_payload` predicates; the prose above does not authorize
+clamping arbitrary long text or assigning one new threshold to every residual string. Parsed JSON
+strings are clamped before canonicalizing them back into their original string container.
+
+Without detected media, preserve the caller's existing string/canonical-JSON semantics and add no
+JSON quoting layer. Responses output wrapping stays in §5.3; Anthropic fallback stays in its §4.4.
 
 ## 6. Tool declarations
 
@@ -557,6 +629,11 @@ nested 方言写 `{"reasoning":{"effort":"none"}}`。
 无 provider config 时，只对 cc-switch 内置判断支持 effort 的 model，把
 `reasoning.effort` 原值写到顶层 `reasoning_effort`。`reasoning.summary` 被忽略。
 
+The null-config predicate is pinned
+[`src-tauri/src/proxy/providers/transform.rs::supports_reasoning_effort`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/transform.rs#L71-L81),
+called by [`apply_reasoning_options`][cc-responses-transform]. It is not the provider/platform
+configuration inference table from cc-switch's separate provider integration.
+
 Provider/model → `ReasoningConfig` 的推导属于 model routing，不属于协议转换器。调用方必须在每次
 request 进入转换器前解析成 explicit config 或 null；转换器不得再次读取 provider name、base URL、
 model catalog 或目标仓库全局配置。
@@ -597,6 +674,8 @@ Enrichment：
 history；`response.completed` 前提交最终 response state。未完成的 delta/fragments 不记录。由于
 响应采用 LiteLLM，能记录的类型受第 12 节组合损失限制。
 
+<a id="nonstream-chat-response"></a>
+
 ## 9. 非流式 Chat response
 
 ### 9.1 输入、envelope 与 status
@@ -627,6 +706,12 @@ null，status 为 completed，output 为空。
 | `user` | `user` | 存在时复制，否则 null |
 | `usage` | `usage` | 第 10 节 |
 
+The copied fields above come from the constructed Chat `ModelResponse`, not from the original
+Responses request or the stream's initial envelope. Defaults apply to missing properties only;
+explicit null, false, zero and empty values remain distinct. Typed-object construction errors are
+not treated as empty choices. See the pinned
+[`transform_chat_completion_response_to_responses_api_response`][litellm-response-transform].
+
 顶层 status 只取 first choice：
 
 | finish_reason | status |
@@ -636,6 +721,8 @@ null，status 为 completed，output 为空。
 | 其他 | `completed` |
 
 `length` 不生成 synthesized `incomplete_details`。
+
+<a id="output-order-and-ids"></a>
 
 ### 9.2 Output 顺序与 IDs
 
@@ -664,6 +751,28 @@ managed-ID helper；missing ID 与已是 managed ID 的值保持不变。
 - 带 `signature` 或 `data` 的 thinking blocks compact-JSON 编码到 `encrypted_content`；
 - 没有明文但有可保留 block 时 content 为空 array；
 - item status 由该 choice finish reason 映射。
+
+The constructed reasoning item has the following fields, as defined by the pinned
+`_extract_reasoning_output_items` and `_encode_thinking_blocks`:
+
+```json
+{
+  "type": "reasoning",
+  "id": "rs_<uuid4>",
+  "status": "<mapped choice status>",
+  "role": "assistant",
+  "content": [
+    {"type":"output_text","text":"<reasoning_content>","annotations":[]}
+  ],
+  "encrypted_content": "<compact JSON of preserved thinking blocks, or null>"
+}
+```
+
+The `content` part is present only for nonempty plaintext; otherwise `content` is `[]`.
+Preserved blocks have a truthy `signature` or `data`, retain their order and full fields, and use
+Python `json.dumps(..., separators=(",", ":"))` encoding. With no preserved blocks,
+`encrypted_content` is JSON null. The nonstream plaintext field is `content`, not a synthesized
+`summary` array.
 
 每个没有 `message.images` 的 choice 生成一个 message item：
 
@@ -739,6 +848,20 @@ arguments:
 外层 truthy 值，缺失或 falsy 时再使用 function 内层 truthy 值。Provider
 `code_interpreter_results` 可按 call ID 替换普通 function item。
 
+Server-executed tools use
+`choices[].message.provider_specific_fields.code_interpreter_results`, not a response-level or
+tool-call-level container. The provider supplies already constructed `code_interpreter_call` items;
+the pinned `_extract_tool_result_output_items` reconstructs dictionary entries with
+[`litellm/types/responses/main.py::OutputCodeInterpreterCall`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/types/responses/main.py)
+and otherwise preserves the supplied objects. It does not parse native
+provider results or invent `code`, `outputs`, `container_id` or status fields.
+
+Collect results across choices in order and index them by their `id` (last result for a duplicate ID
+wins). Replace only `type:"function_call"` items whose `call_id` matches, in their existing output
+positions; an unmatched result is not appended and a custom/tool-search item is not replaced.
+For example, a provider result with `id:"call-1"` replaces the ordinary function item with
+`call_id:"call-1"` using the provider result's complete fields.
+
 ### 9.5 Images
 
 Choice message 有 `images` 时，该 choice 不生成 text message；每个有效 image：
@@ -780,6 +903,14 @@ Usage 缺失时三个 token count 均为 0。
 - `audio_tokens`；
 - `cache_write_tokens` 为 truthy 时使用；否则（包括 0）用 `cache_creation_tokens` fallback。
 
+The destination of that fallback is **`input_tokens_details.cache_write_tokens`**, not
+`cache_creation_tokens`. The selected value is copied when it is non-null. For example,
+`prompt_tokens_details:{"cached_tokens":2,"cache_write_tokens":0,"cache_creation_tokens":7}`
+sets `input_tokens_details.cached_tokens` to `2` and `input_tokens_details.cache_write_tokens` to `7`.
+The exact detail constructors and optional fields are pinned in
+[`_transform_chat_completion_usage_to_responses_usage`][litellm-response-transform] and
+[`litellm/types/llms/openai.py::InputTokensDetails`, `OutputTokensDetails`, `ResponseAPIUsage`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/types/llms/openai.py#L1272-L1317).
+
 `completion_tokens_details` 存在时创建 `output_tokens_details`：
 
 - `reasoning_tokens`，缺失补 0；
@@ -788,6 +919,13 @@ Usage 缺失时三个 token count 均为 0。
 - `image_tokens`。
 
 Chat `_hidden_params` 整体复制。若其中有 `provider_specific_fields`，还暴露同名顶层动态字段。
+
+Keep the container identity: `_hidden_params.provider_specific_fields:{"provider_flag":true}`
+is exposed as `provider_specific_fields:{"provider_flag":true}`, not
+`provider_specific_fields:{"provider_specific_fields":{"provider_flag":true}}`.
+This response-level passthrough is separate from the message-level server-tool results in §9.4
+and the tool-call-level fields in that same section. It does not make `_hidden_params` a public
+wire field.
 
 ## 11. Streaming Chat response
 
@@ -946,6 +1084,17 @@ Chunk 顶层及 `choice[0].delta.provider_specific_fields` 累积，same key las
 
 ### 11.6 Completion
 
+Reconstruct the complete typed Chat `ModelResponse` from collected chunks using the pinned
+`stream_chunk_builder` path in
+[`LiteLLMCompletionStreamingIterator.create_litellm_model_response`][litellm-response-stream].
+Merge §11.5 provider fields into that object's `_hidden_params.provider_specific_fields`, then apply
+the same nonstream conversion from §§9–10 to obtain final envelope fields, status, usage, content
+and server-tool results. `response.completed.response` is not a copy of the initial
+`response.created.response` and must not expose raw Chat usage field names. For example, a final
+`finish_reason:"length"` maps to `status:"incomplete"` and usage uses
+`input_tokens`/`output_tokens`/`total_tokens`. Apply §11.1 managed-ID handling and the item-lifecycle
+rules below to that converted snapshot.
+
 Message、reasoning 和每个 tool 维护独立的 added/done state。Finalize：
 
 1. 关闭每个已 added 且未 done 的 item；
@@ -1037,3 +1186,9 @@ Custom、hashed/dynamic namespace、tool-search 和 collision fixtures 必须覆
 5. 不存在运行时 behavior profile；
 6. 不存在目标仓库 legacy compatibility branch；
 7. 不实现 strict adapter、diagnostics、stable error 或 normalized SSE parser。
+
+[cc-responses-transform]: https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/transform_codex_chat.rs
+[cc-tool-media]: https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/tool_media.rs
+[litellm-response-transform]: https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/responses/litellm_completion_transformation/transformation.py
+[litellm-response-stream]: https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/responses/litellm_completion_transformation/streaming_iterator.py
+[litellm-response-utils]: https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/responses/utils.py

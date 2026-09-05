@@ -2,7 +2,7 @@
   {
     "caseId": "openai-chat.request.model-rewrite",
     "owner": "RM-09",
-    "source": "docs/openai_chat_completions.md#7-request-reserialization--vision-analysis",
+    "source": "docs/openai_chat_completions.md#request-reserialization-and-vision",
     "input": "request/model-rewrite.input.json",
     "expected": "request/model-rewrite.expected.json",
     "encoder": "openai-chat-request"
@@ -10,7 +10,7 @@
   {
     "caseId": "openai-chat.stream.done",
     "owner": "RM-09",
-    "source": "docs/openai_chat_completions.md#11-openai-downstream-sse-wire--terminal",
+    "source": "docs/openai_chat_completions.md#downstream-sse-wire-and-terminal",
     "input": "stream/done.input.txt",
     "expected": "stream/done.expected.txt",
     "encoder": "openai-chat-sse"
@@ -18,7 +18,7 @@
   {
     "caseId": "openai-chat.request.capture",
     "owner": "RM-09",
-    "source": "docs/openai_chat_completions.md#145-stream-parser--exact-wire",
+    "source": "docs/openai_chat_completions.md#request-capture-tests",
     "input": "request/capture.input.json",
     "expected": "request/capture.expected.json",
     "encoder": "openai-chat-request-capture"
@@ -26,7 +26,7 @@
   {
     "caseId": "openai-chat.presenter.model-not-found",
     "owner": "RM-09",
-    "source": "docs/gateway_http_contracts.md#71-openai-chat--responses",
+    "source": "docs/gateway_http_contracts.md#openai-error-presenter",
     "input": "presenter/model-not-found.input.txt",
     "expected": "presenter/model-not-found.expected.json",
     "encoder": "openai-error-presenter"
@@ -50,7 +50,7 @@
   {
     "caseId": "openai-chat.stream.limit-boundary",
     "owner": "RM-09",
-    "source": "docs/openai_chat_completions.md#145-stream-parser--exact-wire",
+    "source": "docs/openai_chat_completions.md#stream-parser-and-wire-tests",
     "input": "stream/limit-boundary.input.txt",
     "expected": "stream/limit-boundary.expected.json",
     "encoder": "openai-chat-limit"
@@ -58,7 +58,7 @@
   {
     "caseId": "openai-chat.usage.observation",
     "owner": "RM-09",
-    "source": "docs/openai_chat_completions.md#13-usage--telemetry-ownership",
+    "source": "docs/openai_chat_completions.md#usage-and-telemetry",
     "input": "usage/observation.input.json",
     "expected": "usage/observation.expected.json",
     "encoder": "openai-chat-usage"

@@ -27,6 +27,31 @@ response 以 Ollama 官方结构和第 10 节映射为准。不存在运行时 p
 
 源码文件名和模块名只表示目标仓库中的代码落点，不具有行为规范效力。
 
+### 1.1 Pinned model-list provenance
+
+For credentials, CAPI fetching and account-scoped source caching (§§5–8), the primary source is
+[`farion1231/cc-switch@3217f72596f2d1c0f879f0a05f83803825d9809f`, `src-tauri/src/proxy/providers/copilot_auth.rs`](https://github.com/farion1231/cc-switch/blob/3217f72596f2d1c0f879f0a05f83803825d9809f/src-tauri/src/proxy/providers/copilot_auth.rs):
+`resolve_default_account_id`, `get_valid_token_for_account`, `get_api_endpoint`,
+`fetch_and_cache_endpoint`, `fetch_models_for_account` and `fetch_models_for_account_uncached`.
+The explicit generation, cancellation and public-error rules below remain unchanged.
+
+For the selected LiteLLM serializers, use
+`BerriAI/litellm@ae7e50f096a8722bad14d63b6a0d4634d59bf475`:
+
+- [`litellm/proxy/proxy_server.py::model_list`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/proxy/proxy_server.py#L9871-L10064):
+  the default OpenAI response and presence-based `anthropic-version` success negotiation (§9).
+- [`litellm/llms/anthropic/common_utils.py::_anthropic_model_entry`, `create_anthropic_model_list_response`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/llms/anthropic/common_utils.py#L1322-L1353):
+  the complete shared list, nullable token limits, fixed pagination fields and ID-based display names
+  (§9.4).
+- [`litellm/constants.py::DEFAULT_MODEL_CREATED_AT_TIME`](https://github.com/BerriAI/litellm/blob/ae7e50f096a8722bad14d63b6a0d4634d59bf475/litellm/constants.py#L1639-L1641):
+  the fixed creation timestamp (§§9.3–9.4).
+
+The formatter does not query Anthropic or restrict the list to Claude models. This project supplies
+its Bound Account CAPI catalog and retains its own versioned-route and error contracts; LiteLLM's
+API-key middleware and `/models` alias are not imported. Private Responses routing metadata remains
+governed by [the retained routing contract](./openai_responses_routing.md#4-model-routing-metadata),
+not by the public serializer.
+
 ## 2. 范围
 
 实现：
@@ -382,6 +407,8 @@ API key。
 查询参数不改变结果。模型目录 endpoint 不接受客户端传入的 GitHub 或 Copilot
 credential。
 
+<a id="default-openai-models"></a>
+
 ### 9.2 默认 OpenAI 成功响应
 
 ```http
@@ -637,7 +664,11 @@ HTTP status 与第 11.1 节相同。
 
 本节只规定代码放置位置，不是行为来源。
 
-### 13.1 `src/utils/copilot_models_client.js`
+<a id="131-srcutilscopilot_models_clientjs"></a>
+
+### 13.1 Catalog and CAPI source
+
+Current modules: `src/copilot/model_catalog.ts`, `src/copilot/models_source.ts`.
 
 负责：
 
@@ -650,7 +681,11 @@ HTTP status 与第 11.1 节相同。
 - 管理 account generation；
 - 目录失效。
 
-### 13.2 `src/utils/model_response_utils.js`
+<a id="132-srcutilsmodel_response_utilsjs"></a>
+
+### 13.2 Model-list serializers
+
+Current module: `src/protocols/model_catalog/wire.ts`.
 
 导出纯函数：
 
@@ -669,10 +704,17 @@ Service 在调用 serializer 前完成第 4.3 节 lookup，并传入只读
 
 ### 13.3 Credential adapter
 
+Current modules: `src/copilot/credential_provider.ts`, `src/copilot/token_refresh.ts`,
+`src/copilot/endpoint_discovery.ts`.
+
 认证模块必须提供第 5 节接口。其内部存储格式不属于本文协议，不得暴露给模型目录
 模块。
 
-### 13.4 `src/server.js`
+<a id="134-srcserverjs"></a>
+
+### 13.4 Model-list routes
+
+Current module: `src/protocols/model_catalog/routes.ts`.
 
 负责：
 
