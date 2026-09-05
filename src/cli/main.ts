@@ -6,6 +6,7 @@ import { parseCli } from "./parser.js";
 import { exitCodeForError, writeError, writeSuccess, type WritableCliStream } from "./output.js";
 import type { HostedGateway } from "../gateway/create_gateway.js";
 import { parseStartupConfig, type StartupConfig } from "../config/startup_config.js";
+import { isSupportedNodeVersion } from "../runtime_support.js";
 import type { DaemonController } from "../daemon/controller.js";
 import {
   createProductionDaemonController,
@@ -15,7 +16,7 @@ import {
   type DaemonRuntimeDependencies,
   type RunDaemonRuntimeOptions,
 } from "../daemon/runtime.js";
-import { composeProductionDaemonGateway } from "../main.js";
+import { composeLazyProductionDaemonGateway } from "../daemon/production_gateway.js";
 
 export interface RunCliOptions {
   readonly argv?: readonly string[];
@@ -33,6 +34,7 @@ export interface RunCliOptions {
   readonly pollDelayMs?: number;
   readonly pid?: number;
   readonly now?: () => Date;
+  readonly nodeVersion?: string;
 }
 
 export async function runCli(options: RunCliOptions = {}): Promise<number> {
@@ -43,6 +45,9 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
   let client: ControlClient | undefined;
   try {
     const env = options.env ?? process.env;
+    if (!isSupportedNodeVersion(options.nodeVersion ?? process.versions.node)) {
+      throw new CliError("unsupported_runtime");
+    }
     const parsed = parseCli(argv, { env, ...(options.homedir === undefined ? {} : { homedir: options.homedir }) });
     json = parsed.json;
     const command = parsed.command;
@@ -166,7 +171,7 @@ async function runServe(
   const shutdownSignal = options.shutdownSignal ?? shutdown?.signal ?? new AbortController().signal;
   const composeGateway: ComposeDaemonGateway = options.composeGateway
     ?? (options.createGateway === undefined
-      ? composeProductionDaemonGateway
+      ? composeLazyProductionDaemonGateway
       : async (context) => await options.createGateway?.(context.startup, context.env) as HostedGateway);
   try {
     await (options.runDaemonRuntime ?? runDaemonRuntime)({

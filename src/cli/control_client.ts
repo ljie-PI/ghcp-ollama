@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { UNSUPPORTED_RUNTIME_MESSAGE } from "../runtime_support.js";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
 import type { CatalogSnapshot } from "../copilot/model_catalog.js";
@@ -12,6 +13,7 @@ import { captureProcessStartIdentity } from "../daemon/process_identity.js";
 export type CliErrorCode =
   | "internal_error"
   | "usage_error"
+  | "unsupported_runtime"
   | "validation_error"
   | "not_found"
   | "revision_conflict"
@@ -35,6 +37,7 @@ export class CliError extends Error {
 export const CLI_ERROR_EXIT: Readonly<Record<CliErrorCode, number>> = {
   internal_error: 1,
   usage_error: 2,
+  unsupported_runtime: 2,
   validation_error: 2,
   not_found: 3,
   revision_conflict: 3,
@@ -52,6 +55,7 @@ export const CLI_ERROR_EXIT: Readonly<Record<CliErrorCode, number>> = {
 export const SAFE_ERROR_MESSAGES: Readonly<Record<CliErrorCode, string>> = {
   internal_error: "internal error",
   usage_error: "usage error",
+  unsupported_runtime: UNSUPPORTED_RUNTIME_MESSAGE,
   validation_error: "validation error",
   not_found: "not found",
   revision_conflict: "revision conflict",

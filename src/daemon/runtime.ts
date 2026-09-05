@@ -6,6 +6,7 @@ import { authenticatedControlRequest } from "../cli/control_client.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import type { HostedGateway } from "../gateway/create_gateway.js";
 import { GRACEFUL_SHUTDOWN_MS } from "../gateway/create_gateway.js";
+import { assertSupportedRuntime } from "../runtime_support.js";
 import { DaemonController } from "./controller.js";
 import {
   DaemonIdentityFile,
@@ -39,6 +40,7 @@ export interface DaemonRuntimeDependencies {
   ) => DaemonIdentityLease | Promise<DaemonIdentityLease>;
   readonly createLogger?: (managed: boolean, startup: StartupConfig) => DaemonLogger;
   readonly scheduleStop?: (stop: () => void) => void;
+  readonly nodeVersion?: string;
 }
 
 export interface ProductionDaemonControllerOptions {
@@ -108,6 +110,7 @@ export interface RunDaemonRuntimeOptions {
 
 export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions>): Promise<void> {
   const dependencies = options.dependencies ?? {};
+  assertSupportedRuntime(dependencies.nodeVersion ?? process.versions.node);
   const pid = dependencies.pid ?? process.pid;
   const processStartIdentity = await (dependencies.captureProcessIdentity ?? captureProcessStartIdentity)(pid);
   if (processStartIdentity === null) {
