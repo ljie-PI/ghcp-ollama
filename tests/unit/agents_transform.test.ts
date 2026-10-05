@@ -130,10 +130,12 @@ describe("agent configuration projection", () => {
     const catalog = JSON.parse(result.catalog!.toString()) as { models: { base_instructions: string }[] };
     expect(catalog.models.map(({ base_instructions }) => base_instructions))
       .toEqual(mappings.map(() => CODEX_BASE_INSTRUCTIONS));
-    expect(Buffer.byteLength(CODEX_BASE_INSTRUCTIONS, "utf8")).toBeLessThanOrEqual(4_500);
+    expect(Buffer.byteLength(CODEX_BASE_INSTRUCTIONS, "utf8")).toBeLessThanOrEqual(2_100);
     for (const required of [
-      "## Commentary", "## Completing Work", "## Engineering Judgment", "## Workspace Safety", "## Final Response",
-      "without revealing hidden chain-of-thought", "Preserve unrelated user changes", "Lead with the outcome",
+      "## Commentary", "## Work", "## Safety", "## Final Response",
+      "Use only the tools and capabilities actually available", "never private reasoning or hidden chain-of-thought",
+      "never present partial or unverified work as complete", "do not claim success beyond what the available evidence supports",
+      "Do not expose credentials, request or response content",
     ]) {
       expect(CODEX_BASE_INSTRUCTIONS).toContain(required);
     }
