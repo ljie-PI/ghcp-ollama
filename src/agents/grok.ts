@@ -6,7 +6,7 @@ interface Edit { readonly start: number; readonly end: number; readonly text: st
 
 function table(value: unknown): Record<string, unknown> {
   if (value === undefined) return {};
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AgentError("agent_invalid_config");
+  if (typeof value !== "object" || value === null || Array.isArray(value) || value instanceof Date) throw new AgentError("agent_invalid_config");
   return value as Record<string, unknown>;
 }
 
@@ -19,6 +19,7 @@ export function projectGrok(
   const config = parse(source);
   table(config.models);
   const entries = table(config.model);
+  for (const entry of Object.values(entries)) table(entry);
   const previous = managedConfig === null ? {} : table(parse(managedConfig.toString("utf8")).model);
   const owned = new Set(Object.keys(previous).filter((name) => name.startsWith("ghcg-")));
   for (const name of Object.keys(entries)) {
@@ -64,9 +65,10 @@ export function projectGrok(
   }
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   if (!defaultFound) {
-    const position = modelsTable?.range[1] ?? 0;
+    const position = modelsTable === undefined ? 0 : lineEnd(modelsTable.range[1]);
     edits.push({ start: position, end: position, text: modelsTable === undefined
-      ? `models.default = ${selected}${newline}` : `${newline}default = ${selected}${newline}` });
+      ? `models.default = ${selected}${newline}`
+      : `${position > 0 && source[position - 1] !== "\n" ? newline : ""}default = ${selected}${newline}` });
   }
   let result = source;
   for (const edit of edits.sort((a, b) => b.start - a.start)) result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);

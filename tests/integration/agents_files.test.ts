@@ -47,6 +47,15 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it("rejects malformed Grok model profiles before creating state or backups", async () => {
+    const h = harness();
+    const source = "model.personal = 1\n";
+    const file = seed(h.home, ".grok/config.toml", source);
+    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent invalid config");
+    expect(fs.readFileSync(file, "utf8")).toBe(source);
+    expect(fs.readdirSync(path.dirname(file))).toEqual(["config.toml"]);
+    expect(fs.readdirSync(h.home)).toEqual([".grok"]);
+  }, 180_000);
   it("serializes Grok applies and rejects cancellation before durable intent", async () => {
     const h = harness();
     const status = await h.status("grokbuild");

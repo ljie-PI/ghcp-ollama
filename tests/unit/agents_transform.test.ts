@@ -114,6 +114,21 @@ describe("agent configuration projection", () => {
     for (let index = 0; index < 20; index++) result = projectAgent("grokbuild", result.config, rows, origin, "unused", models, result.config);
     expect(result.config).toEqual(original);
   });
+  it.each([
+    "[models] # keep header\n",
+    "[models]\nother = true # keep value\n",
+    "[models] # keep header\r\nother = true # keep value\r\n",
+    "[models] # keep final header",
+  ])("retains complete commented lines when adding a missing Grok default: %s", (source) => {
+    const result = projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null);
+    expect(result.config.toString()).toContain(source);
+    expect(parse(result.config.toString()).models).toMatchObject({ default: "ghcg-real-sonnet" });
+  });
+  it.each(["model.personal = 1\n", "model.personal = 2026-01-01\n", "model.personal = []\n", "model = 2026-01-01\n"])(
+    "rejects non-table Grok profiles or containers: %s", (source) => {
+      expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent invalid config");
+    },
+  );
   it("accepts the canonical loopback origin for default HTTP port", () => {
     const projected = projectAgent(
       "claude",
