@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parse } from "smol-toml";
 import { registrySnapshotFromDiscovery } from "../contract/model_capability_registry_harness.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
 import { resolveModel } from "../../src/protocols/model_catalog/resolver.js";
@@ -44,6 +45,24 @@ async function snapshotWith(models: readonly { id: string; protocols: readonly s
 }
 
 describe("agent configuration compatibility with Gateway model resolution", () => {
+  it("resolves Grok profile request IDs explicitly through the existing Responses execution plan", async () => {
+    const snapshot = await snapshotWith([
+      { id: "gpt-test", protocols: ["responses"] }, { id: "claude-test", protocols: ["chat"] },
+    ]);
+    const projection = projectAgent("grokbuild", null, [
+      { displayName: "Coding", modelId: "gpt-test" }, { displayName: "Writing", modelId: "claude-test" },
+    ], origin, "unused", snapshot.models, null);
+    const config = parse(projection.config.toString());
+    for (const entry of Object.values(config.model as Record<string, { model: string; api_backend: string }>)) {
+      expect(entry.api_backend).toBe("responses");
+      const resolved = resolveModel(snapshot, entry.model, null);
+      expect(resolved).toMatchObject({ upstreamModel: entry.model, source: "explicit" });
+      if (!("upstreamModel" in resolved)) throw new Error("resolution failed");
+      const plan = planProtocolExecution({ source: "responses", stream: false, body: wireBody({ model: entry.model, input: "hi" }),
+        resolvedModel: resolved.upstreamModel, capability: resolved.capability });
+      expect(plan).toMatchObject(entry.model === "gpt-test" ? { kind: "native", target: "responses" } : { kind: "converted", target: "chat" });
+    }
+  });
   it("resolves every generated Codex catalog slug explicitly and plans native Responses", async () => {
     const snapshot = await snapshotWith([
       { id: "gpt-test", protocols: ["responses"] },

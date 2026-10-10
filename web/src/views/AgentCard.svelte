@@ -15,7 +15,7 @@
     manualRefreshGeneration: number;
     onchanged: (status: AgentStatus) => void;
   } = $props();
-  const title = $derived(status.id === "claude" ? "Claude Code" : "Codex");
+  const title = $derived({ claude: "Claude Code", codex: "Codex", grokbuild: "Grok Build" }[status.id]);
   let drafts: DraftRow[] = $state([]);
   let nextRowKey = 0;
   let baseline = $state("");
@@ -56,7 +56,7 @@
     baseline = serializedDrafts();
   }
   function mappingName(index: number): string {
-    if (status.id === "codex") return `Model ${index + 1}`;
+    if (status.id !== "claude") return `Model ${index + 1}`;
     return ["Sonnet", "Opus", "Haiku"][index] ?? `Model ${index + 1}`;
   }
   function setRow(index: number, key: keyof AgentMapping, value: string): void {
@@ -178,6 +178,7 @@
       <legend>Model mapping</legend>
       <p class="muted" id={`${status.id}-mapping-help`}>{status.id === "claude" ? "Rows are ordered Sonnet, Opus, Haiku. " : ""}The first row is the startup model. Display names are labels; Copilot model IDs are sent unchanged.</p>
       {#if status.id === "claude"}<p class="muted">Additional rows appear in the model menu. Requires Claude Code 2.1.243 or newer.</p>{/if}
+      {#if status.id === "grokbuild"}<p class="muted">Writes Gateway model profiles using Responses. Other model profiles and client settings are preserved. Models need a known context window.</p>{/if}
       {#each drafts as row, index (row.key)}
           <div class="agent-mapping-row">
             <label><span><span class="visually-hidden">{mappingName(index)} </span>Copilot model ID</span>
@@ -197,7 +198,7 @@
               <input type="text" value={row.displayName} maxlength="80" required aria-describedby={`${status.id}-mapping-help`}
                 oninput={(event) => setRow(index, "displayName", event.currentTarget.value)} />
             </label>
-            {#if status.id === "codex" || index >= 3}
+            {#if status.id !== "claude" || index >= 3}
               <button type="button" aria-label={`Remove model ${index + 1}`} disabled={drafts.length === 1} onclick={() => drafts = drafts.filter((_, i) => i !== index)}>Remove</button>
             {/if}
           </div>

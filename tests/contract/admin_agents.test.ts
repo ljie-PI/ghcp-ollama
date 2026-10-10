@@ -9,6 +9,8 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import {
   AgentError,
+  validateMappings,
+  type AgentId,
   type AgentStatus,
   type AgentsManager,
 } from "../../src/agents/types.js";
@@ -19,12 +21,13 @@ import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.
 
 const ORIGIN = "http://127.0.0.1:31400";
 
-function agentStatus(agent: "claude" | "codex", revision: string, state: AgentStatus["state"] = "not_managed"): AgentStatus {
+function agentStatus(agent: AgentId, revision: string, state: AgentStatus["state"] = "not_managed"): AgentStatus {
   return {
     id: agent,
     state,
     revision,
-    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : ["C:/home/.codex/models.json", "C:/home/.codex/config.toml"],
+    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : agent === "codex"
+      ? ["C:/home/.codex/models.json", "C:/home/.codex/config.toml"] : ["C:/home/.grok/config.toml"],
     endpoint: agent === "claude" ? ORIGIN : `${ORIGIN}/v1`,
     backupAvailable: state !== "not_managed",
     lastAppliedAt: state === "installed" ? "2027-01-15T08:00:00.000Z" : null,
@@ -41,17 +44,18 @@ interface AgentStub {
 
 function agentStub(): AgentStub {
   const calls: string[] = [];
-  const revisions = { claude: "a".repeat(64), codex: "b".repeat(64) };
+  const revisions = { claude: "a".repeat(64), codex: "b".repeat(64), grokbuild: "e".repeat(64) };
   const stub: AgentStub = {
     calls,
     failApply: null,
     manager: {
       async inspect(origin) {
         calls.push(`inspect:${origin}`);
-        return [agentStatus("claude", revisions.claude), agentStatus("codex", revisions.codex)];
+        return [agentStatus("claude", revisions.claude), agentStatus("codex", revisions.codex), agentStatus("grokbuild", revisions.grokbuild)];
       },
       async apply(request, origin, models, assertCurrent, signal) {
         signal.throwIfAborted();
+        validateMappings(request.agent, request.mappings);
         calls.push(`apply:${request.agent}:${models.map((model) => model.modelId).join(",")}`);
         if (stub.failApply !== null) throw new AgentError(stub.failApply as never);
         assertCurrent();
@@ -93,6 +97,25 @@ const claudeMappings = [
 ];
 
 describe("Admin agents API", () => {
+  it("applies Grok Build using the existing strict mapping contract and rejects client login fields", async () => {
+    const stub = agentStub();
+    const harness = await createHarness(stub);
+    try {
+      const catalogResponse = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`));
+      const catalog = await catalogResponse.json() as { data: { catalogRevision: string } };
+      const body = { agent: "grokbuild", expectedRevision: "e".repeat(64), catalogRevision: catalog.data.catalogRevision,
+        mappings: [{ displayName: "Coding", modelId: "gpt-test" }] };
+      const post = async (value: unknown) => await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
+        method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify(value),
+      }));
+      const response = await post(body);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ data: { id: "grokbuild", state: "installed", mappings: body.mappings } });
+      expect(stub.calls).toContain("apply:grokbuild:gpt-test");
+      expect((await post({ ...body, apiKey: "not-accepted" })).status).toBe(400);
+      expect((await post({ ...body, mappings: [...body.mappings, ...body.mappings] })).status).toBe(400);
+    } finally { await harness.close(); }
+  });
   it("accepts strict content-free Codex takeover revisions", async () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
@@ -235,7 +258,7 @@ describe("Admin agents API", () => {
       const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents`));
       expect(response.status).toBe(200);
       const body = await response.json() as { data: { items: AgentStatus[] } };
-      expect(body.data.items.map((item) => item.id)).toEqual(["claude", "codex"]);
+      expect(body.data.items.map((item) => item.id)).toEqual(["claude", "codex", "grokbuild"]);
       expect(body.data.items[0]).toMatchObject({ state: "not_managed", endpoint: ORIGIN, backupAvailable: false });
       expect(body.data.items[1]).toMatchObject({ endpoint: `${ORIGIN}/v1` });
       expect(stub.calls).toEqual([`inspect:${ORIGIN}`]);
@@ -367,7 +390,7 @@ describe("Admin agents API", () => {
       const view = await (await harness.gateway.fetch(new Request(
         `${ORIGIN}/admin/api/v1/agents`,
       ))).json() as { data: { items: AgentStatus[] } };
-      expect(view.data.items).toHaveLength(2);
+      expect(view.data.items).toHaveLength(3);
       const unavailable = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, { headers }));
       expect(unavailable.status).toBe(400);
       expect(await unavailable.json()).toMatchObject({ error: { code: "agent_models_unavailable" } });

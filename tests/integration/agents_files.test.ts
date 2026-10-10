@@ -47,6 +47,93 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it("serializes Grok applies and rejects cancellation before durable intent", async () => {
+    const h = harness();
+    const status = await h.status("grokbuild");
+    const request = { agent: "grokbuild" as const, expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings };
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await expect(h.manager.apply(request, origin, models, () => undefined, cancelled.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(fs.readdirSync(h.home)).toEqual([]);
+    const second = new FileAgentsManager({ home: h.home });
+    try {
+      const results = await Promise.allSettled([
+        h.manager.apply(request, origin, models, () => undefined, new AbortController().signal),
+        second.apply({ ...request, mappings: [...mappings].reverse() }, origin, models, () => undefined, new AbortController().signal),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      expect((await h.status("grokbuild")).state).toBe("installed");
+    } finally { second.close(); }
+  }, 180_000);
+  it("refreshes Grok external edits while retaining user models and rejecting reserved-name collisions", async () => {
+    const h = harness();
+    await apply(h.manager, "grokbuild");
+    const file = path.join(h.home, ".grok/config.toml");
+    const external = fs.readFileSync(file, "utf8").replace("models.default = \"ghcg-model-a\"", "models.default = \"personal\"")
+      + "\n[model.personal]\nmodel = \"own\"\n[mcp_servers.local]\ncommand = \"node\"\n";
+    fs.writeFileSync(file, external);
+    expect((await h.status("grokbuild")).state).toBe("conflict");
+    await apply(h.manager, "grokbuild", mappings.slice(0, 1));
+    const result = fs.readFileSync(file, "utf8");
+    expect(result).toContain("[model.personal]\nmodel = \"own\"\n[mcp_servers.local]\ncommand = \"node\"\n");
+    expect(result).not.toContain("ghcg-model-b");
+    expect(result).not.toContain("ghcg-model-c");
+    const collision = `${result}\n[model."ghcg-unowned"]\nmodel = "own"\n`;
+    fs.writeFileSync(file, collision);
+    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(file, "utf8")).toBe(collision);
+  }, 180_000);
+  it.each(["intent", "stage_written", "displaced", "published", "complete"] as const)("recovers Grok single-file Apply interrupted at %s", async (boundary) => {
+    let failed = false;
+    const h = harness({ checkpoint: (point) => {
+      if (point === boundary && !failed) { failed = true; throw new Error("injected interruption"); }
+    } });
+    seed(h.home, ".grok/config.toml", "# original\n[mcp_servers.local]\ncommand = \"node\"\n");
+    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent recovery required");
+    h.manager.close();
+    const manager = new FileAgentsManager({ home: h.home });
+    try {
+      expect((await apply(manager, "grokbuild")).state).toBe("installed");
+      expect(fs.readFileSync(path.join(h.home, ".grok/config.toml"), "utf8")).toContain("[mcp_servers.local]\ncommand = \"node\"\n");
+      expect(fs.readdirSync(path.join(h.home, ".grok")).some((name) => name.startsWith(".ghcg-agents-"))).toBe(false);
+    } finally { manager.close(); }
+  }, 180_000);
+  it("rejects unsafe Grok directories and stale revisions without writing configuration", async () => {
+    const h = harness();
+    const status = await h.status("grokbuild");
+    await expect(h.manager.apply({ agent: "grokbuild", expectedRevision: "0".repeat(64), catalogRevision: "a".repeat(64), mappings },
+      origin, models, () => undefined, new AbortController().signal)).rejects.toThrow("revision conflict");
+    expect(fs.readdirSync(h.home)).toEqual([]);
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-grok-elsewhere-"));
+    homes.push(elsewhere);
+    fs.symlinkSync(elsewhere, path.join(h.home, ".grok"), process.platform === "win32" ? "junction" : "dir");
+    expect(status.state).toBe("not_managed");
+    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent unsafe path");
+    expect(fs.readdirSync(elsewhere)).toEqual([]);
+  }, 180_000);
+  it("installs Grok Build with one backed-up file and leaves its authentication and other settings untouched", async () => {
+    const h = harness();
+    const original = "# Grok settings\r\n[mcp_servers.local]\r\ncommand = \"node\"\r\n";
+    const file = seed(h.home, ".grok/config.toml", original);
+    const auth = seed(h.home, ".grok/auth.json", "{\"client-owned\":true}\n");
+    const result = await apply(h.manager, "grokbuild");
+    expect(result.state).toBe("installed");
+    expect(result.paths).toHaveLength(1);
+    expect(result.endpoint).toBe(`${origin}/v1`);
+    expect(result.takeover).toBeNull();
+    expect(result.backupAvailable).toBe(true);
+    expect(fs.readFileSync(file, "utf8")).toContain(original);
+    expect(fs.readFileSync(auth, "utf8")).toBe("{\"client-owned\":true}\n");
+    const backups = fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith("config.toml.ghcg."));
+    expect(backups).toHaveLength(1);
+    expect(fs.readFileSync(path.join(path.dirname(file), backups[0]!), "utf8")).toBe(original);
+    expect(fs.existsSync(path.join(path.dirname(file), "models.json"))).toBe(false);
+    h.manager.close();
+    const reopened = new FileAgentsManager({ home: h.home });
+    try { expect((await reopened.inspect(origin)).find((item) => item.id === "grokbuild")!.state).toBe("installed"); }
+    finally { reopened.close(); }
+  }, 180_000);
   it.each(["missing", "replaced"] as const)("reports %s live configuration without disabling a fresh Apply", async (change) => {
     const h = harness();
     const file = seed(h.home, ".claude/settings.json", "{}\n");

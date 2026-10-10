@@ -26,7 +26,7 @@ const ModelIdSchema = Type.String({
   maxLength: 128,
   pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
 });
-const AgentIdSchema = Type.Union([Type.Literal("claude"), Type.Literal("codex")]);
+const AgentIdSchema = Type.Union([Type.Literal("claude"), Type.Literal("codex"), Type.Literal("grokbuild")]);
 const AgentRevisionSchema = Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" });
 const AgentApplySchema = Type.Object({
   agent: AgentIdSchema, expectedRevision: AgentRevisionSchema, catalogRevision: AgentRevisionSchema,

@@ -4,6 +4,27 @@ import { installAdminFixture } from "./fixtures/admin_fixture.js";
 
 
 
+test("Grok Build applies multiple Copilot mappings without a client login workflow", async ({ page }) => {
+  const fixture = await openAgents(page);
+  const card = page.getByRole("region", { name: "Grok Build", exact: true });
+  await chooseModel(card, "Model 1 Copilot model ID", "gpt-alpha");
+  await card.getByRole("button", { name: "Add model", exact: true }).click();
+  await chooseModel(card, "Model 2 Copilot model ID", "claude-beta");
+  await card.getByRole("button", { name: "Remove model 1", exact: true }).click();
+  await card.getByRole("button", { name: "Add model", exact: true }).click();
+  await chooseModel(card, "Model 2 Copilot model ID", "gpt-alpha");
+  page.once("dialog", (dialog) => dialog.accept());
+  await card.getByRole("button", { name: "Apply changes", exact: true }).click();
+  await expect(card.locator(".badge")).toHaveText("Configuration installed");
+  expect(fixture.requests.find((item) => item.url().endsWith("/agents/apply"))?.postDataJSON()).toMatchObject({
+    agent: "grokbuild", mappings: [
+      { modelId: "claude-beta", displayName: "Beta" }, { modelId: "gpt-alpha", displayName: "Alpha" },
+    ],
+  });
+  await expect(card.getByText(/Configuration installed\. Restart/)).toBeVisible();
+  await expect(card.getByRole("button", { name: /login|sign in/i })).toHaveCount(0);
+});
+
 test("catalog choices fill names only after explicit selection and unchanged mappings can be applied again", async ({ page }) => {
   const fixture = await openAgents(page);
   const card = page.getByRole("region", { name: "Codex", exact: true });
@@ -33,7 +54,7 @@ test("catalog failure leaves local inspection visible and Apply reports missing 
   fixture.state.agentsCatalogRevision = null;
   await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
-  await expect(page.locator(".agent-card")).toHaveCount(2);
+  await expect(page.locator(".agent-card")).toHaveCount(3);
   const card = page.getByRole("region", { name: "Codex", exact: true });
   await card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
   await card.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Manual");

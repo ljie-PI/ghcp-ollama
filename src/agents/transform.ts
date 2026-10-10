@@ -3,6 +3,7 @@ import { supportsModelReasoning } from "../copilot/model_capabilities.js";
 import { protocolTargets } from "../protocols/conversion/routing.js";
 import { CODEX_BASE_INSTRUCTIONS } from "./codex_instructions.js";
 import { AgentError, validateMappings, type AgentId, type AgentMapping, type AgentModel } from "./types.js";
+import { projectGrok } from "./grok.js";
 
 export interface AgentProjection {
   readonly config: Buffer;
@@ -42,9 +43,11 @@ export function projectAgent(
   }
   try {
     const source = original?.toString("utf8").replace(/^\uFEFF/u, "") ?? "";
-    return agent === "claude"
-      ? { config: projectClaude(source, mappings, origin) }
-      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig !== null, takeover);
+    switch (agent) {
+    case "claude": return { config: projectClaude(source, mappings, origin) };
+    case "codex": return projectCodex(source, mappings, origin, catalogPath, models, managedConfig !== null, takeover);
+    case "grokbuild": return { config: projectGrok(source, mappings, origin, models, managedConfig) };
+    }
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
     // Parser diagnostics can contain configuration secrets.

@@ -52,6 +52,68 @@ async function capabilityModels(entries: readonly { readonly id: string; readonl
 }
 
 describe("agent configuration projection", () => {
+  it("projects Grok Build models through Responses without a separate catalog or client authentication", () => {
+    const result = projectAgent("grokbuild", Buffer.from("[mcp_servers.local]\ncommand = \"node\"\n[model.personal]\nmodel = \"personal-model\"\n"), mappings.slice(0, 1), origin, "unused", models, null);
+    expect(result.catalog).toBeUndefined();
+    expect(parse(result.config.toString())).toEqual({
+      models: { default: "ghcg-real-sonnet" },
+      model: {
+        personal: { model: "personal-model" },
+        "ghcg-real-sonnet": {
+          name: "Friendly 0", model: "real-sonnet", base_url: `${origin}/v1`,
+          api_key: "ghcg-local", api_backend: "responses", context_window: 32000,
+        },
+      },
+      mcp_servers: { local: { command: "node" } },
+    });
+  });
+  it("preserves unrelated Grok TOML bytes and retires profiles from the managed image, not the live default", () => {
+    const available = models.map((model) => ({ ...model, capabilities: { ...model.capabilities, contextWindowTokens: 32000 } }));
+    const unrelated = "# user configuration\r\n[model.personal]\r\nmodel = \"own\" # own model\r\nextra = \"\"\"\r\n[model.fake]\r\nmodels.default = \"not a setting\"\r\n\"\"\"\r\n[mcp_servers.local]\r\ncommand = \"node\" # keep me\r\n";
+    const first = projectAgent("grokbuild", Buffer.from(unrelated), mappings, origin, "unused", available, null);
+    const changed = first.config.toString().replace("models.default = \"ghcg-real-sonnet\"", "models.default = \"personal\"");
+    const second = projectAgent("grokbuild", Buffer.from(changed), [mappings[2]!, mappings[0]!], origin, "unused", available, first.config);
+    expect(second.config.toString()).toContain(unrelated);
+    expect(second.config.toString().replaceAll("\r\n", "")).not.toContain("\n");
+    const config = parse(second.config.toString());
+    expect(config.models).toEqual({ default: "ghcg-real-haiku" });
+    expect(Object.keys(config.model as object)).toEqual(["personal", "ghcg-real-haiku", "ghcg-real-sonnet"]);
+    expect(second.config.toString()).not.toContain("ghcg-real-opus");
+  });
+  it.each([
+    "models.default = \"personal\"\n[model.personal]\nmodel = \"own\"\n",
+    "[models]\ndefault = \"personal\" # startup\nother = true\n",
+    "[models]\nother = true\n",
+    "model.personal.model = \"own\"\n",
+  ])("updates supported Grok default layouts while preserving other settings: %s", (source) => {
+    const config = parse(projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null).config.toString());
+    expect(config.models).toMatchObject({ default: "ghcg-real-sonnet" });
+    if (source.includes("other")) expect(config.models).toMatchObject({ other: true });
+    if (source.includes("personal.model") || source.includes("[model.personal]")) expect(config.model).toMatchObject({ personal: { model: "own" } });
+  });
+  it.each([
+    "[model.\"ghcg-real-sonnet\"]\nmodel = \"user-owned\"\n",
+    "[model.\"ghcg-unselected\"]\nmodel = \"user-owned\"\n",
+  ])("rejects unmanaged reserved Grok profile names without claiming them: %s", (source) => {
+    expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent conflict");
+  });
+  it.each([
+    "models = { default = \"own\" }\n", "model = { own = { model = \"own\" } }\n",
+    "models = \"wrong shape\"\n", "[models\nsecret = \"never include in errors\"\n",
+  ])("fails closed on unsupported or invalid Grok root containers: %s", (source) => {
+    expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent invalid config");
+  });
+  it("does not invent Grok context limits or accept duplicate Copilot IDs", () => {
+    expect(() => projectAgent("grokbuild", null, mappings.slice(1, 2), origin, "unused", models, null)).toThrow("agent models unavailable");
+    expect(() => projectAgent("grokbuild", null, [mappings[0]!, mappings[0]!], origin, "unused", models, null)).toThrow("validation failed");
+  });
+  it("keeps repeated Grok projection bounded and byte-stable", () => {
+    const rows = mappings.slice(0, 1);
+    let result = projectAgent("grokbuild", null, rows, origin, "unused", models, null);
+    const original = result.config;
+    for (let index = 0; index < 20; index++) result = projectAgent("grokbuild", result.config, rows, origin, "unused", models, result.config);
+    expect(result.config).toEqual(original);
+  });
   it("accepts the canonical loopback origin for default HTTP port", () => {
     const projected = projectAgent(
       "claude",
