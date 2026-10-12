@@ -57,14 +57,6 @@ ghcg models set <model-id>
 
 If the selected model is no longer available, use `ghcg models set` to select another one.
 
-### Configure coding clients
-
-Open **Agents** in the Admin UI to configure Claude Code, Codex, or Grok Build for this Gateway process user. Choose Copilot models and display names, then apply the configuration and restart the client. The first mapping is the startup model; model IDs are sent unchanged.
-
-Grok Build configuration is written to `~/.grok/config.toml` with the Gateway's `/v1` URL and Responses backend. You can configure up to 16 distinct models with known context windows. Gateway-managed profiles use the reserved `ghcg-` prefix; other model profiles, MCP settings, and unrelated configuration text are preserved. Existing inline root `model` or `models` tables must first be expanded to standard TOML tables. Grok's `auth.json` is untouched; no xAI login is needed to use Copilot models through the Gateway.
-
-Existing configuration files are retained in local-time `.ghcg.<timestamp>` backups, up to 365 per file. Refresh after external configuration changes before applying again. Applying installs configuration only; it does not test inference or manage the client's installation, accounts, or sessions. Client environment or command-line overrides can supersede the generated configuration.
-
 ## API endpoints
 
 | Method | Route | Interface |
