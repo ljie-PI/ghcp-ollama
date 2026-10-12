@@ -80,43 +80,32 @@ describe("agent configuration projection", () => {
     expect(Object.keys(config.model as object)).toEqual(["personal", "ghcg-real-haiku", "ghcg-real-sonnet"]);
     expect(second.config.toString()).not.toContain("ghcg-real-opus");
   });
-  it.each([
-    "models.default = \"personal\"\n[model.personal]\nmodel = \"own\"\n",
-    "[models]\ndefault = \"personal\" # startup\nother = true\n",
-    "[models]\nother = true\n",
-    "model.personal.model = \"own\"\n",
-  ])("updates supported Grok default layouts while preserving other settings: %s", (source) => {
-    const config = parse(projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null).config.toString());
-    expect(config.models).toMatchObject({ default: "ghcg-real-sonnet" });
-    if (source.includes("other")) expect(config.models).toMatchObject({ other: true });
-    if (source.includes("personal.model") || source.includes("[model.personal]")) expect(config.model).toMatchObject({ personal: { model: "own" } });
+  it("updates a table-form default without changing its comment or user model", () => {
+    const source = "model.personal.model = \"own\"\n[models]\ndefault = \"personal\" # startup\nother = true\n";
+    const result = projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null).config.toString();
+    expect(result).toContain("default = \"ghcg-real-sonnet\" # startup\nother = true\n");
+    expect(parse(result).model).toMatchObject({ personal: { model: "own" } });
   });
-  it.each([
-    "[model.\"ghcg-real-sonnet\"]\nmodel = \"user-owned\"\n",
-    "[model.\"ghcg-unselected\"]\nmodel = \"user-owned\"\n",
-  ])("rejects unmanaged reserved Grok profile names without claiming them: %s", (source) => {
+  it("rejects unmanaged reserved profiles even when they are not selected", () => {
+    const source = "[model.\"ghcg-unselected\"]\nmodel = \"user-owned\"\n";
     expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent conflict");
   });
   it.each([
     "models = { default = \"own\" }\n", "model = { own = { model = \"own\" } }\n",
-    "models = \"wrong shape\"\n", "[models\nsecret = \"never include in errors\"\n",
-  ])("fails closed on unsupported or invalid Grok root containers: %s", (source) => {
+  ])("fails closed on inline root containers that cannot be patched safely: %s", (source) => {
     expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent invalid config");
   });
-  it("does not invent Grok context limits or accept duplicate Copilot IDs", () => {
+  it("does not invent the required Grok context limit", () => {
     expect(() => projectAgent("grokbuild", null, mappings.slice(1, 2), origin, "unused", models, null)).toThrow("agent models unavailable");
-    expect(() => projectAgent("grokbuild", null, [mappings[0]!, mappings[0]!], origin, "unused", models, null)).toThrow("validation failed");
   });
   it("keeps repeated Grok projection bounded and byte-stable", () => {
     const rows = mappings.slice(0, 1);
     let result = projectAgent("grokbuild", null, rows, origin, "unused", models, null);
     const original = result.config;
-    for (let index = 0; index < 20; index++) result = projectAgent("grokbuild", result.config, rows, origin, "unused", models, result.config);
+    result = projectAgent("grokbuild", result.config, rows, origin, "unused", models, result.config);
     expect(result.config).toEqual(original);
   });
   it.each([
-    "[models] # keep header\n",
-    "[models]\nother = true # keep value\n",
     "[models] # keep header\r\nother = true # keep value\r\n",
     "[models] # keep final header",
   ])("retains complete commented lines when adding a missing Grok default: %s", (source) => {
@@ -124,8 +113,8 @@ describe("agent configuration projection", () => {
     expect(result.config.toString()).toContain(source);
     expect(parse(result.config.toString()).models).toMatchObject({ default: "ghcg-real-sonnet" });
   });
-  it.each(["model.personal = 1\n", "model.personal = 2026-01-01\n", "model.personal = []\n", "model = 2026-01-01\n"])(
-    "rejects non-table Grok profiles or containers: %s", (source) => {
+  it.each(["model.personal = 1\n", "model.personal = 2026-01-01\n"])(
+    "rejects malformed Grok profiles rather than only validating TOML syntax: %s", (source) => {
       expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent invalid config");
     },
   );

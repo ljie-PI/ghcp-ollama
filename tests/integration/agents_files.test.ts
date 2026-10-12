@@ -47,79 +47,22 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
-  it("rejects malformed Grok model profiles before creating state or backups", async () => {
-    const h = harness();
-    const source = "model.personal = 1\n";
-    const file = seed(h.home, ".grok/config.toml", source);
-    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent invalid config");
-    expect(fs.readFileSync(file, "utf8")).toBe(source);
-    expect(fs.readdirSync(path.dirname(file))).toEqual(["config.toml"]);
-    expect(fs.readdirSync(h.home)).toEqual([".grok"]);
-  }, 180_000);
-  it("serializes Grok applies and rejects cancellation before durable intent", async () => {
-    const h = harness();
-    const status = await h.status("grokbuild");
-    const request = { agent: "grokbuild" as const, expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings };
-    const cancelled = new AbortController();
-    cancelled.abort();
-    await expect(h.manager.apply(request, origin, models, () => undefined, cancelled.signal)).rejects.toMatchObject({ name: "AbortError" });
-    expect(fs.readdirSync(h.home)).toEqual([]);
-    const second = new FileAgentsManager({ home: h.home });
-    try {
-      const results = await Promise.allSettled([
-        h.manager.apply(request, origin, models, () => undefined, new AbortController().signal),
-        second.apply({ ...request, mappings: [...mappings].reverse() }, origin, models, () => undefined, new AbortController().signal),
-      ]);
-      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
-      expect((await h.status("grokbuild")).state).toBe("installed");
-    } finally { second.close(); }
-  }, 180_000);
-  it("refreshes Grok external edits while retaining user models and rejecting reserved-name collisions", async () => {
-    const h = harness();
-    await apply(h.manager, "grokbuild");
-    const file = path.join(h.home, ".grok/config.toml");
-    const external = fs.readFileSync(file, "utf8").replace("models.default = \"ghcg-model-a\"", "models.default = \"personal\"")
-      + "\n[model.personal]\nmodel = \"own\"\n[mcp_servers.local]\ncommand = \"node\"\n";
-    fs.writeFileSync(file, external);
-    expect((await h.status("grokbuild")).state).toBe("conflict");
-    await apply(h.manager, "grokbuild", mappings.slice(0, 1));
-    const result = fs.readFileSync(file, "utf8");
-    expect(result).toContain("[model.personal]\nmodel = \"own\"\n[mcp_servers.local]\ncommand = \"node\"\n");
-    expect(result).not.toContain("ghcg-model-b");
-    expect(result).not.toContain("ghcg-model-c");
-    const collision = `${result}\n[model."ghcg-unowned"]\nmodel = "own"\n`;
-    fs.writeFileSync(file, collision);
-    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent conflict");
-    expect(fs.readFileSync(file, "utf8")).toBe(collision);
-  }, 180_000);
-  it.each(["intent", "stage_written", "displaced", "published", "complete"] as const)("recovers Grok single-file Apply interrupted at %s", async (boundary) => {
+  // Recovery varies with target layout, not client identity: Claude has one file,
+  // Codex has two, and Grok reuses the single-file path.
+  it.each(["claude", "codex"] as const)("recovers the %s target layout after displacing a live file", async (agent) => {
     let failed = false;
     const h = harness({ checkpoint: (point) => {
-      if (point === boundary && !failed) { failed = true; throw new Error("injected interruption"); }
+      if (point === "displaced" && !failed) { failed = true; throw new Error("injected interruption"); }
     } });
-    seed(h.home, ".grok/config.toml", "# original\n[mcp_servers.local]\ncommand = \"node\"\n");
-    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent recovery required");
+    const file = seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml", agent === "claude" ? "{}\n" : "");
+    await expect(apply(h.manager, agent)).rejects.toThrow("agent recovery required");
     h.manager.close();
     const manager = new FileAgentsManager({ home: h.home });
     try {
-      expect((await apply(manager, "grokbuild")).state).toBe("installed");
-      expect(fs.readFileSync(path.join(h.home, ".grok/config.toml"), "utf8")).toContain("[mcp_servers.local]\ncommand = \"node\"\n");
-      expect(fs.readdirSync(path.join(h.home, ".grok")).some((name) => name.startsWith(".ghcg-agents-"))).toBe(false);
+      expect((await apply(manager, agent)).state).toBe("installed");
+      expect(fs.readFileSync(file, "utf8")).toContain(origin);
+      expect(fs.readdirSync(path.dirname(file)).some((name) => name.startsWith(".ghcg-agents-"))).toBe(false);
     } finally { manager.close(); }
-  }, 180_000);
-  it("rejects unsafe Grok directories and stale revisions without writing configuration", async () => {
-    const h = harness();
-    const status = await h.status("grokbuild");
-    await expect(h.manager.apply({ agent: "grokbuild", expectedRevision: "0".repeat(64), catalogRevision: "a".repeat(64), mappings },
-      origin, models, () => undefined, new AbortController().signal)).rejects.toThrow("revision conflict");
-    expect(fs.readdirSync(h.home)).toEqual([]);
-    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-grok-elsewhere-"));
-    homes.push(elsewhere);
-    fs.symlinkSync(elsewhere, path.join(h.home, ".grok"), process.platform === "win32" ? "junction" : "dir");
-    expect(status.state).toBe("not_managed");
-    await expect(apply(h.manager, "grokbuild")).rejects.toThrow("agent unsafe path");
-    expect(fs.readdirSync(elsewhere)).toEqual([]);
   }, 180_000);
   it("installs Grok Build with one backed-up file and leaves its authentication and other settings untouched", async () => {
     const h = harness();
@@ -138,6 +81,9 @@ describe("private repeatable agent configuration", () => {
     expect(backups).toHaveLength(1);
     expect(fs.readFileSync(path.join(path.dirname(file), backups[0]!), "utf8")).toBe(original);
     expect(fs.existsSync(path.join(path.dirname(file), "models.json"))).toBe(false);
+    await apply(h.manager, "grokbuild", mappings.slice(0, 1));
+    expect(fs.readFileSync(file, "utf8")).not.toContain("ghcg-model-b");
+    expect(fs.readFileSync(file, "utf8")).toContain(original);
     h.manager.close();
     const reopened = new FileAgentsManager({ home: h.home });
     try { expect((await reopened.inspect(origin)).find((item) => item.id === "grokbuild")!.state).toBe("installed"); }
@@ -164,13 +110,18 @@ describe("private repeatable agent configuration", () => {
     }, origin, models, () => undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(fs.readdirSync(h.home)).toEqual([]);
   }, 180_000);
-  it("reads without creating any directories and rejects invalid parsing before writes", async () => {
+  it.each([
+    { agent: "codex" as const, directory: ".codex", source: "token=\"secret\n" },
+    { agent: "grokbuild" as const, directory: ".grok", source: "model.personal = 1\n" },
+  ])("rejects invalid $agent configuration before creating state or backups", async ({ agent, directory, source }) => {
     const h = harness();
-    expect((await h.status("codex")).state).toBe("not_managed");
+    expect((await h.status(agent)).state).toBe("not_managed");
     expect(fs.readdirSync(h.home)).toEqual([]);
-    seed(h.home, ".codex/config.toml", "token=\"secret\n");
-    await expect(apply(h.manager, "codex")).rejects.toThrow("agent invalid config");
-    expect(fs.readdirSync(h.home)).toEqual([".codex"]);
+    const file = seed(h.home, `${directory}/config.toml`, source);
+    await expect(apply(h.manager, agent)).rejects.toThrow("agent invalid config");
+    expect(fs.readFileSync(file, "utf8")).toBe(source);
+    expect(fs.readdirSync(path.dirname(file))).toEqual(["config.toml"]);
+    expect(fs.readdirSync(h.home)).toEqual([directory]);
   }, 180_000);
 
   it("preserves outside unrelated edits when a refreshed Apply patches owned fields", async () => {

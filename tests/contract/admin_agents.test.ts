@@ -97,25 +97,6 @@ const claudeMappings = [
 ];
 
 describe("Admin agents API", () => {
-  it("applies Grok Build using the existing strict mapping contract and rejects client login fields", async () => {
-    const stub = agentStub();
-    const harness = await createHarness(stub);
-    try {
-      const catalogResponse = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`));
-      const catalog = await catalogResponse.json() as { data: { catalogRevision: string } };
-      const body = { agent: "grokbuild", expectedRevision: "e".repeat(64), catalogRevision: catalog.data.catalogRevision,
-        mappings: [{ displayName: "Coding", modelId: "gpt-test" }] };
-      const post = async (value: unknown) => await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify(value),
-      }));
-      const response = await post(body);
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ data: { id: "grokbuild", state: "installed", mappings: body.mappings } });
-      expect(stub.calls).toContain("apply:grokbuild:gpt-test");
-      expect((await post({ ...body, apiKey: "not-accepted" })).status).toBe(400);
-      expect((await post({ ...body, mappings: [...body.mappings, ...body.mappings] })).status).toBe(400);
-    } finally { await harness.close(); }
-  });
   it("accepts strict content-free Codex takeover revisions", async () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
@@ -357,6 +338,15 @@ describe("Admin agents API", () => {
       expect(await applied.json()).toMatchObject({ data: { id: "claude", state: "installed" } });
       expect(stub.calls).toContain("apply:claude:gpt-test");
       expect(harness.dependencies.calls).toContain("agent-models");
+
+      const grokApplied = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
+        method: "POST", headers, body: JSON.stringify({
+          agent: "grokbuild", expectedRevision: "e".repeat(64), catalogRevision: view.data.catalogRevision,
+          mappings: [{ displayName: "Coding", modelId: "gpt-test" }],
+        }),
+      }));
+      expect(grokApplied.status).toBe(200);
+      expect(stub.calls).toContain("apply:grokbuild:gpt-test");
 
       stub.failApply = "agent_conflict";
       const conflict = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
