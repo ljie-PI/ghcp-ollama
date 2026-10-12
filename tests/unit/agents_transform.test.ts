@@ -52,16 +52,22 @@ async function capabilityModels(entries: readonly { readonly id: string; readonl
 }
 
 describe("agent configuration projection", () => {
-  it("projects Grok Build models through Responses without a separate catalog or client authentication", () => {
-    const result = projectAgent("grokbuild", Buffer.from("[mcp_servers.local]\ncommand = \"node\"\n[model.personal]\nmodel = \"personal-model\"\n"), mappings.slice(0, 1), origin, "unused", models, null);
+  it.each([undefined, "personal"])("projects Grok Build routing and reasoning while preserving summary override %s", (summary) => {
+    const reasoningModel = { ...models[0]!, capabilities: {
+      ...models[0]!.capabilities, reasoningLevels: ["low", "high"] as const, reasoningProtocols: ["responses"] as const,
+    } };
+    const source = `${summary === undefined ? "" : "[models]\nsession_summary = \"personal\"\n"}[mcp_servers.local]\ncommand = "node"\n[model.personal]\nmodel = "personal-model"\n`;
+    const result = projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", [reasoningModel], null);
     expect(result.catalog).toBeUndefined();
     expect(parse(result.config.toString())).toEqual({
-      models: { default: "ghcg-real-sonnet" },
+      models: { default: "ghcg-real-sonnet", session_summary: summary ?? "ghcg-real-sonnet" },
       model: {
         personal: { model: "personal-model" },
         "ghcg-real-sonnet": {
           name: "Friendly 0", model: "real-sonnet", base_url: `${origin}/v1`,
           api_key: "ghcg-local", api_backend: "responses", context_window: 32000,
+          supports_reasoning_effort: true, reasoning_efforts: [{ value: "low", label: "Low" }, { value: "high", label: "High" }],
+          reasoning_summary: "none",
         },
       },
       mcp_servers: { local: { command: "node" } },
@@ -140,10 +146,14 @@ describe("agent configuration projection", () => {
     expect(() => projectAgent("codex", Buffer.from(source), mappings, origin, "models.json", models, null))
       .toThrow("agent conflict");
   });
-  it("reapplies current Codex configuration without losing unrelated settings", () => {
-    const first = projectAgent("codex", null, mappings.slice(0, 1), origin, "models.json", models.slice(0, 1), null);
-    const second = projectAgent("codex", Buffer.from(`${first.config.toString()}\n[features]\nkeep = true\n`), mappings.slice(0, 1), origin, "models.json", models.slice(0, 1), first.config);
-    expect(parse(second.config.toString()).features).toEqual({ keep: true });
+  it.each(["codex", "grokbuild"] as const)("reapplies %s configuration without losing unrelated settings", (agent) => {
+    const available = models.map((model) => ({ ...model, capabilities: { ...model.capabilities, contextWindowTokens: 32000 } }));
+    const first = projectAgent(agent, null, mappings.slice(0, 1), origin, "models.json", available, null);
+    const second = projectAgent(agent, Buffer.from(`${first.config.toString()}\n[features]\nkeep = true\n`), mappings.slice(1, 2), origin, "models.json", available, first.config);
+    expect(parse(second.config.toString())).toMatchObject({
+      features: { keep: true },
+      ...(agent === "grokbuild" ? { models: { default: "ghcg-real-opus", session_summary: "ghcg-real-opus" } } : { model: "real-opus" }),
+    });
   });
   it("projects input limits from shared field states without widening malformed or conflicting declarations", async () => {
     const entries = [
@@ -168,7 +178,7 @@ describe("agent configuration projection", () => {
       { slug: "malformed-context", priority: 5, context_window: 128_000, max_context_window: 128_000 },
     ]);
   });
-  it("advertises reasoning levels only when the selected Gateway route proves its parameter", async () => {
+  it.each(["codex", "grokbuild"] as const)("advertises %s reasoning levels only when the selected Gateway route proves its parameter", async (agent) => {
     const entries = [
       { id: "missing-parameter", fields: { supported_endpoints: ["/responses"], supported_reasoning_efforts: ["low", "high"] } },
       { id: "malformed-parameter", fields: { supported_endpoints: ["/responses"], supported_parameters: null, supported_reasoning_efforts: ["low", "high"] } },
@@ -179,10 +189,11 @@ describe("agent configuration projection", () => {
       { id: "messages-bridge", fields: { supported_endpoints: ["/messages"], supported_parameters: ["output_config.effort"], supported_reasoning_efforts: ["low", "high"] } },
       { id: "chat-priority", fields: { supported_endpoints: ["/chat/completions", "/messages"], supported_parameters: ["output_config.effort"], supported_reasoning_efforts: ["low", "high"] } },
     ] as const;
-    const capabilitySnapshot = await capabilityModels(entries);
-    const projection = projectAgent("codex", null, entries.map(({ id }) => ({ modelId: id, displayName: id })), origin, "models.json", capabilitySnapshot, null);
-    const catalog = JSON.parse(projection.catalog!.toString()) as { models: { slug: string; supported_reasoning_levels: unknown[] }[] };
-    expect(catalog.models.map(({ slug, supported_reasoning_levels }) => ({ slug, supported_reasoning_levels }))).toEqual([
+    const capabilitySnapshot = await capabilityModels(entries.map((entry) => ({
+      ...entry, fields: { ...entry.fields, capabilities: { limits: { max_context_window_tokens: 32000 } } },
+    })));
+    const projection = projectAgent(agent, null, entries.map(({ id }) => ({ modelId: id, displayName: id })), origin, "models.json", capabilitySnapshot, null);
+    const expected = [
       { slug: "missing-parameter", supported_reasoning_levels: [] },
       { slug: "malformed-parameter", supported_reasoning_levels: [] },
       { slug: "conflicting-parameter", supported_reasoning_levels: [] },
@@ -191,7 +202,18 @@ describe("agent configuration projection", () => {
       { slug: "chat-bridge", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
       { slug: "messages-bridge", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
       { slug: "chat-priority", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
-    ]);
+    ];
+    if (agent === "codex") {
+      const catalog = JSON.parse(projection.catalog!.toString()) as { models: { slug: string; supported_reasoning_levels: unknown[] }[] };
+      expect(catalog.models.map(({ slug, supported_reasoning_levels }) => ({ slug, supported_reasoning_levels }))).toEqual(expected);
+    } else {
+      expect(parse(projection.config.toString()).model).toMatchObject(Object.fromEntries(expected.map(({ slug, supported_reasoning_levels }) => [
+        `ghcg-${slug}`, {
+          model: slug, supports_reasoning_effort: supported_reasoning_levels.length > 0,
+          reasoning_efforts: supported_reasoning_levels.map(({ effort, description }) => ({ value: effort, label: description })),
+        },
+      ])));
+    }
   });
   it("projects effective model capabilities without adapter-specific reinterpretation", async () => {
     const [model] = await capabilityModels([{
