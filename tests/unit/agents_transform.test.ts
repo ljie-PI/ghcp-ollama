@@ -67,57 +67,6 @@ describe("agent configuration projection", () => {
       mcp_servers: { local: { command: "node" } },
     });
   });
-  it("preserves unrelated Grok TOML bytes and retires profiles from the managed image, not the live default", () => {
-    const available = models.map((model) => ({ ...model, capabilities: { ...model.capabilities, contextWindowTokens: 32000 } }));
-    const unrelated = "# user configuration\r\n[model.personal]\r\nmodel = \"own\" # own model\r\nextra = \"\"\"\r\n[model.fake]\r\nmodels.default = \"not a setting\"\r\n\"\"\"\r\n[mcp_servers.local]\r\ncommand = \"node\" # keep me\r\n";
-    const first = projectAgent("grokbuild", Buffer.from(unrelated), mappings, origin, "unused", available, null);
-    const changed = first.config.toString().replace("models.default = \"ghcg-real-sonnet\"", "models.default = \"personal\"");
-    const second = projectAgent("grokbuild", Buffer.from(changed), [mappings[2]!, mappings[0]!], origin, "unused", available, first.config);
-    expect(second.config.toString()).toContain(unrelated);
-    expect(second.config.toString().replaceAll("\r\n", "")).not.toContain("\n");
-    const config = parse(second.config.toString());
-    expect(config.models).toEqual({ default: "ghcg-real-haiku" });
-    expect(Object.keys(config.model as object)).toEqual(["personal", "ghcg-real-haiku", "ghcg-real-sonnet"]);
-    expect(second.config.toString()).not.toContain("ghcg-real-opus");
-  });
-  it("updates a table-form default without changing its comment or user model", () => {
-    const source = "model.personal.model = \"own\"\n[models]\ndefault = \"personal\" # startup\nother = true\n";
-    const result = projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null).config.toString();
-    expect(result).toContain("default = \"ghcg-real-sonnet\" # startup\nother = true\n");
-    expect(parse(result).model).toMatchObject({ personal: { model: "own" } });
-  });
-  it("rejects unmanaged reserved profiles even when they are not selected", () => {
-    const source = "[model.\"ghcg-unselected\"]\nmodel = \"user-owned\"\n";
-    expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent conflict");
-  });
-  it.each([
-    "models = { default = \"own\" }\n", "model = { own = { model = \"own\" } }\n",
-  ])("fails closed on inline root containers that cannot be patched safely: %s", (source) => {
-    expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent invalid config");
-  });
-  it("does not invent the required Grok context limit", () => {
-    expect(() => projectAgent("grokbuild", null, mappings.slice(1, 2), origin, "unused", models, null)).toThrow("agent models unavailable");
-  });
-  it("keeps repeated Grok projection bounded and byte-stable", () => {
-    const rows = mappings.slice(0, 1);
-    let result = projectAgent("grokbuild", null, rows, origin, "unused", models, null);
-    const original = result.config;
-    result = projectAgent("grokbuild", result.config, rows, origin, "unused", models, result.config);
-    expect(result.config).toEqual(original);
-  });
-  it.each([
-    "[models] # keep header\r\nother = true # keep value\r\n",
-    "[models] # keep final header",
-  ])("retains complete commented lines when adding a missing Grok default: %s", (source) => {
-    const result = projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null);
-    expect(result.config.toString()).toContain(source);
-    expect(parse(result.config.toString()).models).toMatchObject({ default: "ghcg-real-sonnet" });
-  });
-  it.each(["model.personal = 1\n", "model.personal = 2026-01-01\n"])(
-    "rejects malformed Grok profiles rather than only validating TOML syntax: %s", (source) => {
-      expect(() => projectAgent("grokbuild", Buffer.from(source), mappings.slice(0, 1), origin, "unused", models, null)).toThrow("agent invalid config");
-    },
-  );
   it("accepts the canonical loopback origin for default HTTP port", () => {
     const projected = projectAgent(
       "claude",

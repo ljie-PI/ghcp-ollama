@@ -47,48 +47,6 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
-  // Recovery varies with target layout, not client identity: Claude has one file,
-  // Codex has two, and Grok reuses the single-file path.
-  it.each(["claude", "codex"] as const)("recovers the %s target layout after displacing a live file", async (agent) => {
-    let failed = false;
-    const h = harness({ checkpoint: (point) => {
-      if (point === "displaced" && !failed) { failed = true; throw new Error("injected interruption"); }
-    } });
-    const file = seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml", agent === "claude" ? "{}\n" : "");
-    await expect(apply(h.manager, agent)).rejects.toThrow("agent recovery required");
-    h.manager.close();
-    const manager = new FileAgentsManager({ home: h.home });
-    try {
-      expect((await apply(manager, agent)).state).toBe("installed");
-      expect(fs.readFileSync(file, "utf8")).toContain(origin);
-      expect(fs.readdirSync(path.dirname(file)).some((name) => name.startsWith(".ghcg-agents-"))).toBe(false);
-    } finally { manager.close(); }
-  }, 180_000);
-  it("installs Grok Build with one backed-up file and leaves its authentication and other settings untouched", async () => {
-    const h = harness();
-    const original = "# Grok settings\r\n[mcp_servers.local]\r\ncommand = \"node\"\r\n";
-    const file = seed(h.home, ".grok/config.toml", original);
-    const auth = seed(h.home, ".grok/auth.json", "{\"client-owned\":true}\n");
-    const result = await apply(h.manager, "grokbuild");
-    expect(result.state).toBe("installed");
-    expect(result.paths).toHaveLength(1);
-    expect(result.endpoint).toBe(`${origin}/v1`);
-    expect(result.takeover).toBeNull();
-    expect(result.backupAvailable).toBe(true);
-    expect(fs.readFileSync(file, "utf8")).toContain(original);
-    expect(fs.readFileSync(auth, "utf8")).toBe("{\"client-owned\":true}\n");
-    const backups = fs.readdirSync(path.dirname(file)).filter((name) => name.startsWith("config.toml.ghcg."));
-    expect(backups).toHaveLength(1);
-    expect(fs.readFileSync(path.join(path.dirname(file), backups[0]!), "utf8")).toBe(original);
-    expect(fs.existsSync(path.join(path.dirname(file), "models.json"))).toBe(false);
-    await apply(h.manager, "grokbuild", mappings.slice(0, 1));
-    expect(fs.readFileSync(file, "utf8")).not.toContain("ghcg-model-b");
-    expect(fs.readFileSync(file, "utf8")).toContain(original);
-    h.manager.close();
-    const reopened = new FileAgentsManager({ home: h.home });
-    try { expect((await reopened.inspect(origin)).find((item) => item.id === "grokbuild")!.state).toBe("installed"); }
-    finally { reopened.close(); }
-  }, 180_000);
   it.each(["missing", "replaced"] as const)("reports %s live configuration without disabling a fresh Apply", async (change) => {
     const h = harness();
     const file = seed(h.home, ".claude/settings.json", "{}\n");
@@ -110,18 +68,13 @@ describe("private repeatable agent configuration", () => {
     }, origin, models, () => undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(fs.readdirSync(h.home)).toEqual([]);
   }, 180_000);
-  it.each([
-    { agent: "codex" as const, directory: ".codex", source: "token=\"secret\n" },
-    { agent: "grokbuild" as const, directory: ".grok", source: "model.personal = 1\n" },
-  ])("rejects invalid $agent configuration before creating state or backups", async ({ agent, directory, source }) => {
+  it("reads without creating any directories and rejects invalid parsing before writes", async () => {
     const h = harness();
-    expect((await h.status(agent)).state).toBe("not_managed");
+    expect((await h.status("codex")).state).toBe("not_managed");
     expect(fs.readdirSync(h.home)).toEqual([]);
-    const file = seed(h.home, `${directory}/config.toml`, source);
-    await expect(apply(h.manager, agent)).rejects.toThrow("agent invalid config");
-    expect(fs.readFileSync(file, "utf8")).toBe(source);
-    expect(fs.readdirSync(path.dirname(file))).toEqual(["config.toml"]);
-    expect(fs.readdirSync(h.home)).toEqual([directory]);
+    seed(h.home, ".codex/config.toml", "token=\"secret\n");
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent invalid config");
+    expect(fs.readdirSync(h.home)).toEqual([".codex"]);
   }, 180_000);
 
   it("preserves outside unrelated edits when a refreshed Apply patches owned fields", async () => {

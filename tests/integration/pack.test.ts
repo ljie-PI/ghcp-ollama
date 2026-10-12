@@ -215,10 +215,8 @@ describe("package evidence", () => {
     expect(dependencies).toEqual([
       "@hono/node-server@2.1.1",
       "@sinclair/typebox@0.34.52",
-      "eslint-visitor-keys@5.0.1",
       "hono@4.13.8",
       "smol-toml@1.8.0",
-      "toml-eslint-parser@1.0.3",
       "undici@8.10.2",
     ]);
   });

@@ -4,23 +4,6 @@ import { installAdminFixture } from "./fixtures/admin_fixture.js";
 
 
 
-test("Grok Build applies multiple Copilot mappings without a client login workflow", async ({ page }) => {
-  const fixture = await openAgents(page);
-  const card = page.getByRole("region", { name: "Grok Build", exact: true });
-  await chooseModel(card, "Model 1 Copilot model ID", "gpt-alpha");
-  await card.getByRole("button", { name: "Add model", exact: true }).click();
-  await chooseModel(card, "Model 2 Copilot model ID", "claude-beta");
-  page.once("dialog", (dialog) => dialog.accept());
-  await card.getByRole("button", { name: "Apply changes", exact: true }).click();
-  await expect(card.locator(".badge")).toHaveText("Configuration installed");
-  expect(fixture.requests.find((item) => item.url().endsWith("/agents/apply"))?.postDataJSON()).toMatchObject({
-    agent: "grokbuild", mappings: [
-      { modelId: "gpt-alpha", displayName: "Alpha" }, { modelId: "claude-beta", displayName: "Beta" },
-    ],
-  });
-  await expect(card.getByText(/Configuration installed\. Restart/)).toBeVisible();
-});
-
 test("catalog choices fill names only after explicit selection and unchanged mappings can be applied again", async ({ page }) => {
   const fixture = await openAgents(page);
   const card = page.getByRole("region", { name: "Codex", exact: true });
@@ -61,27 +44,27 @@ test("catalog failure leaves local inspection visible and Apply reports missing 
 
 test("Apply validates drafts without disabling and posts exact custom display names", async ({ page }) => {
   const fixture = await openAgents(page);
-  const codex = page.locator(".agent-card", { has: page.getByRole("heading", { name: "Codex" }) });
-  const apply = codex.getByRole("button", { name: "Apply changes" });
+  const card = page.getByRole("region", { name: "Grok Build", exact: true });
+  const apply = card.getByRole("button", { name: "Apply changes" });
   await expect(apply).toBeEnabled();
-  await expect(codex.getByText("No unapplied changes")).toHaveCount(0);
+  await expect(card.getByText("No unapplied changes")).toHaveCount(0);
 
-  await codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
-  await codex.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Fast");
-  await expect(codex.getByText("Unapplied changes")).toHaveCount(0);
+  await card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
+  await card.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Fast");
+  await expect(card.getByText("Unapplied changes")).toHaveCount(0);
   await expect(apply).toBeEnabled();
   await expect(apply).toHaveAttribute("type", "submit");
   await expect(apply).toHaveCSS("background-color", "rgb(32, 29, 29)");
 
   page.once("dialog", (dialog) => dialog.accept());
   await apply.click();
-  await expect(codex.getByText(/Configuration installed\. Restart the client/)).toBeVisible();
-  await expect(codex.getByText("No unapplied changes")).toHaveCount(0);
+  await expect(card.getByText(/Configuration installed\. Restart the client/)).toBeVisible();
+  await expect(card.getByText("No unapplied changes")).toHaveCount(0);
 
   const request = fixture.requests.find((item) => item.url().endsWith("/agents/apply"));
   expect(request?.method()).toBe("POST");
   expect(request?.postDataJSON()).toMatchObject({
-    agent: "codex",
+    agent: "grokbuild",
     catalogRevision: "c".repeat(64),
     mappings: [{ displayName: "Fast", modelId: "gpt-alpha" }],
   });

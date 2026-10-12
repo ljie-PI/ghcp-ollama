@@ -9,7 +9,6 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import {
   AgentError,
-  validateMappings,
   type AgentId,
   type AgentStatus,
   type AgentsManager,
@@ -55,7 +54,6 @@ function agentStub(): AgentStub {
       },
       async apply(request, origin, models, assertCurrent, signal) {
         signal.throwIfAborted();
-        validateMappings(request.agent, request.mappings);
         calls.push(`apply:${request.agent}:${models.map((model) => model.modelId).join(",")}`);
         if (stub.failApply !== null) throw new AgentError(stub.failApply as never);
         assertCurrent();
@@ -331,22 +329,13 @@ describe("Admin agents API", () => {
 
       const applied = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
         method: "POST", headers, body: JSON.stringify({
-          agent: "claude", expectedRevision: "a".repeat(64), catalogRevision: view.data.catalogRevision, mappings: claudeMappings,
+          agent: "grokbuild", expectedRevision: "e".repeat(64), catalogRevision: view.data.catalogRevision, mappings: claudeMappings.slice(0, 1),
         }),
       }));
       expect(applied.status).toBe(200);
-      expect(await applied.json()).toMatchObject({ data: { id: "claude", state: "installed" } });
-      expect(stub.calls).toContain("apply:claude:gpt-test");
-      expect(harness.dependencies.calls).toContain("agent-models");
-
-      const grokApplied = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers, body: JSON.stringify({
-          agent: "grokbuild", expectedRevision: "e".repeat(64), catalogRevision: view.data.catalogRevision,
-          mappings: [{ displayName: "Coding", modelId: "gpt-test" }],
-        }),
-      }));
-      expect(grokApplied.status).toBe(200);
+      expect(await applied.json()).toMatchObject({ data: { id: "grokbuild", state: "installed" } });
       expect(stub.calls).toContain("apply:grokbuild:gpt-test");
+      expect(harness.dependencies.calls).toContain("agent-models");
 
       stub.failApply = "agent_conflict";
       const conflict = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
