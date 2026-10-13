@@ -23,7 +23,8 @@
   let busy = $state(false);
   let failure = $state("");
   let notice = $state("");
-  let takeoverDialog = $state<HTMLDialogElement>();
+  let confirmationDialog = $state<HTMLDialogElement>();
+  let confirmation = $state<{ kind: "apply" | "takeover"; revision: string } | null>(null);
   let handledRefreshGeneration = $state(0);
   const dirty = $derived(serializedDrafts() !== baseline);
   const stateLabel = $derived({
@@ -71,10 +72,11 @@
   function serializedDrafts(): string {
     return JSON.stringify(drafts.map(({ displayName, modelId }) => ({ displayName, modelId })));
   }
-  async function apply(): Promise<void> {
+  async function apply(confirmed = false): Promise<void> {
     if (busy) return;
     if (status.id === "codex" && status.takeover !== null) {
-      takeoverDialog?.showModal();
+      confirmation = { kind: "takeover", revision: status.revision };
+      confirmationDialog?.showModal();
       return;
     }
     notice = "";
@@ -93,7 +95,11 @@
       failure = "Apply failed: selected model is unavailable.";
       return;
     }
-    if (status.state === "not_managed" && !window.confirm(`Apply ${title} configuration? Existing configuration files will be retained in local-time .ghcg.<timestamp> backups. Up to 365 backups are kept per file. Restart the client after applying.`)) return;
+    if (status.state === "not_managed" && !confirmed) {
+      confirmation = { kind: "apply", revision: status.revision };
+      confirmationDialog?.showModal();
+      return;
+    }
     busy = true;
     try {
       const next = await client.applyAgent({
@@ -219,24 +225,38 @@
       <dt>Last apply</dt><dd>{status.lastAppliedAt === null ? "Never" : new Date(status.lastAppliedAt).toLocaleString()}</dd>
     </dl>
   </details>
-  {#if status.id === "codex" && status.takeover !== null}
-    <dialog class="agent-takeover-dialog" bind:this={takeoverDialog} aria-labelledby="codex-takeover-title">
+    <dialog class="agent-confirmation-dialog" bind:this={confirmationDialog} aria-labelledby={`${status.id}-confirmation-title`}
+      onclose={() => { if (!confirmationDialog?.open) confirmation = null; }}>
       <form method="dialog">
-        <h3 id="codex-takeover-title">Take over Codex configuration?</h3>
-        <p>Gateway-managed model, provider, and catalog fields will be replaced. Existing configuration files are retained in local-time <code>.ghcg.&lt;timestamp&gt;</code> backups, <code>auth.json</code> is untouched, and Codex must restart.</p>
+        <h3 id={`${status.id}-confirmation-title`}>{confirmation?.kind === "takeover" ? "Take over Codex configuration?" : `Apply ${title} configuration?`}</h3>
+        {#if confirmation?.kind === "takeover"}
+          <p>Gateway-managed model, provider, and catalog fields will be replaced. Existing configuration files are retained in local-time <code>.ghcg.&lt;timestamp&gt;</code> backups, <code>auth.json</code> is untouched, and Codex must restart.</p>
+        {:else}
+          <p>Existing configuration files will be retained in local-time <code>.ghcg.&lt;timestamp&gt;</code> backups. Up to 365 backups are kept per file. Restart the client after applying.</p>
+        {/if}
         <dl>
-          <dt>Configuration</dt><dd><code>{status.takeover.configPath}</code></dd>
-          <dt>Model catalog</dt><dd><code>{status.takeover.catalogPath}</code></dd>
+          {#if confirmation?.kind === "takeover" && status.takeover !== null}
+            <dt>Configuration</dt><dd><code>{status.takeover.configPath}</code></dd>
+            <dt>Model catalog</dt><dd><code>{status.takeover.catalogPath}</code></dd>
+          {:else}
+            <dt>Configuration paths</dt><dd>{#each status.paths as target (target)}<code>{target}</code>{/each}</dd>
+          {/if}
         </dl>
         <div class="agent-dialog-actions">
           <button value="cancel">Cancel</button>
           <button class="primary" value="confirm" onclick={(event) => {
             event.preventDefault();
-            takeoverDialog?.close();
-            void takeover();
-          }}>Take over configuration</button>
+            const pending = confirmation;
+            if (pending === null || busy) return;
+            confirmationDialog?.close();
+            if (pending.revision !== status.revision) {
+              failure = "Apply failed: external changes detected.";
+              return;
+            }
+            if (pending.kind === "takeover") void takeover();
+            else void apply(true);
+          }}>{confirmation?.kind === "takeover" ? "Take over configuration" : "Apply configuration"}</button>
         </div>
       </form>
     </dialog>
-  {/if}
 </section>

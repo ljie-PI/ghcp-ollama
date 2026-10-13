@@ -17,8 +17,8 @@ test("catalog choices fill names only after explicit selection and unchanged map
   await model.press("ArrowDown");
   await model.press("Enter");
   await expect(card.getByRole("textbox", { name: "Model 1 Display name", exact: true })).toHaveValue("Alpha");
-  page.once("dialog", (dialog) => dialog.accept());
   await apply.click();
+  await card.getByRole("dialog", { name: "Apply Codex configuration?", exact: true }).getByRole("button", { name: "Apply configuration", exact: true }).click();
   await expect(card.getByText(/Configuration installed\. Restart/)).toBeVisible();
   await expect(apply).toBeEnabled();
   await apply.click();
@@ -56,8 +56,8 @@ test("Apply validates drafts without disabling and posts exact custom display na
   await expect(apply).toHaveAttribute("type", "submit");
   await expect(apply).toHaveCSS("background-color", "rgb(32, 29, 29)");
 
-  page.once("dialog", (dialog) => dialog.accept());
   await apply.click();
+  await codex.getByRole("dialog", { name: "Apply Codex configuration?", exact: true }).getByRole("button", { name: "Apply configuration", exact: true }).click();
   await expect(codex.getByText(/Configuration installed\. Restart the client/)).toBeVisible();
   await expect(codex.getByText("No unapplied changes")).toHaveCount(0);
 
@@ -78,8 +78,8 @@ test("Claude applies fixed roles plus extra model menu mappings", async ({ page 
   }
   await claude.getByRole("button", { name: "Add model", exact: true }).click();
   await chooseModel(claude, "Model 4 Copilot model ID", "claude-beta");
-  page.once("dialog", (dialog) => dialog.accept());
   await claude.getByRole("button", { name: "Apply changes" }).click();
+  await claude.getByRole("dialog", { name: "Apply Claude Code configuration?", exact: true }).getByRole("button", { name: "Apply configuration", exact: true }).click();
   await expect(claude.locator(".badge")).toHaveText("Configuration installed");
   expect(fixture.requests.find((item) => item.url().endsWith("/agents/apply"))?.postDataJSON().mappings).toEqual([
     { modelId: "gpt-alpha", displayName: "Alpha" }, { modelId: "gpt-alpha", displayName: "Alpha" },
