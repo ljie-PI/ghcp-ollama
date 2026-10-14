@@ -10,7 +10,7 @@ import type {
   AdminRuntimeConfig,
   AdminStatus,
 } from "../../../web/src/types.js";
-import type { AgentStatus, AgentsView } from "../../../src/agents/types.js";
+import type { AgentId, AgentStatus, AgentsView } from "../../../src/agents/types.js";
 import { VERSION } from "../../../src/version.js";
 
 const NOW = "2026-09-03T12:00:00.000Z";
@@ -64,7 +64,7 @@ export interface AdminFixture {
     deviceNowMs: number;
     accountsDelayMs: number;
     modelDelayByAccount: Record<string, number>;
-    agents: Record<"claude" | "codex", AgentStatus>;
+    agents: Record<AgentId, AgentStatus>;
     agentsCatalogRevision: string | null;
     agentsApplyConflict: boolean;
     agentsTakeoverConflict: boolean;
@@ -163,7 +163,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       deviceNowMs: ADMIN_FIXTURE_NOW_MS,
       accountsDelayMs: 0,
       modelDelayByAccount: {},
-      agents: { claude: agentStatus("claude", 1), codex: agentStatus("codex", 7) },
+      agents: { claude: agentStatus("claude", 1), codex: agentStatus("codex", 7), grokbuild: agentStatus("grokbuild", 8) },
       agentsCatalogRevision: "c".repeat(64),
       agentsApplyConflict: false,
       agentsTakeoverConflict: false,
@@ -228,14 +228,15 @@ function nextAgentRevision(revision: string): string {
   return next.repeat(64);
 }
 
-function agentStatus(agent: "claude" | "codex", seed: number): AgentStatus {
+function agentStatus(agent: AgentId, seed: number): AgentStatus {
   return {
     id: agent,
     state: "not_managed",
     revision: seed.toString(16).repeat(64),
     paths: agent === "claude"
       ? ["C:/Users/octo/.claude/settings.json"]
-      : ["C:/Users/octo/.codex/models.json", "C:/Users/octo/.codex/config.toml"],
+      : agent === "codex" ? ["C:/Users/octo/.codex/models.json", "C:/Users/octo/.codex/config.toml"]
+        : ["C:/Users/octo/.grok/config.toml"],
     endpoint: agent === "claude" ? "http://127.0.0.1:31400" : "http://127.0.0.1:31400/v1",
     backupAvailable: false,
     lastAppliedAt: null,
@@ -325,7 +326,7 @@ async function handle(
   if (path === "/agents") {
     const failed = fixture.state.failAgents;
     const view: AgentsView = {
-      items: [structuredClone(fixture.state.agents.claude), structuredClone(fixture.state.agents.codex)],
+      items: Object.values(fixture.state.agents).map((item) => structuredClone(item)),
     };
     const hold = takeHeldAgentsRead();
     if (hold !== null) {
@@ -349,7 +350,7 @@ async function handle(
     });
   }
   if ((path === "/agents/apply" || path === "/agents/takeover") && request.method() === "POST") {
-    const body = request.postDataJSON() as { agent: "claude" | "codex"; expectedRevision: string; takeoverRevision?: string; mappings: { displayName: string; modelId: string }[] };
+    const body = request.postDataJSON() as { agent: AgentId; expectedRevision: string; takeoverRevision?: string; mappings: { displayName: string; modelId: string }[] };
     if (fixture.state.agentsApplyConflict) return failure(route, 409, "agent_conflict");
     if (path === "/agents/takeover" && (fixture.state.agentsTakeoverConflict
       || body.takeoverRevision !== fixture.state.agents.codex.takeover?.revision)) return failure(route, 409, "revision_conflict");

@@ -1,6 +1,6 @@
 import type { EffectiveModelCapabilitySnapshot } from "../copilot/capability_registry.js";
 
-export type AgentId = "claude" | "codex";
+export type AgentId = "claude" | "codex" | "grokbuild";
 export interface AgentMapping {
   readonly displayName: string;
   readonly modelId: string;
@@ -53,7 +53,7 @@ export function validateMappings(agent: AgentId, mappings: readonly AgentMapping
     || mappings.length < 1 || mappings.length > MAX_MAPPINGS
     || mappings.some((row) => !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(row.modelId)
       || row.displayName.trim().length === 0 || row.displayName.length > 80 || /[\p{C}]/u.test(row.displayName))
-    || mappings.some((row, index) => (agent === "codex" || index >= 3)
+    || mappings.some((row, index) => (agent !== "claude" || index >= 3)
       && mappings.slice(0, index).some((previous) => previous.modelId === row.modelId))) {
     throw new AgentError("validation_failed");
   }

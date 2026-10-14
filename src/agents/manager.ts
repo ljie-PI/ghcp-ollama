@@ -44,11 +44,12 @@ export class FileAgentsManager implements AgentsManager {
     this.paths = {
       claude: [path.join(claude, "settings.json")],
       codex: [path.join(codex, "models.json"), path.join(codex, "config.toml")],
+      grokbuild: [path.join(this.home, ".grok", "config.toml")],
     };
   }
 
   async inspect(origin: string): Promise<readonly AgentStatus[]> {
-    const agents = ["claude", "codex"] as const;
+    const agents = ["claude", "codex", "grokbuild"] as const;
     return await Promise.all(agents.map((agent) => this.status(agent, origin)));
   }
 
@@ -102,9 +103,9 @@ export class FileAgentsManager implements AgentsManager {
         if (takeover) await this.requireTakeoverRevision(request as AgentTakeoverRequest, state, origin);
         const projection = this.project(request, state, current, livePaths, origin, models, takeover);
         current = this.prepareTargets(request.agent, state, current, livePaths, takeover);
-        const after = request.agent === "claude"
-          ? [newImage(projection.config, current[0]!)]
-          : [newImage(projection.catalog!, current[0]!), newImage(projection.config, current[1]!)];
+        const after = request.agent === "codex"
+          ? [newImage(projection.catalog!, current[0]!), newImage(projection.config, current[1]!)]
+          : [newImage(projection.config, current[0]!)];
         const appliedAt = (this.options.now ?? (() => new Date()))();
         const steps = this.plan(request.agent, state, current, after, appliedAt);
         for (const [index, target] of state.targets.entries()) target.expected = current[index]!;

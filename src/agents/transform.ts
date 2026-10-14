@@ -42,9 +42,11 @@ export function projectAgent(
   }
   try {
     const source = original?.toString("utf8").replace(/^\uFEFF/u, "") ?? "";
-    return agent === "claude"
-      ? { config: projectClaude(source, mappings, origin) }
-      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig !== null, takeover);
+    switch (agent) {
+    case "claude": return { config: projectClaude(source, mappings, origin) };
+    case "codex": return projectCodex(source, mappings, origin, catalogPath, models, managedConfig !== null, takeover);
+    case "grokbuild": return { config: projectGrok(source, mappings, origin, models, managedConfig) };
+    }
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
     // Parser diagnostics can contain configuration secrets.
@@ -72,6 +74,13 @@ function isLoopbackOrigin(value: string): boolean {
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AgentError("agent_invalid_config");
   return value as Record<string, unknown>;
+}
+
+function responsesReasoningLevels(model: AgentModel): AgentModel["capabilities"]["reasoningLevels"] {
+  return model.protocols.value !== null
+    && protocolTargets("responses", model.protocols.value).some((target) => supportsModelReasoning(model.capabilities, target))
+    ? model.capabilities.reasoningLevels
+    : [];
 }
 
 function projectClaude(source: string, mappings: readonly AgentMapping[], origin: string): Buffer {
@@ -149,11 +158,7 @@ function projectCodex(
     "model_auto_compact_token_limit", "model_supports_reasoning_summaries", "review_model", "service_tier"]) delete config[key];
   const catalog = { models: mappings.map((mapping, index) => {
     const model = models.find((item) => item.modelId === mapping.modelId)!;
-    const targets = model.protocols.value === null ? [] : protocolTargets("responses", model.protocols.value);
-    const target = targets.find((candidate) => supportsModelReasoning(model.capabilities, candidate)) ?? targets[0] ?? null;
-    const reasoningLevels = target !== null && supportsModelReasoning(model.capabilities, target)
-      ? model.capabilities.reasoningLevels
-      : [];
+    const reasoningLevels = responsesReasoningLevels(model);
     return {
       slug: mapping.modelId, display_name: mapping.displayName, description: mapping.displayName,
       base_instructions: CODEX_BASE_INSTRUCTIONS,
@@ -182,4 +187,52 @@ function projectCodex(
   const result = stringify(config);
   parse(result);
   return { config: Buffer.from(result), catalog: Buffer.from(`${JSON.stringify(catalog, null, 2)}\n`) };
+}
+
+function table(value: unknown): Record<string, unknown> {
+  if (value === undefined) return {};
+  const result = object(value);
+  if (value instanceof Date) throw new AgentError("agent_invalid_config");
+  return result;
+}
+
+// Profile identifiers are local client labels; the request model is always the Copilot ID.
+function profile(modelId: string): string { return `ghcg-${modelId}`; }
+
+function projectGrok(
+  source: string, mappings: readonly AgentMapping[], origin: string, models: readonly AgentModel[], managedConfig: Buffer | null,
+): Buffer {
+  const config = parse(source);
+  const defaults = table(config.models);
+  const entries = table(config.model);
+  for (const entry of Object.values(entries)) table(entry);
+  const previous = managedConfig === null ? {} : table(parse(managedConfig.toString("utf8")).model);
+  const owned = new Set(Object.keys(previous).filter((name) => name.startsWith("ghcg-")));
+  for (const name of Object.keys(entries)) {
+    if (name.startsWith("ghcg-") && !owned.has(name)) throw new AgentError("agent_conflict");
+  }
+  const generated = Object.fromEntries(mappings.map((mapping) => {
+    const model = models.find((candidate) => candidate.modelId === mapping.modelId)!;
+    const context = model.capabilities.contextWindowTokens;
+    if (context === null || !Number.isSafeInteger(context) || context <= 0) throw new AgentError("agent_models_unavailable");
+    const reasoningLevels = responsesReasoningLevels(model);
+    return [profile(mapping.modelId), {
+      name: mapping.displayName, model: mapping.modelId, base_url: `${origin}/v1`,
+      api_key: "ghcg-local", api_backend: "responses", context_window: context,
+      supports_reasoning_effort: reasoningLevels.length > 0,
+      reasoning_efforts: reasoningLevels.map((value) => ({ value, label: value.charAt(0).toUpperCase() + value.slice(1) })),
+      reasoning_summary: model.capabilities.reasoningSummaries ? "concise" : "none",
+    }];
+  }));
+  for (const name of owned) delete entries[name];
+  // Grok otherwise uses its built-in model for session titles, independently of the selected model.
+  if (defaults.session_summary === undefined
+    || (typeof defaults.session_summary === "string" && owned.has(defaults.session_summary))) {
+    defaults.session_summary = profile(mappings[0]!.modelId);
+  }
+  config.models = { ...defaults, default: profile(mappings[0]!.modelId) } as TomlTable;
+  config.model = { ...entries, ...generated } as TomlTable;
+  const result = stringify(config);
+  parse(result);
+  return Buffer.from(result);
 }

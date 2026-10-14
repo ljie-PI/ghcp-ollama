@@ -9,6 +9,7 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import {
   AgentError,
+  type AgentId,
   type AgentStatus,
   type AgentsManager,
 } from "../../src/agents/types.js";
@@ -19,12 +20,13 @@ import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.
 
 const ORIGIN = "http://127.0.0.1:31400";
 
-function agentStatus(agent: "claude" | "codex", revision: string, state: AgentStatus["state"] = "not_managed"): AgentStatus {
+function agentStatus(agent: AgentId, revision: string, state: AgentStatus["state"] = "not_managed"): AgentStatus {
   return {
     id: agent,
     state,
     revision,
-    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : ["C:/home/.codex/models.json", "C:/home/.codex/config.toml"],
+    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : agent === "codex"
+      ? ["C:/home/.codex/models.json", "C:/home/.codex/config.toml"] : ["C:/home/.grok/config.toml"],
     endpoint: agent === "claude" ? ORIGIN : `${ORIGIN}/v1`,
     backupAvailable: state !== "not_managed",
     lastAppliedAt: state === "installed" ? "2027-01-15T08:00:00.000Z" : null,
@@ -41,14 +43,14 @@ interface AgentStub {
 
 function agentStub(): AgentStub {
   const calls: string[] = [];
-  const revisions = { claude: "a".repeat(64), codex: "b".repeat(64) };
+  const revisions = { claude: "a".repeat(64), codex: "b".repeat(64), grokbuild: "e".repeat(64) };
   const stub: AgentStub = {
     calls,
     failApply: null,
     manager: {
       async inspect(origin) {
         calls.push(`inspect:${origin}`);
-        return [agentStatus("claude", revisions.claude), agentStatus("codex", revisions.codex)];
+        return [agentStatus("claude", revisions.claude), agentStatus("codex", revisions.codex), agentStatus("grokbuild", revisions.grokbuild)];
       },
       async apply(request, origin, models, assertCurrent, signal) {
         signal.throwIfAborted();
@@ -235,7 +237,7 @@ describe("Admin agents API", () => {
       const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents`));
       expect(response.status).toBe(200);
       const body = await response.json() as { data: { items: AgentStatus[] } };
-      expect(body.data.items.map((item) => item.id)).toEqual(["claude", "codex"]);
+      expect(body.data.items.map((item) => item.id)).toEqual(["claude", "codex", "grokbuild"]);
       expect(body.data.items[0]).toMatchObject({ state: "not_managed", endpoint: ORIGIN, backupAvailable: false });
       expect(body.data.items[1]).toMatchObject({ endpoint: `${ORIGIN}/v1` });
       expect(stub.calls).toEqual([`inspect:${ORIGIN}`]);
@@ -327,12 +329,12 @@ describe("Admin agents API", () => {
 
       const applied = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
         method: "POST", headers, body: JSON.stringify({
-          agent: "claude", expectedRevision: "a".repeat(64), catalogRevision: view.data.catalogRevision, mappings: claudeMappings,
+          agent: "grokbuild", expectedRevision: "e".repeat(64), catalogRevision: view.data.catalogRevision, mappings: claudeMappings.slice(0, 1),
         }),
       }));
       expect(applied.status).toBe(200);
-      expect(await applied.json()).toMatchObject({ data: { id: "claude", state: "installed" } });
-      expect(stub.calls).toContain("apply:claude:gpt-test");
+      expect(await applied.json()).toMatchObject({ data: { id: "grokbuild", state: "installed" } });
+      expect(stub.calls).toContain("apply:grokbuild:gpt-test");
       expect(harness.dependencies.calls).toContain("agent-models");
 
       stub.failApply = "agent_conflict";
@@ -367,7 +369,7 @@ describe("Admin agents API", () => {
       const view = await (await harness.gateway.fetch(new Request(
         `${ORIGIN}/admin/api/v1/agents`,
       ))).json() as { data: { items: AgentStatus[] } };
-      expect(view.data.items).toHaveLength(2);
+      expect(view.data.items).toHaveLength(3);
       const unavailable = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, { headers }));
       expect(unavailable.status).toBe(400);
       expect(await unavailable.json()).toMatchObject({ error: { code: "agent_models_unavailable" } });

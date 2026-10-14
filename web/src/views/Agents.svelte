@@ -39,8 +39,9 @@
   let forceCatalogRefresh = false;
   let manualRefreshGeneration = $state(0);
   const accountObservation = new AbortController();
+  const agentOrder = { codex: 0, claude: 1, grokbuild: 2 };
   const orderedItems = $derived(data?.items.toSorted((left, right) =>
-    (left.id === "codex" ? 0 : 1) - (right.id === "codex" ? 0 : 1)) ?? []);
+    agentOrder[left.id] - agentOrder[right.id]) ?? []);
 
   onMount(() => {
     if (data === null) void load(false);

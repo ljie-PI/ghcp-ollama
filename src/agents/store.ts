@@ -468,10 +468,11 @@ function isSqliteBusy(error: unknown): boolean {
 }
 
 function validateStatePaths(state: AgentState, agent: AgentId): void {
+  if (agent === "grokbuild" && state.version !== 4) throw new AgentError("agent_recovery_required");
   if (agent === "codex" && state.targets.length > 0 && state.version !== 3 && state.version !== 4) {
     throw new AgentError("agent_recovery_required");
   }
-  const count = state.version === 4 ? agent === "claude" ? 1 : 2
+  const count = state.version === 4 ? agent === "codex" ? 2 : 1
     : agent === "claude" ? state.version === 1 ? 1 : 2
       : state.version === 1 ? 2 : state.version === 2 ? 3 : 4;
   if (state.targets.length !== 0 && state.targets.length !== count) throw new AgentError("agent_recovery_required");
