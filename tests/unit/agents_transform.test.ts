@@ -64,7 +64,7 @@ describe("agent configuration projection", () => {
       model: {
         personal: { model: "personal-model" },
         "ghcg-real-sonnet": {
-          name: "Friendly 0", model: "real-sonnet", base_url: `${origin}/v1`,
+          name: "Friendly 0 (GitHub Copilot)", model: "real-sonnet", base_url: `${origin}/v1`,
           api_key: "ghcg-local", api_backend: "responses", context_window: 32000,
           supports_reasoning_effort: true, reasoning_efforts: [{ value: "low", label: "Low" }, { value: "high", label: "High" }],
           reasoning_summary: "none",

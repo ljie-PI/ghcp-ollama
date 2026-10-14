@@ -184,7 +184,7 @@
       <legend>Model mapping</legend>
       <p class="muted" id={`${status.id}-mapping-help`}>{status.id === "claude" ? "Rows are ordered Sonnet, Opus, Haiku. " : ""}The first row is the startup model. Display names are labels; Copilot model IDs are sent unchanged.</p>
       {#if status.id === "claude"}<p class="muted">Additional rows appear in the model menu. Requires Claude Code 2.1.243 or newer.</p>{/if}
-      {#if status.id === "grokbuild"}<p class="muted">Writes Gateway model profiles using Responses. Reasoning choices follow Gateway capabilities. Session titles use the first mapping unless a separate summary model is configured. Other model profiles and client settings are preserved, but comments and formatting may change. Models need a known context window.</p>{/if}
+      {#if status.id === "grokbuild"}<p class="muted">Writes Gateway model profiles using Responses. Client display names include (GitHub Copilot). Reasoning choices follow Gateway capabilities. Session titles use the first mapping unless a separate summary model is configured. Other model profiles and client settings are preserved, but comments and formatting may change. Models need a known context window.</p>{/if}
       {#each drafts as row, index (row.key)}
           <div class="agent-mapping-row">
             <label><span><span class="visually-hidden">{mappingName(index)} </span>Copilot model ID</span>

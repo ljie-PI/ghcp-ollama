@@ -217,7 +217,7 @@ function projectGrok(
     if (context === null || !Number.isSafeInteger(context) || context <= 0) throw new AgentError("agent_models_unavailable");
     const reasoningLevels = responsesReasoningLevels(model);
     return [profile(mapping.modelId), {
-      name: mapping.displayName, model: mapping.modelId, base_url: `${origin}/v1`,
+      name: `${mapping.displayName} (GitHub Copilot)`, model: mapping.modelId, base_url: `${origin}/v1`,
       api_key: "ghcg-local", api_backend: "responses", context_window: context,
       supports_reasoning_effort: reasoningLevels.length > 0,
       reasoning_efforts: reasoningLevels.map((value) => ({ value, label: value.charAt(0).toUpperCase() + value.slice(1) })),
