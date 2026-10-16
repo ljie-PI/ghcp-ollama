@@ -163,6 +163,7 @@ export interface EncodedConversionRequest {
   readonly bytes: Uint8Array;
   readonly stream: boolean;
   readonly hasVisionInput: boolean;
+  readonly outputFormat?: SemanticOutputFormat | undefined;
   readonly initiator: "user" | "agent";
   readonly messagesBetaFeatures: readonly (
     | "prompt-caching-2024-07-31"

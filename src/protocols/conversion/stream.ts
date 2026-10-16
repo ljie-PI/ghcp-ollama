@@ -12,12 +12,14 @@ import type {
   InferenceProtocol,
   SemanticResponse,
   SemanticResponseItem,
+  SemanticOutputFormat,
   SemanticStreamEvent,
   SemanticUsage,
   ReasoningCarrierConversionContext,
   ResponsesToolBindingLedger,
 } from "./types.js";
 import { wireArray, wireNumber, wireObject } from "./wire.js";
+import { encodeResponsesTextConfig } from "./request/format.js";
 import { managedConvertedResponseId } from "./ids.js";
 import {
   resolveResponsesToolRestorationPolicy,
@@ -44,6 +46,7 @@ export interface StreamConversionContext {
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
   readonly previousResponseId?: string | null | undefined;
+  readonly outputFormat?: SemanticOutputFormat | undefined;
   readonly degradations?: readonly ConversionDegradationRule[];
   readonly responseBindings?: ResponsesToolBindingLedger | undefined;
   readonly measureEvent?: (<T>(work: () => T) => T) | undefined;
@@ -1732,6 +1735,7 @@ class ResponsesEmitter implements StreamEmitter {
         usage,
         finishReason,
         this.context.previousResponseId,
+        this.context.outputFormat,
       )],
     ]));
   }
@@ -1910,6 +1914,7 @@ function responseSnapshot(
   usage: Readonly<SemanticUsage>,
   finishReason?: SemanticResponse["finishReason"],
   previousResponseId?: string | null,
+  outputFormat?: SemanticOutputFormat,
 ) {
   return wireObject([
     ["id", id],
@@ -1934,7 +1939,7 @@ function responseSnapshot(
     ["max_output_tokens", null],
     ["previous_response_id", previousResponseId ?? null],
     ["reasoning", null],
-    ["text", wireObject([])],
+    ["text", encodeResponsesTextConfig(outputFormat)],
     ["truncation", "disabled"],
     ["usage", status === "in_progress" ? null : responsesUsage(usage)],
   ]);

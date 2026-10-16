@@ -14,6 +14,7 @@ import type {
   ConvertedProtocolPlan,
   InferenceProtocol,
   SemanticContent,
+  SemanticOutputFormat,
   SemanticRefusal,
   SemanticResponse,
   SemanticResponseItem,
@@ -25,6 +26,7 @@ import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
 import { chatCompletionsUsageFromCounters } from "../openai_chat_completions/native.js";
 import { restoreResponsesExtendedTools } from "./request/responses_extended_tool_history.js";
+import { encodeResponsesTextConfig } from "./request/format.js";
 import {
   createResponsesToolRestorationPolicy,
   responsesToolRestorationPolicyForItem,
@@ -43,6 +45,7 @@ export interface BufferedConversionContext {
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
   readonly previousResponseId?: string | null | undefined;
+  readonly outputFormat?: SemanticOutputFormat | undefined;
   readonly degradations?: readonly ConversionDegradationRule[];
   readonly carrier?: ReasoningCarrierConversionContext | undefined;
 }
@@ -75,6 +78,7 @@ export function convertBufferedPlannedResponse(
     target: plan.source,
     model: plan.requestModel,
     degradations: plan.request.degradations,
+    outputFormat: plan.request.outputFormat,
   }, plan.request.responseBindings);
 }
 
@@ -798,7 +802,7 @@ function responsesEnvelope(
     ["max_output_tokens", null],
     ["previous_response_id", context.previousResponseId ?? null],
     ["reasoning", null],
-    ["text", wireObject([])],
+    ["text", encodeResponsesTextConfig(context.outputFormat)],
     ["truncation", "disabled"],
     ["usage", responsesUsageEnvelope(response.usage)],
   ]);
