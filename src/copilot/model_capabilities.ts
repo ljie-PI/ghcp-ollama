@@ -19,10 +19,25 @@ export function isModelCapabilityUnavailable(error: unknown): error is ModelCapa
   return error instanceof ModelCapabilityUnavailableError;
 }
 
+export class CustomToolsUnsupportedError extends Error {
+  constructor() {
+    super("model endpoint does not support custom tools");
+    this.name = "CustomToolsUnsupportedError";
+  }
+}
+
+function isCustomToolsUnsupported(error: unknown): error is CustomToolsUnsupportedError {
+  return error instanceof CustomToolsUnsupportedError;
+}
+
 export function safeCapabilityFailureMessage(cause: unknown, fallback: string): string {
-  return isModelCapabilityUnavailable(cause)
-    ? "model native protocol capability is not configured"
-    : fallback;
+  if (isModelCapabilityUnavailable(cause)) {
+    return "model native protocol capability is not configured";
+  }
+  if (isCustomToolsUnsupported(cause)) {
+    return "model endpoint does not support custom tools";
+  }
+  return fallback;
 }
 
 export interface DeclaredField<T> {
@@ -128,6 +143,12 @@ export function resolveChatOutputTokenField(
 ): ChatOutputTokenField {
   if (declared.value !== null) return declared.value;
   return /^o\d/u.test(modelId) ? "max_completion_tokens" : "max_tokens";
+}
+
+const RESPONSES_CUSTOM_TOOL_REJECTING_VENDORS: ReadonlySet<string> = new Set(["xai"]);
+
+export function supportsResponsesCustomTools(vendor: string): boolean {
+  return !RESPONSES_CUSTOM_TOOL_REJECTING_VENDORS.has(vendor.trim().toLowerCase());
 }
 
 export interface BuiltinModelCapabilities {
