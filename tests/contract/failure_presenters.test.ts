@@ -19,6 +19,7 @@ import {
 } from "../../src/protocols/openai_responses/endpoint.js";
 import { presentOpenaiResponsesFailure } from "../../src/protocols/openai_responses/failure_presenter.js";
 import { presentModelCatalogFailure } from "../../src/protocols/model_catalog/failure_presenter.js";
+import { CustomToolsUnsupportedError } from "../../src/copilot/model_capabilities.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 
@@ -83,6 +84,25 @@ describe("semantic failure presenters", () => {
       }
     },
   );
+
+  it("reports an endpoint without custom tools as a client error with a safe reason", async () => {
+    const responses = presentOpenaiResponsesFailure({
+      kind: "unsupported_semantics",
+      source: "converter",
+      phase: "convert",
+      cause: new CustomToolsUnsupportedError(),
+    }, requestId);
+
+    expect(responses.status).toBe(422);
+    expect(await responses.json()).toMatchObject({
+      error: {
+        message: "model endpoint does not support custom tools",
+        type: "invalid_request_error",
+        param: null,
+        code: null,
+      },
+    });
+  });
 
   it("keeps model-list protocol envelopes and safe headers distinct", async () => {
     const failure: GatewayFailure = {

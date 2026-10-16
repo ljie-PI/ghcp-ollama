@@ -1,10 +1,17 @@
 import {
+  CustomToolsUnsupportedError,
   ModelCapabilityUnavailableError,
   resolveModelReasoningEffort,
+  supportsResponsesCustomTools,
   type SupportedReasoningEffort,
 } from "../../copilot/model_capabilities.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
-import type { WireJsonObject } from "../../serialization/wire_json.js";
+import {
+  isWireJsonArray,
+  isWireJsonObject,
+  memberValues,
+  type WireJsonObject,
+} from "../../serialization/wire_json.js";
 import { PROTOCOL_REQUEST_CODECS } from "./request/index.js";
 import { protocolTargets } from "./routing.js";
 import { diagnosticShape } from "./diagnostics.js";
@@ -37,12 +44,7 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
   }
 
   if (plansNativeExecution(protocols, input.source, input.forcedTarget)) {
-    return observePlan(input, Object.freeze({
-      kind: "native",
-      source: input.source,
-      target: input.source,
-      stream: input.stream,
-    }));
+    return observeNativePlan(input);
   }
 
   const candidates = input.forcedTarget === undefined
@@ -71,12 +73,7 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
   let lastUnsupported: ConversionContractError | undefined;
   for (const target of orderedCandidates) {
     if (target === input.source) {
-      return observePlan(input, Object.freeze({
-        kind: "native",
-        source: input.source,
-        target,
-        stream: input.stream,
-      }));
+      return observeNativePlan(input);
     }
     try {
       const request = PROTOCOL_REQUEST_CODECS[target].encode(decoded, {
@@ -115,6 +112,37 @@ function observePlan(input: Readonly<ConversionPlanningInput>, plan: ProtocolExe
   diagnostics?.shape("planning", () => diagnosticShape(plan.kind === "converted" ? plan.request.body : input.body));
   if (plan.kind === "converted") diagnostics?.stage("planning", { degradations: plan.request.degradations });
   return plan;
+}
+
+function assertNativeCustomToolSupport(input: Readonly<ConversionPlanningInput>): void {
+  if (input.source !== "responses" || supportsResponsesCustomTools(input.capability.vendor)) {
+    return;
+  }
+  if (!declaresCustomTool(input.body)) {
+    return;
+  }
+  throw new GatewayFailureError({
+    kind: "unsupported_semantics",
+    source: "converter",
+    phase: "convert",
+    cause: new CustomToolsUnsupportedError(),
+  });
+}
+
+function observeNativePlan(input: Readonly<ConversionPlanningInput>): ProtocolExecutionPlan {
+  assertNativeCustomToolSupport(input);
+  return observePlan(input, Object.freeze({
+    kind: "native",
+    source: input.source,
+    target: input.source,
+    stream: input.stream,
+  }));
+}
+
+function declaresCustomTool(body: WireJsonObject): boolean {
+  return memberValues(body, "tools").some((tools) => isWireJsonArray(tools) && tools.items.some((tool) => (
+    isWireJsonObject(tool) && memberValues(tool, "type").some((type) => type === "custom")
+  )));
 }
 
 function reasoningTargetRank(
