@@ -184,6 +184,7 @@ export function encodedRequest(
       )),
     initiator: firstItem?.type === "message" && firstItem.role === "assistant" ? "agent" : "user",
     messagesBetaFeatures: [],
+    ...(request.outputFormat === undefined ? {} : { outputFormat: request.outputFormat }),
     degradations: [...new Set([...request.degradations, ...additionalDegradations])],
     ...(request.responseBindings === undefined ? {} : { responseBindings: request.responseBindings }),
     ...(request.carrierRecords === undefined ? {} : { carrierRecords: request.carrierRecords }),

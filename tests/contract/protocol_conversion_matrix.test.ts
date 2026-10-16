@@ -28,6 +28,13 @@ import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/d
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const nowMs = (): number => 1_700_000_000_000;
+const responseFormats = {
+  "native-chat": {
+    type: "json_schema", name: "answer", description: "Structured answer", strict: true,
+    schema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"], additionalProperties: false },
+  },
+  "native-messages": { type: "json_object" },
+} as const;
 
 function sha256(value: Uint8Array | string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -41,17 +48,20 @@ describe("protocol conversion matrix", () => {
     ["messages", "chat", "native-chat", "chat", "f94fe833f1dc8d27d8ea6284b8b85adec4fbe64e77036102c798dc477d0433ec", "64d308fc9649f96b0c3c91a2b67b985534867fd36b540bf4954c8a4db0613e7c"],
     ["messages", "messages", "native-messages", "messages", "1a79e19d0fdc2470f74d006266b801e25c706e7c90a9fde19d927b03101e2dd1", "b705096dfb09b37f8a08350426983eac6179043447f7be34eb3d51fa7a1592e6"],
     ["messages", "responses", "native-responses", "responses", "af5f8eee76f5729795320e67af44b461fca90cd4cafde8ca4d6fe7cc011f570e", "d46b24ef1e351dda996ee73c7fecc834573353e4c384831daaf75bd22971c255"],
-    ["responses", "chat", "native-chat", "chat", "4cd2995e268742a6cb8b64763c5e5c9638e4f161d1829e0ef836fcb42376a38f", "8f5ac691821257c0eba2951d2a592d2eaacece4b7394f77ae3a6caf09439f54b"],
-    ["responses", "messages", "native-messages", "messages", "9c73f197360c1da99f01cdf91ce6a4a7a4064df2742bf1256297e65e5373f0e2", "4b040b0ae407c0851042b739a782ea9fe7a600fc87883b9873971ee5c152af15"],
+    ["responses", "chat", "native-chat", "chat", "8ca1e9d89264d75efaf49118fdba874ec5b842aeed59a47022a5d98a0ca7e9e9", "06eedd7727f81e21bc5e86fe238893a2dbe8f343edf87ff607e2bb32d1215209"],
+    ["responses", "messages", "native-messages", "messages", "cfa531c8abc028e15932271f19b3016b540605570fa693136eb8579b08e2c426", "90228640cc144d494d033e51c8db1bae346c3ea8e06b076a5a147e975dff3f53"],
     ["responses", "responses", "native-responses", "responses", "236b15d11611d828e675d2d917f0f3111e6a12fd5a2b2697373044439f6e7a76", "9687d02d50f62c51ebc2b2c2516132e0cb71b18a0b65cce48c8ce62da777574e"],
   ] as const)(
     "executes %s -> %s with one typed %s operation",
     async (source, _target, model, expectedKind, requestSha256, responseSha256) => {
       const harness = await matrixGateway();
       try {
-        const response = await harness.gw.fetch(protocolRequest(source, model));
+        const textConfig = source === "responses" && model !== "native-responses"
+          ? { format: responseFormats[model] } : undefined;
+        const response = await harness.gw.fetch(protocolRequest(source, model, { text: textConfig }));
         expect(response.status).toBe(200);
         const responseText = await response.text();
+        if (textConfig !== undefined) expect(JSON.parse(responseText)).toMatchObject({ text: textConfig });
         expect(responseText).toContain("ok");
         expect(capturedOperations(harness)).toEqual([expectedKind]);
         expect(sha256(harness.upstream.requests[0]!.body)).toBe(requestSha256);
@@ -88,17 +98,28 @@ describe("protocol conversion matrix", () => {
     ["messages", "native-chat", "chat-stream", "event: message_stop", "287e373e6e9204f33a1955646438453066cfc879edef55e779412ef780e180c6", "52085aa926ca768d9f018f0b0e87c6da10cfb27222a50430876c0b120441e497"],
     ["messages", "native-messages", "messages-stream", "event: message_stop", "f7e9293da60401c3ee820ffca4c1dd233d7f2913bf30a3ed90a4a76cce98e348", "af7160d2d400a33fbae6eaaa9bcdaab14d179763eb20b4dcc26aa8b7354a2a3c"],
     ["messages", "native-responses", "responses-stream", "event: message_stop", "7c2926fdcbc3b3792956f7c65c9b37e09b6b68840b6f7f454907d6fbf0613bfc", "999b761d0c9a2bb6e95a78bcf7b19ff580578c29f4d2b5018cdf666f18c39363"],
-    ["responses", "native-chat", "chat-stream", "response.completed", "e3f466f55be31c94feddb9bb95c3fe88fb79a53c0ec158aa0b173e9f406aace9", "22239aacceb349de2313291a9c87f480c8c3068c3c9b87a63bf26cc63203be48"],
-    ["responses", "native-messages", "messages-stream", "response.completed", "7014ce488e0401aee305aa5bafcf11c97c45c0c335338d596bcc99794f0d153b", "7d7f04b5cc4b9645848925ff4cb4e4fe46820117aa2e6b32080879b1b15766ad"],
+    ["responses", "native-chat", "chat-stream", "response.completed", "7f8cbb1ef936650485d67a4f5238220470f438bc24ca105065b86d4cc8670f25", "0654b053d98979b5b18e005823f5a38f5510b226fc5c28b86c7997fceea4a41a"],
+    ["responses", "native-messages", "messages-stream", "response.completed", "f81cc5075b9437128d6440a211b81ebdf47cb2a5c89384895d0c70f7c695ac12", "de420ca70d2f783c3420183f8290b66a872ec0a0dbc27fdbc987cb334c4b6f7f"],
     ["responses", "native-responses", "responses-stream", "response.completed", "5afca6ef1c11b84fe7c12b83144cb3ea73600d19b568e53a06b3dd71a6d03914", "9a4514e28782d2afa79f6412117d306adef25554c374232a15c601ff25120ff6"],
   ] as const)(
     "streams %s through %s with one operation and an exact success terminal",
     async (source, modelId, expectedKind, terminal, requestSha256, responseSha256) => {
       const harness = await matrixGateway();
       try {
-        const response = await harness.gw.fetch(protocolRequest(source, modelId, { stream: true }));
+        const textConfig = source === "responses" && modelId !== "native-responses"
+          ? { format: responseFormats["native-chat"] } : undefined;
+        const response = await harness.gw.fetch(protocolRequest(source, modelId, { stream: true, text: textConfig }));
         expect(response.status).toBe(200);
         const text = await response.text();
+        if (textConfig !== undefined) {
+          const snapshots = text.split("\n").filter((line) => line.startsWith("data: "))
+            .map((line) => JSON.parse(line.slice(6)) as { response?: { text: unknown } })
+            .flatMap((event) => event.response === undefined ? [] : [event.response]);
+          const format = modelId === "native-messages"
+            ? { type: textConfig.format.type, name: textConfig.format.name, schema: textConfig.format.schema }
+            : textConfig.format;
+          expect(snapshots.map((snapshot) => snapshot.text)).toEqual(Array(3).fill({ format }));
+        }
         expect(text).toContain("ok");
         expect(text).toContain(terminal);
         expect(capturedOperations(harness)).toEqual([expectedKind]);

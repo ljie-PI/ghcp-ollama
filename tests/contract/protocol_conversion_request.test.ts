@@ -605,8 +605,9 @@ describe("representative request mappings", () => {
         type: "json_schema",
         json_schema: {
           name: "answer",
+          description: "Structured answer",
           schema: { type: "object", properties: { _business: { type: "integer" } } },
-          strict: true,
+          strict: false,
         },
       },
       reasoning_effort: "high",
@@ -657,6 +658,10 @@ describe("representative request mappings", () => {
           schema: { type: "object", properties: { _business: { type: "integer" } } },
         },
       },
+    });
+    expect(converted.outputFormat).toEqual({
+      kind: "json_schema", name: "answer",
+      schema: body({ type: "object", properties: { _business: { type: "integer" } } }),
     });
   });
 

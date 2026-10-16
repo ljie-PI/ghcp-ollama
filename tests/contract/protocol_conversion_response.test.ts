@@ -45,6 +45,7 @@ describe("shared conversion response codecs", () => {
       created_at: 1_700_000_000,
       model: "target",
       status: "completed",
+      text: { format: { type: "text" } },
       usage: {
         input_tokens: 11,
         output_tokens: 4,
@@ -191,8 +192,8 @@ describe("shared conversion response codecs", () => {
   });
 
   it.each([
-    ["chat", chatExtendedStream, "a40adb87aaa0054c60d4c4ec43a89217ef3f9822602e6db2b69b727ec74cdc5e"],
-    ["messages", messagesExtendedStream, "932d8a9da8c4a8a946ce5a21859c01c649dc6c231508aafe1ca2ffdd1fdb8246"],
+    ["chat", chatExtendedStream, "728cd5dfee1a01aa9004bdff02d5d5b75eed2e7055a622f8232b1ab846a5139c"],
+    ["messages", messagesExtendedStream, "36206a95330542cfb65383d761e500e38bb74697126e0771f9c0cb2f08f90637"],
   ] as const)("restores the complete ordered extended-tool %s stream", async (source, sourceWire, digest) => {
     const emissions = await collectStreamWithBindings(
       source,
@@ -200,6 +201,14 @@ describe("shared conversion response codecs", () => {
       extendedBindings(),
     );
     expect(emissionDigest(emissions)).toBe(digest);
+    const snapshots = wireText(emissions).split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as { response?: { status: string; text: unknown } })
+      .flatMap((event) => event.response === undefined ? [] : [event.response]);
+    expect(snapshots.map((snapshot) => snapshot.status)).toEqual([
+      "in_progress", "in_progress", source === "chat" ? "incomplete" : "completed",
+    ]);
+    expect(snapshots.map((snapshot) => snapshot.text)).toEqual(Array(3).fill({ format: { type: "text" } }));
     expect(emissions.filter((emission) => emission.kind === "degradation")).toEqual(
       source === "chat" ? [{ kind: "degradation", ruleId: "request.option_omitted" }] : [],
     );

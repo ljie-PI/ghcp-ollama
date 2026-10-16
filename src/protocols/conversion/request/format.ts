@@ -244,6 +244,12 @@ export function encodeChatOutputFormat(format: SemanticOutputFormat | undefined)
   ]);
 }
 
+export function encodeResponsesTextConfig(format: SemanticOutputFormat | undefined): WireJsonObject {
+  return wireObject([["format", format === undefined
+    ? wireObject([["type", "text"]])
+    : encodeResponsesOutputFormat(format)]]);
+}
+
 export function encodeResponsesOutputFormat(format: SemanticOutputFormat): WireJsonObject {
   return format.kind === "json_object"
     ? wireObject([["type", "json_object"]])
