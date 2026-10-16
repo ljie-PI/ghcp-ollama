@@ -192,8 +192,8 @@ describe("shared conversion response codecs", () => {
   });
 
   it.each([
-    ["chat", chatExtendedStream, "728cd5dfee1a01aa9004bdff02d5d5b75eed2e7055a622f8232b1ab846a5139c"],
-    ["messages", messagesExtendedStream, "36206a95330542cfb65383d761e500e38bb74697126e0771f9c0cb2f08f90637"],
+    ["chat", chatExtendedStream, "ca2b14bb682229ed96bd3f10bd6be6cd7e74c14efbb8c6b125f3f89974ad2490"],
+    ["messages", messagesExtendedStream, "9145e51349e2f6258a9cfee537a9fe76afb937af9002c964392349c0e869063d"],
   ] as const)("restores the complete ordered extended-tool %s stream", async (source, sourceWire, digest) => {
     const emissions = await collectStreamWithBindings(
       source,
@@ -201,6 +201,13 @@ describe("shared conversion response codecs", () => {
       extendedBindings(),
     );
     expect(emissionDigest(emissions)).toBe(digest);
+    const text = wireText(emissions);
+    const doneIndexes = [...text.matchAll(
+      /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
+    )].map((match) => Number(match[1]));
+    expect(doneIndexes).toEqual(source === "chat" ? [0, 1, 2, 3, 4] : [0, 1, 2, 3]);
+    expect(text.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
+    expect(text).not.toContain("response.reasoning_summary");
     const snapshots = wireText(emissions).split("\n")
       .filter((line) => line.startsWith("data: "))
       .map((line) => JSON.parse(line.slice(6)) as { response?: { status: string; text: unknown } })
@@ -405,6 +412,10 @@ function chatExtendedStream(): string {
   return [
     `data: ${JSON.stringify({
       id: "chatcmpl_extended",
+      choices: [{ index: 0, delta: { role: "assistant", content: "answer before tools" }, finish_reason: null }],
+    })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "chatcmpl_extended",
       choices: [{
         index: 0,
         delta: { tool_calls: [
@@ -416,15 +427,19 @@ function chatExtendedStream(): string {
         finish_reason: "length",
       }],
     })}\n\n`,
+    `data: ${JSON.stringify({
+      id: "chatcmpl_extended",
+      choices: [{ index: 0, delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }],
+    })}\n\n`,
     "data: [DONE]\n\n",
   ].join("");
 }
 
 function messagesExtendedStream(): string {
   const tools = [
-    { index: 0, id: "call_custom", name: "render", arguments: "{\"input\":\"hello\"}" },
-    { index: 1, id: "call_namespace", name: "ns__lookup", arguments: "{\"q\":\"x\"}" },
-    { index: 2, id: "call_search", name: "tool_search", arguments: "{\"query\":\"mail\"}" },
+    { index: 1, id: "call_custom", name: "render", arguments: "{\"input\":\"hello\"}" },
+    { index: 2, id: "call_namespace", name: "ns__lookup", arguments: "{\"q\":\"x\"}" },
+    { index: 3, id: "call_search", name: "tool_search", arguments: "{\"query\":\"mail\"}" },
   ];
   return [
     messageEvent("message_start", {
@@ -434,6 +449,13 @@ function messagesExtendedStream(): string {
         stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 },
       },
     }),
+    messageEvent("content_block_start", {
+      type: "content_block_start", index: 0, content_block: { type: "text", text: "" },
+    }),
+    messageEvent("content_block_delta", {
+      type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "answer before tools" },
+    }),
+    messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
     ...tools.flatMap((tool) => [
       messageEvent("content_block_start", {
         type: "content_block_start", index: tool.index,

@@ -15,6 +15,10 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
+import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
+import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 import type { ResponsesRequest } from "../../src/protocols/openai_responses/dto.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
@@ -58,6 +62,8 @@ class RecordingHistory implements ResponsesHistory {
     record: Readonly<ResponsesHistoryRecord>,
     _ownership: Parameters<ResponsesHistory["recordCheckpoint"]>[1],
     checkpointState: "partial" | "complete",
+    _signal: AbortSignal,
+    finalize?: (() => void) | undefined,
   ): Promise<void> {
     await this.beforeCheckpoint?.();
     if (this.failAt === "checkpoint") {
@@ -65,6 +71,7 @@ class RecordingHistory implements ResponsesHistory {
     }
     this.records.push(record);
     this.checkpointStates.push(checkpointState);
+    finalize?.();
   }
 }
 
@@ -300,6 +307,7 @@ async function streamGateway(
   options: {
     readonly runtime?: ReturnType<typeof defaultRuntimeConfigSnapshot>;
     readonly usageUpdates?: UsageUpdate[];
+    readonly reasoningCarriers?: boolean;
   } = {},
 ) {
   return await withSetupCleanup(async (own) => {
@@ -307,10 +315,23 @@ async function streamGateway(
     own(() => rm(dir, { recursive: true, force: true }));
     const database = openDatabase({
       path: path.join(dir, "state.db"),
-      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        ...(options.reasoningCarriers === true
+          ? [
+            embedMigration(historyMigration),
+            embedMigration(continuationMigration),
+            embedMigration(reasoningCarriersMigration),
+          ]
+          : []),
+      ],
       nowMs,
     });
     own(() => closeDatabase(database));
+    const reasoningCarriers = options.reasoningCarriers === true
+      ? new SqliteReasoningCarrierStore(database, { nowMs })
+      : undefined;
     const credentials = new MemoryCredentialStore();
     const accountCoordinator = new AccountCoordinator();
     const accounts = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
@@ -356,13 +377,14 @@ async function streamGateway(
       history,
       nowUnixSeconds: () => 1_700_000_000,
       createUuid: () => "00000000-0000-4000-8000-000000000001",
+      ...(reasoningCarriers === undefined ? {} : { reasoningCarriers }),
       ...(options.usageUpdates === undefined
         ? {}
         : { usageRecorder: { recordUsage: (update: UsageUpdate) => options.usageUpdates?.push(update) } }),
     })], { createRequestId: () => "req_stream" });
     own(() => gateway.close());
     return {
-      gateway, upstream: http.upstream, backend: http.backend,
+      gateway, upstream: http.upstream, backend: http.backend, reasoningCarriers,
       async close() {
         await closeAll([() => gateway.close(), () => registry.close(), () => http.close(), () => closeDatabase(database), () => rm(dir, { recursive: true, force: true })]);
       },
@@ -408,10 +430,12 @@ describe("Responses stream durability ordering", () => {
       }
     });
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"reasoning_opaque\":\"opaque-blob\"},\"finish_reason\":null}]}\n\n"),
       bytes("data: [DONE]\n\n"),
     ]) } }];
-    const opened = await streamGateway(history, expectations);
+    const opened = await streamGateway(history, expectations, { reasoningCarriers: true });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       const reader = response.body?.getReader();
@@ -431,17 +455,25 @@ describe("Responses stream durability ordering", () => {
 
       await checkpointStarted.promise;
       expect(history.records).toHaveLength(0);
-      expect(delivered).not.toContain("response.output_text.done");
-      expect(delivered).not.toContain("response.output_item.done");
+      expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
+      expect(delivered.match(/"type":"response\.output_item\.done"/gu)).toHaveLength(1);
       expect(delivered).not.toContain("response.completed");
 
       releaseCheckpoint.resolve();
       await consumption;
       expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["partial", "complete"]);
-      expect(history.records).toHaveLength(2);
-      expect(delivered).toContain("response.output_item.done");
+      expect(history.checkpointStates).toEqual(["partial", "partial", "partial", "complete"]);
+      expect(history.records).toHaveLength(4);
       expect(delivered).toContain("response.completed");
+      expect([...delivered.matchAll(
+        /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
+      )].map((match) => Number(match[1]))).toEqual([0, 1, 2]);
+      expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
+      const token = /"encrypted_content":"([^"]+)"/u.exec(delivered)?.[1];
+      if (token === undefined) {
+        throw new Error("expected a reasoning carrier token");
+      }
+      expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").wireProtocol).toBe("responses");
     } finally {
       releaseCheckpoint.resolve();
       await opened.close();

@@ -322,6 +322,41 @@ interface StreamEmitter {
   ): Iterable<ConvertedStreamEmission>;
 }
 
+interface ResponsesOutputMessageState {
+  readonly id: string;
+  readonly outputIndex: number;
+  itemAdded: boolean;
+  nextContentIndex: number;
+  textIndex?: number | undefined;
+  refusalIndex?: number | undefined;
+  /** Content accumulated from the deltas streamed for this item; the ledger records the same text. */
+  text: string;
+  refusal: string;
+  /**
+   * Set when the message can no longer receive content: its content part finished (`content_done`),
+   * a subsequent output item took over, or the terminal arrived. A message that finishes before the
+   * terminal is reported as `completed`, because the item itself is final even when the response
+   * later ends up `incomplete` (for example when a truncated turn stopped after the message).
+   */
+  closeStatus?: "completed" | "incomplete" | undefined;
+  done: boolean;
+}
+
+interface ResponsesOutputReasoningState {
+  readonly id: string;
+  readonly outputIndex: number;
+  itemAdded: boolean;
+  done: boolean;
+  closed: boolean;
+  readonly parts: Map<string, {
+    readonly presentation: "summary" | "content";
+    readonly index: number;
+    text: string;
+    started: boolean;
+  }>;
+  carrierToken?: string | undefined;
+}
+
 interface ResponsesOutputToolState {
   readonly itemId?: string | undefined;
   readonly callId: string;
@@ -1217,28 +1252,9 @@ class ResponsesEmitter implements StreamEmitter {
   private readonly createdAt: number;
   private sequence = 0;
   private nextOutputIndex = 0;
-  private readonly messages = new Map<string, {
-    readonly id: string;
-    readonly outputIndex: number;
-    itemAdded: boolean;
-    nextContentIndex: number;
-    textIndex?: number;
-    refusalIndex?: number;
-  }>();
+  private readonly messages = new Map<string, ResponsesOutputMessageState>();
   private readonly tools = new Map<string, ResponsesOutputToolState>();
-  private readonly reasoning = new Map<string, {
-    readonly id: string;
-    readonly outputIndex: number;
-    itemAdded: boolean;
-    done: boolean;
-    readonly parts: Map<string, {
-      readonly presentation: "summary" | "content";
-      readonly index: number;
-      text: string;
-      started: boolean;
-    }>;
-    carrierToken?: string | undefined;
-  }>();
+  private readonly reasoning = new Map<string, ResponsesOutputReasoningState>();
   private readonly completed = new Map<number, ReturnType<typeof wireObject>>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
@@ -1256,22 +1272,9 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *activateReserved(): Iterable<ConvertedStreamEmission> {
-    for (const message of [...this.messages.values()].sort((left, right) => left.outputIndex - right.outputIndex)) {
-      if (message.itemAdded) {
-        continue;
-      }
-      message.itemAdded = true;
-      yield this.itemEvent(
-        "response.output_item.added",
-        message.outputIndex,
-        responseMessage(message, "in_progress", "", ""),
-      );
-      if (message.textIndex !== undefined) {
-        yield this.contentEvent("response.content_part.added", message, message.textIndex, outputText(""));
-      }
-      if (message.refusalIndex !== undefined) {
-        yield this.contentEvent("response.content_part.added", message, message.refusalIndex, refusal(""));
-      }
+    for (const message of this.messages.values()) {
+      yield* this.openMessageItem(message);
+      yield* this.closeMessageItem(message);
     }
   }
 
@@ -1287,11 +1290,17 @@ class ResponsesEmitter implements StreamEmitter {
     return [];
   }
 
-  *contentDone(_orderKey: string, _contentIndex: number): Iterable<ConvertedStreamEmission> {}
+  *contentDone(orderKey: string, _contentIndex: number): Iterable<ConvertedStreamEmission> {
+    const message = this.messages.get(orderKey);
+    if (message === undefined) return;
+    message.closeStatus ??= "completed";
+    yield* this.closeMessageItem(message);
+  }
 
   *itemDone(_outputIndex: number): Iterable<ConvertedStreamEmission> {}
 
   *reasoningDelta(event: Extract<SemanticStreamEvent, { readonly kind: "reasoning_delta" }>): Iterable<ConvertedStreamEmission> {
+    yield* this.closeCompletedMessages("completed");
     const reasoning = this.ensureReasoning(event.key, event.itemId);
     if (!reasoning.itemAdded) {
       reasoning.itemAdded = true;
@@ -1346,59 +1355,20 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {
-    if (!item.parts.some((part) => part.text.length > 0) && item.opaqueState === undefined) return;
+    const visible = item.parts.some((part) => part.text.length > 0);
+    if (!visible && item.opaqueState === undefined) return;
     if (item.key === undefined) invalid();
+    if (!visible) {
+      // Opaque-only reasoning has no content to render; it is only worth an item when its carrier
+      // token can be promoted for a tool-call continuation. Whether such a token exists is only known
+      // once the terminal arrives, so the whole item (announcement included) waits for `finish`.
+      return;
+    }
     const reasoning = this.ensureReasoning(item.key, item.itemId);
     if (reasoning.done) return;
-    if (!reasoning.itemAdded) {
-      reasoning.itemAdded = true;
-      yield this.itemEvent(
-        "response.output_item.added",
-        reasoning.outputIndex,
-        responseReasoning(reasoning, "in_progress", []),
-      );
-    }
-    for (const semanticPart of item.parts) {
-      const partKey = semanticPart.key ?? `${item.key}:${semanticPart.presentation}:${semanticPart.index}`;
-      const part = reasoning.parts.get(partKey);
-      if (part === undefined || part.text !== semanticPart.text) invalid();
-      if (part.presentation === "summary") {
-        yield this.event(wireObject([
-          ["type", "response.reasoning_summary_text.done"],
-          ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", reasoning.id],
-          ["output_index", wireNumber(reasoning.outputIndex)],
-          ["summary_index", wireNumber(part.index)],
-          ["text", part.text],
-        ]));
-        yield this.event(wireObject([
-          ["type", "response.reasoning_summary_part.done"],
-          ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", reasoning.id],
-          ["output_index", wireNumber(reasoning.outputIndex)],
-          ["summary_index", wireNumber(part.index)],
-          ["part", summaryText(part.text)],
-        ]));
-      } else {
-        yield this.event(wireObject([
-          ["type", "response.reasoning_text.done"],
-          ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", reasoning.id],
-          ["output_index", wireNumber(reasoning.outputIndex)],
-          ["content_index", wireNumber(part.index)],
-          ["text", part.text],
-        ]));
-        yield this.contentEvent(
-          "response.content_part.done",
-          reasoning,
-          part.index,
-          reasoningText(part.text),
-        );
-      }
-    }
+    yield* this.reasoningWireEvents(reasoning, item);
     reasoning.done = true;
-    const completed = responseReasoning(reasoning, item.status ?? "completed", item.parts, reasoning.carrierToken);
-    this.completed.set(reasoning.outputIndex, completed);
+    const completed = this.reasoningPayload(reasoning, item, item.status ?? "completed");
     if (reasoning.carrierToken !== undefined) {
       yield {
         kind: "checkpoint",
@@ -1410,13 +1380,24 @@ class ResponsesEmitter implements StreamEmitter {
         },
       };
     }
+    // A reasoning item that carries opaque state can only complete once the terminal decided whether
+    // it has a carrier token, so its completion waits for `finish` (after any message items).
     if (this.context.carrier === undefined || item.opaqueState === undefined) {
+      reasoning.closed = true;
       yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
     }
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
-    const message = this.ensureMessage(orderKey ?? key);
+    const messageKey = orderKey ?? key;
+    if (!this.messages.has(messageKey)) {
+      // A later message item takes over the output position, so earlier messages cannot stay open.
+      yield* this.closeCompletedMessages("completed");
+    }
+    const message = this.ensureMessage(messageKey);
+    // Content of a message that already completed cannot be rendered in the Responses item model,
+    // which keeps every item's content contiguous; such an upstream stream is invalid.
+    if (message.closeStatus !== undefined) invalid();
     if (!message.itemAdded) {
       message.itemAdded = true;
       yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));
@@ -1425,6 +1406,7 @@ class ResponsesEmitter implements StreamEmitter {
       message.textIndex = message.nextContentIndex++;
       yield this.contentEvent("response.content_part.added", message, message.textIndex, outputText(""));
     }
+    message.text += delta;
     yield this.event(wireObject([
       ["type", "response.output_text.delta"],
       ["sequence_number", wireNumber(this.sequence++)],
@@ -1436,7 +1418,14 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
-    const message = this.ensureMessage(orderKey ?? key);
+    const messageKey = orderKey ?? key;
+    if (!this.messages.has(messageKey)) {
+      // See `textDelta`: earlier message items cannot stay open behind a later message item.
+      yield* this.closeCompletedMessages("completed");
+    }
+    const message = this.ensureMessage(messageKey);
+    // See `textDelta`: content of an already completed message would split its own lifecycle.
+    if (message.closeStatus !== undefined) invalid();
     if (!message.itemAdded) {
       message.itemAdded = true;
       yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));
@@ -1445,6 +1434,7 @@ class ResponsesEmitter implements StreamEmitter {
       message.refusalIndex = message.nextContentIndex++;
       yield this.contentEvent("response.content_part.added", message, message.refusalIndex, refusal(""));
     }
+    message.refusal += delta;
     yield this.event(wireObject([
       ["type", "response.refusal.delta"],
       ["sequence_number", wireNumber(this.sequence++)],
@@ -1456,6 +1446,7 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission> {
+    yield* this.closeCompletedMessages("completed");
     const policy = resolveResponsesToolRestorationPolicy(this.context.responseBindings, name, invalid);
     const tool: ResponsesOutputToolState = {
       itemId: policy.itemId(itemId, callId, this.context.createUuid),
@@ -1546,13 +1537,7 @@ class ResponsesEmitter implements StreamEmitter {
           if (item.type !== "reasoning" || item.opaqueState === undefined || item.key === undefined) continue;
           const reasoning = this.ensureReasoning(item.key, item.itemId);
           reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
-          const completed = responseReasoning(
-            reasoning,
-            item.status ?? terminal.status,
-            item.parts,
-            reasoning.carrierToken,
-          );
-          this.completed.set(reasoning.outputIndex, completed);
+          this.reasoningPayload(reasoning, item, item.status ?? terminal.status);
         }
         if (this.carrierTokens().length > 0) {
           yield {
@@ -1572,24 +1557,17 @@ class ResponsesEmitter implements StreamEmitter {
         continue;
       }
       const message = this.ensureMessage(item.key);
-      if (message.itemAdded) {
-        continue;
-      }
-      message.itemAdded = true;
-      yield this.itemEvent(
-        "response.output_item.added",
-        message.outputIndex,
-        responseMessage(message, "in_progress", "", ""),
-      );
       for (const part of item.content) {
         if (part.type === "text" && message.textIndex === undefined) {
           message.textIndex = message.nextContentIndex++;
-          yield this.contentEvent("response.content_part.added", message, message.textIndex, outputText(""));
         } else if (part.type === "refusal" && message.refusalIndex === undefined) {
           message.refusalIndex = message.nextContentIndex++;
-          yield this.contentEvent("response.content_part.added", message, message.refusalIndex, refusal(""));
         }
       }
+      yield* this.openMessageItem(message);
+    }
+    for (const message of this.messages.values()) {
+      message.closeStatus ??= terminal.status;
     }
     const output = responseOutput(items, terminal.status, this.messages, this.reasoning, this.tools);
     if (terminal.status === "completed") {
@@ -1603,59 +1581,29 @@ class ResponsesEmitter implements StreamEmitter {
         },
       };
     }
+    for (const message of this.messages.values()) {
+      yield* this.closeMessageItem(message);
+    }
     if (this.context.carrier !== undefined) {
+      // Deferred reasoning completions are flushed after the message items: a message lifecycle must
+      // stay contiguous, so it cannot be split by a completion that only became decidable at the
+      // terminal (a carrier token exists only for tool-call turns). Opaque-only reasoning is
+      // announced here as well, since it is only emitted when the turn actually carries a token.
       for (const item of items) {
-        if (item.type !== "reasoning" || item.key === undefined) continue;
+        if (item.type !== "reasoning" || item.key === undefined || item.opaqueState === undefined) continue;
         const reasoning = this.reasoning.get(item.key);
-        if (reasoning === undefined || item.opaqueState === undefined) continue;
+        if (reasoning === undefined || reasoning.closed) continue;
+        if (!reasoning.done) {
+          yield* this.reasoningWireEvents(reasoning, item);
+          reasoning.done = true;
+        }
+        reasoning.closed = true;
         yield this.itemEvent(
           "response.output_item.done",
           reasoning.outputIndex,
-          responseReasoning(reasoning, item.status ?? terminal.status, item.parts, reasoning.carrierToken),
+          this.reasoningPayload(reasoning, item, item.status ?? terminal.status),
         );
       }
-    }
-    for (const item of items) {
-      if (item.type !== "message" || item.key === undefined) {
-        continue;
-      }
-      const message = this.messages.get(item.key);
-      if (message?.itemAdded !== true) {
-        continue;
-      }
-      const text = item.content.filter((part) => part.type === "text").map((part) => part.text).join("");
-      const refused = item.content.filter((part) => part.type === "refusal").map((part) => part.text).join("");
-      this.completed.set(
-        message.outputIndex,
-        responseMessage(message, terminal.status, text, refused),
-      );
-      if (message.textIndex !== undefined) {
-        yield this.event(wireObject([
-          ["type", "response.output_text.done"],
-          ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", message.id],
-          ["output_index", wireNumber(message.outputIndex)],
-          ["content_index", wireNumber(message.textIndex)],
-          ["text", text],
-        ]));
-        yield this.contentEvent("response.content_part.done", message, message.textIndex, outputText(text));
-      }
-      if (message.refusalIndex !== undefined) {
-        yield this.event(wireObject([
-          ["type", "response.refusal.done"],
-          ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", message.id],
-          ["output_index", wireNumber(message.outputIndex)],
-          ["content_index", wireNumber(message.refusalIndex)],
-          ["refusal", refused],
-        ]));
-        yield this.contentEvent("response.content_part.done", message, message.refusalIndex, refusal(refused));
-      }
-      yield this.itemEvent(
-        "response.output_item.done",
-        message.outputIndex,
-        responseMessage(message, terminal.status, text, refused),
-      );
     }
     const finalType = terminal.status === "completed" ? "response.completed" : "response.incomplete";
     yield this.responseEvent(finalType, terminal.status, output, usage, terminal.finishReason);
@@ -1673,6 +1621,132 @@ class ResponsesEmitter implements StreamEmitter {
     }
   }
 
+  /**
+   * Announces a message item and the content parts it opened so far. Parts opened after the item was
+   * announced are reported by their own delta path.
+   */
+  private *openMessageItem(message: ResponsesOutputMessageState): Iterable<ConvertedStreamEmission> {
+    if (message.itemAdded) return;
+    message.itemAdded = true;
+    yield this.itemEvent(
+      "response.output_item.added",
+      message.outputIndex,
+      responseMessage(message, "in_progress", "", ""),
+    );
+    if (message.textIndex !== undefined) {
+      yield this.contentEvent("response.content_part.added", message, message.textIndex, outputText(""));
+    }
+    if (message.refusalIndex !== undefined) {
+      yield this.contentEvent("response.content_part.added", message, message.refusalIndex, refusal(""));
+    }
+  }
+
+  /** Emits the completion events of a message whose content is already known to be complete. */
+  private *closeMessageItem(message: ResponsesOutputMessageState): Iterable<ConvertedStreamEmission> {
+    if (message.done || message.closeStatus === undefined || !message.itemAdded) return;
+    message.done = true;
+    const completed = responseMessage(message, message.closeStatus, message.text, message.refusal);
+    this.completed.set(message.outputIndex, completed);
+    if (message.textIndex !== undefined) {
+      yield this.event(wireObject([
+        ["type", "response.output_text.done"],
+        ["sequence_number", wireNumber(this.sequence++)],
+        ["item_id", message.id],
+        ["output_index", wireNumber(message.outputIndex)],
+        ["content_index", wireNumber(message.textIndex)],
+        ["text", message.text],
+      ]));
+      yield this.contentEvent("response.content_part.done", message, message.textIndex, outputText(message.text));
+    }
+    if (message.refusalIndex !== undefined) {
+      yield this.event(wireObject([
+        ["type", "response.refusal.done"],
+        ["sequence_number", wireNumber(this.sequence++)],
+        ["item_id", message.id],
+        ["output_index", wireNumber(message.outputIndex)],
+        ["content_index", wireNumber(message.refusalIndex)],
+        ["refusal", message.refusal],
+      ]));
+      yield this.contentEvent("response.content_part.done", message, message.refusalIndex, refusal(message.refusal));
+    }
+    yield this.itemEvent("response.output_item.done", message.outputIndex, completed);
+  }
+
+  /**
+   * Completes every message still open once a subsequent output item takes over: a message can no
+   * longer receive content at that point, so its item is reported as completed in output order.
+   */
+  private *closeCompletedMessages(status: "completed" | "incomplete"): Iterable<ConvertedStreamEmission> {
+    for (const message of this.messages.values()) {
+      if (message.closeStatus !== undefined) continue;
+      message.closeStatus = status;
+      yield* this.closeMessageItem(message);
+    }
+  }
+
+  /** Announces a reasoning item if needed and closes the parts the source already finished. */
+  private *reasoningWireEvents(
+    reasoning: ResponsesOutputReasoningState,
+    item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+  ): Iterable<ConvertedStreamEmission> {
+    if (!reasoning.itemAdded) {
+      reasoning.itemAdded = true;
+      yield this.itemEvent(
+        "response.output_item.added",
+        reasoning.outputIndex,
+        responseReasoning(reasoning, "in_progress", []),
+      );
+    }
+    for (const semanticPart of item.parts) {
+      const partKey = semanticPart.key ?? `${item.key}:${semanticPart.presentation}:${semanticPart.index}`;
+      const part = reasoning.parts.get(partKey);
+      if (part === undefined || part.text !== semanticPart.text) invalid();
+      if (part.presentation === "summary") {
+        yield this.event(wireObject([
+          ["type", "response.reasoning_summary_text.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", reasoning.id],
+          ["output_index", wireNumber(reasoning.outputIndex)],
+          ["summary_index", wireNumber(part.index)],
+          ["text", part.text],
+        ]));
+        yield this.event(wireObject([
+          ["type", "response.reasoning_summary_part.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", reasoning.id],
+          ["output_index", wireNumber(reasoning.outputIndex)],
+          ["summary_index", wireNumber(part.index)],
+          ["part", summaryText(part.text)],
+        ]));
+      } else {
+        yield this.event(wireObject([
+          ["type", "response.reasoning_text.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", reasoning.id],
+          ["output_index", wireNumber(reasoning.outputIndex)],
+          ["content_index", wireNumber(part.index)],
+          ["text", part.text],
+        ]));
+        yield this.contentEvent(
+          "response.content_part.done",
+          reasoning,
+          part.index,
+          reasoningText(part.text),
+        );
+      }
+    }
+  }
+
+  private reasoningPayload(
+    reasoning: ResponsesOutputReasoningState,
+    item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+    status: "in_progress" | "completed" | "incomplete",
+  ): ReturnType<typeof wireObject> {
+    const completed = responseReasoning(reasoning, status, item.parts, reasoning.carrierToken);
+    this.completed.set(reasoning.outputIndex, completed);
+    return completed;
+  }
+
   private ensureMessage(key: string) {
     let message = this.messages.get(key);
     if (message === undefined) {
@@ -1681,6 +1755,9 @@ class ResponsesEmitter implements StreamEmitter {
         outputIndex: this.nextOutputIndex++,
         itemAdded: false,
         nextContentIndex: 0,
+        text: "",
+        refusal: "",
+        done: false,
       };
       this.messages.set(key, message);
     }
@@ -1695,6 +1772,7 @@ class ResponsesEmitter implements StreamEmitter {
         outputIndex: this.nextOutputIndex++,
         itemAdded: false,
         done: false,
+        closed: false,
         parts: new Map(),
       };
       this.reasoning.set(key, reasoning);
@@ -1845,12 +1923,7 @@ class ResponseEmissionFrontier {
 function responseOutput(
   items: readonly SemanticResponseItem[],
   status: "completed" | "incomplete",
-  messages: ReadonlyMap<string, {
-    readonly id: string;
-    readonly outputIndex: number;
-    readonly textIndex?: number;
-    readonly refusalIndex?: number;
-  }>,
+  messages: ReadonlyMap<string, ResponsesOutputMessageState>,
   reasoning: ReadonlyMap<string, {
     readonly id: string;
     readonly outputIndex: number;
@@ -1879,11 +1952,9 @@ function responseOutput(
     if (item.type === "message") {
       const message = item.key === undefined ? undefined : messages.get(item.key);
       if (message !== undefined) {
-        const text = item.content.filter((part) => part.type === "text").map((part) => part.text).join("");
-        const refused = item.content.filter((part) => part.type === "refusal").map((part) => part.text).join("");
         indexed.push({
           index: message.outputIndex,
-          item: responseMessage(message, status, text, refused),
+          item: responseMessage(message, message.closeStatus ?? status, message.text, message.refusal),
         });
       }
       continue;
@@ -1948,8 +2019,8 @@ function responseSnapshot(
 function responseMessage(
   message: {
     readonly id: string;
-    readonly textIndex?: number;
-    readonly refusalIndex?: number;
+    readonly textIndex?: number | undefined;
+    readonly refusalIndex?: number | undefined;
   },
   status: "in_progress" | "completed" | "incomplete",
   text: string,
