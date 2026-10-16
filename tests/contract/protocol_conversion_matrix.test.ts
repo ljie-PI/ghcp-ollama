@@ -99,7 +99,7 @@ describe("protocol conversion matrix", () => {
     ["messages", "native-messages", "messages-stream", "event: message_stop", "f7e9293da60401c3ee820ffca4c1dd233d7f2913bf30a3ed90a4a76cce98e348", "af7160d2d400a33fbae6eaaa9bcdaab14d179763eb20b4dcc26aa8b7354a2a3c"],
     ["messages", "native-responses", "responses-stream", "event: message_stop", "7c2926fdcbc3b3792956f7c65c9b37e09b6b68840b6f7f454907d6fbf0613bfc", "999b761d0c9a2bb6e95a78bcf7b19ff580578c29f4d2b5018cdf666f18c39363"],
     ["responses", "native-chat", "chat-stream", "response.completed", "7f8cbb1ef936650485d67a4f5238220470f438bc24ca105065b86d4cc8670f25", "0654b053d98979b5b18e005823f5a38f5510b226fc5c28b86c7997fceea4a41a"],
-    ["responses", "native-messages", "messages-stream", "response.completed", "a40f4ab7bba3ae4b92bc7bd2ae976f0e6cb390330dea077fd8220a5b62ab6a36", "7e0cb89c027cc64f099e75f1367c9296cf961a58cc19f197728f603e0905a9b2"],
+    ["responses", "native-messages", "messages-stream", "response.completed", "f81cc5075b9437128d6440a211b81ebdf47cb2a5c89384895d0c70f7c695ac12", "de420ca70d2f783c3420183f8290b66a872ec0a0dbc27fdbc987cb334c4b6f7f"],
     ["responses", "native-responses", "responses-stream", "response.completed", "5afca6ef1c11b84fe7c12b83144cb3ea73600d19b568e53a06b3dd71a6d03914", "9a4514e28782d2afa79f6412117d306adef25554c374232a15c601ff25120ff6"],
   ] as const)(
     "streams %s through %s with one operation and an exact success terminal",
@@ -107,7 +107,7 @@ describe("protocol conversion matrix", () => {
       const harness = await matrixGateway();
       try {
         const textConfig = source === "responses" && modelId !== "native-responses"
-          ? { format: responseFormats[modelId] } : undefined;
+          ? { format: responseFormats["native-chat"] } : undefined;
         const response = await harness.gw.fetch(protocolRequest(source, modelId, { stream: true, text: textConfig }));
         expect(response.status).toBe(200);
         const text = await response.text();
@@ -115,7 +115,10 @@ describe("protocol conversion matrix", () => {
           const snapshots = text.split("\n").filter((line) => line.startsWith("data: "))
             .map((line) => JSON.parse(line.slice(6)) as { response?: { text: unknown } })
             .flatMap((event) => event.response === undefined ? [] : [event.response]);
-          expect(snapshots.map((snapshot) => snapshot.text)).toEqual(Array(3).fill(textConfig));
+          const format = modelId === "native-messages"
+            ? { type: textConfig.format.type, name: textConfig.format.name, schema: textConfig.format.schema }
+            : textConfig.format;
+          expect(snapshots.map((snapshot) => snapshot.text)).toEqual(Array(3).fill({ format }));
         }
         expect(text).toContain("ok");
         expect(text).toContain(terminal);

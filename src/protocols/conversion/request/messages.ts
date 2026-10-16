@@ -341,7 +341,10 @@ export function encodeMessagesRequest(
     ["output_config", encodeMessagesOutputConfig(targetRequest.outputFormat, targetReasoning)],
     ["metadata", metadata],
   ]));
-  return encodedRequest(targetRequest, body, [...targetDegradations]);
+  const outputFormat = targetRequest.outputFormat;
+  return encodedRequest(outputFormat?.kind === "json_schema"
+    ? { ...targetRequest, outputFormat: { kind: outputFormat.kind, name: outputFormat.name, schema: outputFormat.schema } }
+    : targetRequest, body, [...targetDegradations]);
 }
 
 function encodeMessagesItems(
