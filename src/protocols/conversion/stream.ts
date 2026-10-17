@@ -1358,8 +1358,8 @@ class ResponsesEmitter implements StreamEmitter {
     const visible = item.parts.some((part) => part.text.length > 0);
     if (!visible && item.opaqueState === undefined) return;
     if (item.key === undefined) invalid();
-    if (!visible) {
-      // Opaque-only reasoning has no content to render; it is only worth an item when its carrier
+    if (!visible && this.context.source === "chat") {
+      // Opaque-only Chat reasoning has no content to render; it is only worth an item when its carrier
       // token can be promoted for a tool-call continuation. Whether such a token exists is only known
       // once the terminal arrives, so the whole item (announcement included) waits for `finish`.
       return;
@@ -1587,7 +1587,7 @@ class ResponsesEmitter implements StreamEmitter {
     if (this.context.carrier !== undefined) {
       // Deferred reasoning completions are flushed after the message items: a message lifecycle must
       // stay contiguous, so it cannot be split by a completion that only became decidable at the
-      // terminal (a carrier token exists only for tool-call turns). Opaque-only reasoning is
+      // terminal (a carrier token exists only for tool-call turns). Opaque-only Chat reasoning is
       // announced here as well, since it is only emitted when the turn actually carries a token.
       for (const item of items) {
         if (item.type !== "reasoning" || item.key === undefined || item.opaqueState === undefined) continue;

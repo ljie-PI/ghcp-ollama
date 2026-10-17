@@ -431,78 +431,91 @@ function deferred<T>(): Deferred<T> {
 }
 
 describe("Responses stream durability ordering", () => {
-  it.each(["chat", "messages"] as const)("restores opaque %s reasoning with its tool call after a streamed checkpoint", async (model) => {
-    const wire = model === "chat"
-      ? [
-        { choices: [{ delta: { content: "hi" }, finish_reason: null }] },
-        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] }, finish_reason: "tool_calls" }] },
-        { choices: [{ delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }] },
-      ].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n"
-      : [
-        { type: "message_start", message: { id: "msg_source", type: "message", role: "assistant", model, content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
-        { type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "opaque-blob" } },
-        { type: "content_block_stop", index: 0 },
-        { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} } },
-        { type: "content_block_stop", index: 1 },
-        { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
-        { type: "message_stop" },
-      ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
-    const upstreamPath = model === "chat" ? "/chat/completions" : "/v1/messages";
-    const opened = await streamGateway(undefined, [
-      { method: "POST", path: upstreamPath, body: jsonStream(true), reply: {
-        headers: { "content-type": "text/event-stream" }, body: bytes(wire),
-      } },
-      { method: "POST", path: upstreamPath, body: jsonStream(false), reply: {
-        body: bytes(JSON.stringify(model === "chat"
-          ? { choices: [{ message: { role: "assistant", content: "done" }, finish_reason: "stop" }] }
-          : { id: "msg_next", type: "message", role: "assistant", model, content: [{ type: "text", text: "done" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } })),
-      } },
-    ], { reasoningCarriers: true });
-    try {
-      const response = await opened.gateway.fetch(responsesRequest(model));
-      expect(response.status).toBe(200);
-      const delivered = await response.text();
-      expect(delivered).not.toContain("opaque-blob");
-      const completed = delivered.split("\n").find((line) => line.startsWith("data: ") && line.includes("\"type\":\"response.completed\""));
-      if (completed === undefined) throw new Error("expected a completed response");
-      const { response: { id, output } } = JSON.parse(completed.slice(6)) as {
+  it.each(([
+    { model: "chat", opaqueFirst: false },
+    { model: "chat", opaqueFirst: true },
+    { model: "messages", opaqueFirst: true },
+  ] as const).flatMap((scenario) => (["history", "output"] as const).map((continuation) => ({ ...scenario, continuation }))))(
+    "restores opaque $model reasoning with its tool call via $continuation (opaqueFirst: $opaqueFirst)",
+    async ({ model, opaqueFirst, continuation }) => {
+      const opaqueChunk = { choices: [{ delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }] };
+      const wire = model === "chat"
+        ? [
+          ...(opaqueFirst ? [opaqueChunk] : []),
+          { choices: [{ delta: { content: "hi" }, finish_reason: null }] },
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] }, finish_reason: "tool_calls" }] },
+          ...(opaqueFirst ? [] : [opaqueChunk]),
+        ].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n"
+        : [
+          { type: "message_start", message: { id: "msg_source", type: "message", role: "assistant", model, content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+          { type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "opaque-blob" } },
+          { type: "content_block_stop", index: 0 },
+          { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} } },
+          { type: "content_block_stop", index: 1 },
+          { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+          { type: "message_stop" },
+        ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+      const upstreamPath = model === "chat" ? "/chat/completions" : "/v1/messages";
+      const opened = await streamGateway(undefined, [
+        { method: "POST", path: upstreamPath, body: jsonStream(true), reply: {
+          headers: { "content-type": "text/event-stream" }, body: bytes(wire),
+        } },
+        { method: "POST", path: upstreamPath, body: jsonStream(false), reply: {
+          body: bytes(JSON.stringify(model === "chat"
+            ? { choices: [{ message: { role: "assistant", content: "done" }, finish_reason: "stop" }] }
+            : { id: "msg_next", type: "message", role: "assistant", model, content: [{ type: "text", text: "done" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } })),
+        } },
+      ], { reasoningCarriers: true });
+      try {
+        const response = await opened.gateway.fetch(responsesRequest(model));
+        expect(response.status).toBe(200);
+        const delivered = await response.text();
+        expect(delivered).not.toContain("opaque-blob");
+        const completed = delivered.split("\n").find((line) => line.startsWith("data: ") && line.includes("\"type\":\"response.completed\""));
+        if (completed === undefined) throw new Error("expected a completed response");
+        const { response: { id, output } } = JSON.parse(completed.slice(6)) as {
         response: { id: string; output: Array<{ type: string; encrypted_content?: string }> };
       };
-      expect(output.map((item) => item.type)).toEqual(model === "chat"
-        ? ["message", "function_call", "reasoning"]
-        : ["function_call", "reasoning"]);
-      const token = output.find((item) => item.type === "reasoning")?.encrypted_content;
-      if (token === undefined) throw new Error("expected a reasoning carrier token");
-      expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").sourceProtocol).toBe(model);
-      const next = await opened.gateway.fetch(new Request("http://127.0.0.1:31400/v1/responses", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model, previous_response_id: id,
-          input: [{ type: "function_call_output", call_id: "call_1", output: "ok" }],
-        }),
-      }));
-      expect(next.status).toBe(200);
-      await next.text();
-      const request = JSON.parse(new TextDecoder().decode(opened.upstream.requests[1]?.body)) as {
+        expect(output.map((item) => item.type)).toEqual(model === "chat"
+          ? ["message", "function_call", "reasoning"]
+          : ["reasoning", "function_call"]);
+        const token = output.find((item) => item.type === "reasoning")?.encrypted_content;
+        if (token === undefined) throw new Error("expected a reasoning carrier token");
+        expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").sourceProtocol).toBe(model);
+        const next = await opened.gateway.fetch(new Request("http://127.0.0.1:31400/v1/responses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model,
+            ...(continuation === "history" ? { previous_response_id: id } : {}),
+            input: [
+              ...(continuation === "output" ? output : []),
+              { type: "function_call_output", call_id: "call_1", output: "ok" },
+            ],
+          }),
+        }));
+        expect(next.status).toBe(200);
+        await next.text();
+        const request = JSON.parse(new TextDecoder().decode(opened.upstream.requests[1]?.body)) as {
         messages: Array<Record<string, unknown>>;
       };
-      if (model === "chat") {
-        expect(request.messages).toEqual([
-          { role: "assistant", content: null, reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] },
-          { role: "tool", tool_call_id: "call_1", content: "ok" },
-        ]);
-      } else {
-        expect(request.messages).toMatchObject([
-          { role: "user", content: [{ type: "text", text: "(continuing the conversation)" }] },
-          { role: "assistant", content: [{ type: "redacted_thinking", data: "opaque-blob" }, { type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
-          { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: [{ type: "text", text: "ok" }] }] },
-        ]);
+        if (model === "chat") {
+          expect(request.messages).toEqual([
+            { role: "assistant", content: continuation === "output" ? "hi" : null, reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] },
+            { role: "tool", tool_call_id: "call_1", content: "ok" },
+          ]);
+        } else {
+          expect(request.messages).toMatchObject([
+            { role: "user", content: [{ type: "text", text: "(continuing the conversation)" }] },
+            { role: "assistant", content: [{ type: "redacted_thinking", data: "opaque-blob" }, { type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: [{ type: "text", text: "ok" }] }] },
+          ]);
+        }
+      } finally {
+        await opened.close();
       }
-    } finally {
-      await opened.close();
-    }
-  });
+    },
+  );
 
   it("commits bridge stream checkpoints before completed bytes reach the caller", async () => {
     const checkpointStarted = deferred<void>();

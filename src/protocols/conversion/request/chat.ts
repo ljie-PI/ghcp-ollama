@@ -398,7 +398,6 @@ function encodeChatMessages(
       if (
         last === undefined
         || oneMember(last, "role", "REQ-INTERNAL") !== "assistant"
-        || oneMember(last, "tool_calls", "REQ-INTERNAL") !== undefined
       ) {
         output.push(wireObject([["role", "assistant"], ["content", null], ...item.opaqueState.state.members.map((member) => [member.key, member.value] as const)]));
       } else {
