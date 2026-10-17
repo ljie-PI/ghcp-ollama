@@ -521,7 +521,7 @@ describe("Responses stream durability ordering", () => {
     }
   });
 
-  it("commits bridge stream checkpoints before completed bytes reach the caller", async () => {
+  it("commits bridge checkpoints before success and keeps incomplete turns partial", async () => {
     const checkpointStarted = deferred<void>();
     const releaseCheckpoint = deferred<void>();
     let checkpointCalls = 0;
@@ -536,7 +536,17 @@ describe("Responses stream durability ordering", () => {
       bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\",\"reasoning_opaque\":\"opaque-blob\"},\"finish_reason\":null}]}\n\n"),
       bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
       bytes("data: [DONE]\n\n"),
-    ]) } }];
+    ]) } }, { method: "POST", path: "/v1/messages", body: jsonStream(true), reply: {
+      headers: { "content-type": "text/event-stream" }, body: bytes([
+        { type: "message_start", message: { id: "msg_incomplete", type: "message", role: "assistant", model: "messages", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "plan", signature: "signature" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "content_block_start", index: 1, content_block: { type: "text", text: "partial answer" } },
+        { type: "content_block_stop", index: 1 },
+        { type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+      ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("")),
+    } }];
     const opened = await streamGateway(history, expectations, { reasoningCarriers: true });
     try {
       const carriers = opened.reasoningCarriers;
@@ -583,6 +593,12 @@ describe("Responses stream durability ordering", () => {
       expect(discard).toHaveBeenCalledWith([token], expect.objectContaining({ wireProtocol: "responses" }));
       expect(() => carriers.claim(token, "github.com/1", "responses")).toThrow();
       discard.mockRestore();
+
+      const incomplete = await (await opened.gateway.fetch(responsesRequest("messages"))).text();
+      expect(incomplete).toContain("\"type\":\"response.incomplete\"");
+      expect(incomplete).not.toContain("\"type\":\"response.completed\"");
+      expect(incomplete.match(/"status":"completed","role":"assistant"/gu)).toHaveLength(2);
+      expect(history.checkpointStates.filter((state) => state === "complete")).toHaveLength(1);
     } finally {
       releaseCheckpoint.resolve();
       await opened.close();
