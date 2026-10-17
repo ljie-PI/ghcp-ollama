@@ -171,7 +171,8 @@ describe("Responses endpoint stream integration", () => {
   it.each([
     {
       item: "text",
-      upstream: "data: {\"id\":\"chatcmpl_text_truncated\",\"choices\":[{\"delta\":{\"content\":\"unfinished\"},\"finish_reason\":null}]}\n\n",
+      upstream: `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "x".repeat(2_100_000), reasoning_opaque: "opaque-blob" }, finish_reason: null }] })}\n\n`
+        + "data: {\"id\":\"chatcmpl_text_truncated\",\"choices\":[{\"delta\":{\"content\":\"unfinished\"},\"finish_reason\":null}]}\n\n",
       progressEvent: "response.output_text.delta",
     },
     {
@@ -183,7 +184,7 @@ describe("Responses endpoint stream integration", () => {
     const history = new RecordingHistory();
     const usageUpdates: UsageUpdate[] = [];
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([bytes(upstream)]) } }];
-    const opened = await streamGateway(history, expectations, { usageUpdates });
+    const opened = await streamGateway(history, expectations, { usageUpdates, reasoningCarriers: true });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       expect(response.status).toBe(200);
@@ -200,7 +201,8 @@ describe("Responses endpoint stream integration", () => {
       })()).rejects.toThrow();
 
       expect(delivered).toContain(progressEvent);
-      expect(delivered).not.toContain("response.output_item.done");
+      expect(delivered).not.toMatch(/"type":"response\.output_item\.done",[^\n]*"type":"(?:message|function_call)"/u);
+      expect(delivered).not.toContain("\"encrypted_content\"");
       expect(delivered).not.toContain("response.completed");
       expect(history.receiptStates).toEqual(["route_only"]);
       expect(history.checkpointStates).toEqual([]);

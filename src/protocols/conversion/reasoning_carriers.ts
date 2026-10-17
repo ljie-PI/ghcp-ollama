@@ -55,6 +55,8 @@ export class ReasoningCarrierError extends Error {
   }
 }
 
+export class ReasoningCarrierCapacityError extends ReasoningCarrierError {}
+
 export interface ReasoningCarrierStore {
   claim(token: string, accountId: string, wireProtocol: InferenceProtocol): ReasoningCarrierBinding;
   create(input: Readonly<{
@@ -153,7 +155,10 @@ export class SqliteReasoningCarrierStore implements ReasoningCarrierStore {
     const payloadBytes = canonicalizeWireJson(input.payload);
     const projectionBytes = canonicalizeWireJson(input.projection);
     const storedBytes = payloadBytes.byteLength + projectionBytes.byteLength;
-    if (storedBytes <= 0 || storedBytes > this.maxItemBytes) unavailable();
+    if (storedBytes <= 0) unavailable();
+    if (storedBytes > this.maxItemBytes || storedBytes > this.maxStoredBytes) {
+      throw new ReasoningCarrierCapacityError();
+    }
     const carrierId = this.createId();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(carrierId)) unavailable();
     const token = `${PREFIX}:${input.sourceKind}:${input.binding.wireProtocol}:${carrierId}`;

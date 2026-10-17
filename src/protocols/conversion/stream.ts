@@ -21,6 +21,7 @@ import type {
 import { wireArray, wireNumber, wireObject } from "./wire.js";
 import { encodeResponsesTextConfig } from "./request/format.js";
 import { managedConvertedResponseId } from "./ids.js";
+import { ReasoningCarrierCapacityError } from "./reasoning_carriers.js";
 import {
   resolveResponsesToolRestorationPolicy,
   type RestoredExtendedToolArguments,
@@ -355,6 +356,7 @@ interface ResponsesOutputReasoningState {
     started: boolean;
   }>;
   carrierToken?: string | undefined;
+  carrierCapacityError?: ReasoningCarrierCapacityError | undefined;
 }
 
 interface ResponsesOutputToolState {
@@ -1367,7 +1369,13 @@ class ResponsesEmitter implements StreamEmitter {
     const reasoning = this.ensureReasoning(item.key, item.itemId);
     if (reasoning.done) return;
     if (this.context.carrier !== undefined && item.opaqueState !== undefined) {
-      reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
+      try {
+        reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
+      } catch (error: unknown) {
+        if (!(error instanceof ReasoningCarrierCapacityError)) throw error;
+        reasoning.carrierCapacityError = error;
+        yield { kind: "degradation", ruleId: "reasoning.state_omitted" };
+      }
     }
     yield* this.reasoningWireEvents(reasoning, item);
     reasoning.done = true;
@@ -1535,6 +1543,7 @@ class ResponsesEmitter implements StreamEmitter {
         for (const item of items) {
           if (item.type !== "reasoning" || item.opaqueState === undefined || item.key === undefined) continue;
           const reasoning = this.ensureReasoning(item.key, item.itemId);
+          if (reasoning.carrierCapacityError !== undefined) throw reasoning.carrierCapacityError;
           reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
           this.reasoningPayload(reasoning, item, item.status ?? terminal.status);
         }

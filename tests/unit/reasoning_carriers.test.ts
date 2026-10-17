@@ -9,6 +9,7 @@ import { migration as historyMigration } from "../../src/persistence/migrations/
 import { migration as ownershipMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { migration as carriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import {
+  ReasoningCarrierCapacityError,
   ReasoningCarrierError,
   SqliteReasoningCarrierStore,
   type ReasoningCarrierBinding,
@@ -103,7 +104,7 @@ describe("reasoning carrier store", () => {
         state: "complete",
         payload: object({ kind: "messages_block", state: { type: "redacted_thinking", data: "界".repeat(100) } }),
         projection: object({ type: "reasoning", summary: [] }),
-      })).toThrow(ReasoningCarrierError);
+      })).toThrow(ReasoningCarrierCapacityError);
     } finally {
       closeDatabase(database);
     }
