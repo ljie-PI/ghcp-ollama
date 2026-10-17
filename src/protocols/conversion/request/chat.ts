@@ -394,7 +394,16 @@ function encodeChatMessages(
         if (text.length > 0) output.push(wireObject([["role", "assistant"], ["content", null], ["reasoning_content", text]]));
         continue;
       }
-      const last = output.at(-1);
+      let last = output.at(-1);
+      // Deferred opaque state belongs to the tool-calling assistant, not its post-tool text.
+      for (let index = output.length - 1; index >= 0; index -= 1) {
+        const candidate = output[index];
+        if (candidate === undefined || oneMember(candidate, "role", "REQ-INTERNAL") !== "assistant") break;
+        if (oneMember(candidate, "tool_calls", "REQ-INTERNAL") !== undefined) {
+          last = candidate;
+          break;
+        }
+      }
       if (
         last === undefined
         || oneMember(last, "role", "REQ-INTERNAL") !== "assistant"

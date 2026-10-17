@@ -432,18 +432,20 @@ function deferred<T>(): Deferred<T> {
 
 describe("Responses stream durability ordering", () => {
   it.each(([
-    { model: "chat", opaqueFirst: false },
-    { model: "chat", opaqueFirst: true },
-    { model: "messages", opaqueFirst: true },
+    { model: "chat", opaqueFirst: false, postToolText: false },
+    { model: "chat", opaqueFirst: true, postToolText: false },
+    { model: "chat", opaqueFirst: true, postToolText: true },
+    { model: "messages", opaqueFirst: true, postToolText: false },
   ] as const).flatMap((scenario) => (["history", "output"] as const).map((continuation) => ({ ...scenario, continuation }))))(
-    "restores opaque $model reasoning with its tool call via $continuation (opaqueFirst: $opaqueFirst)",
-    async ({ model, opaqueFirst, continuation }) => {
+    "restores opaque $model reasoning with its tool call via $continuation (opaqueFirst: $opaqueFirst, postToolText: $postToolText)",
+    async ({ model, opaqueFirst, postToolText, continuation }) => {
       const opaqueChunk = { choices: [{ delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }] };
       const wire = model === "chat"
         ? [
           ...(opaqueFirst ? [opaqueChunk] : []),
-          { choices: [{ delta: { content: "hi" }, finish_reason: null }] },
+          ...(postToolText ? [] : [{ choices: [{ delta: { content: "hi" }, finish_reason: null }] }]),
           { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] }, finish_reason: "tool_calls" }] },
+          ...(postToolText ? [{ choices: [{ delta: { content: "hi" }, finish_reason: null }] }] : []),
           ...(opaqueFirst ? [] : [opaqueChunk]),
         ].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n"
         : [
@@ -477,7 +479,7 @@ describe("Responses stream durability ordering", () => {
         response: { id: string; output: Array<{ type: string; encrypted_content?: string }> };
       };
         expect(output.map((item) => item.type)).toEqual(model === "chat"
-          ? ["message", "function_call", "reasoning"]
+          ? (postToolText ? ["function_call", "message", "reasoning"] : ["message", "function_call", "reasoning"])
           : ["reasoning", "function_call"]);
         const token = output.find((item) => item.type === "reasoning")?.encrypted_content;
         if (token === undefined) throw new Error("expected a reasoning carrier token");
@@ -501,7 +503,8 @@ describe("Responses stream durability ordering", () => {
       };
         if (model === "chat") {
           expect(request.messages).toEqual([
-            { role: "assistant", content: continuation === "output" ? "hi" : null, reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] },
+            { role: "assistant", content: continuation === "output" && !postToolText ? "hi" : null, reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] },
+            ...(continuation === "output" && postToolText ? [{ role: "assistant", content: "hi" }] : []),
             { role: "tool", tool_call_id: "call_1", content: "ok" },
           ]);
         } else {
