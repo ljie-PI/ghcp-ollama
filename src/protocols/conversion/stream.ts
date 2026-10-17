@@ -1544,7 +1544,7 @@ class ResponsesEmitter implements StreamEmitter {
             kind: "checkpoint",
             intent: {
               responseId: this.responseId,
-              output: responseOutput(items, terminal.status, this.messages, this.reasoning, this.tools),
+              output: this.checkpointOutput(items, terminal.status),
               state: "partial",
               carrierTokens: this.carrierTokens(),
             },
@@ -1575,7 +1575,7 @@ class ResponsesEmitter implements StreamEmitter {
         kind: "checkpoint",
         intent: {
           responseId: this.responseId,
-          output,
+          output: this.checkpointOutput(items, terminal.status),
           state: "complete",
           ...(this.carrierTokens().length === 0 ? {} : { carrierTokens: this.carrierTokens() }),
         },
@@ -1788,6 +1788,18 @@ class ResponsesEmitter implements StreamEmitter {
       .map(([, item]) => item);
   }
 
+  private checkpointOutput(
+    items: readonly SemanticResponseItem[],
+    status: "completed" | "incomplete",
+  ): ReturnType<typeof wireObject>[] {
+    // Replay groups associate reasoning with subsequent tools, independently of wire indices.
+    // Chat reasoning belongs to the assistant turn even when its opaque state arrives last.
+    const ordered = this.context.source === "chat"
+      ? [...items.filter((item) => item.type === "reasoning"), ...items.filter((item) => item.type !== "reasoning")]
+      : items;
+    return responseOutput(ordered, status, this.messages, this.reasoning, this.tools, "semantic");
+  }
+
   private carrierTokens(): readonly string[] {
     return [...this.reasoning.values()]
       .map((item) => item.carrierToken)
@@ -1935,6 +1947,7 @@ function responseOutput(
     readonly carrierToken?: string | undefined;
   }>,
   tools: ReadonlyMap<string, ResponsesOutputToolState>,
+  order: "wire" | "semantic" = "wire",
 ): ReturnType<typeof wireObject>[] {
   const indexed: Array<{ readonly index: number; readonly item: ReturnType<typeof wireObject> }> = [];
   for (const item of items) {
@@ -1973,7 +1986,8 @@ function responseOutput(
       });
     }
   }
-  return indexed.sort((left, right) => left.index - right.index).map((entry) => entry.item);
+  if (order === "wire") indexed.sort((left, right) => left.index - right.index);
+  return indexed.map((entry) => entry.item);
 }
 
 function responseSnapshot(
