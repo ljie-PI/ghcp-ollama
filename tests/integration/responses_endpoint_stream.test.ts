@@ -15,13 +15,18 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
+import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
+import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 import type { ResponsesRequest } from "../../src/protocols/openai_responses/dto.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
-import type {
-  ResponsesHistory,
-  ResponsesHistoryRecord,
-  ResponsesReceiptRecord,
+import {
+  SqliteResponsesHistory,
+  type ResponsesHistory,
+  type ResponsesHistoryRecord,
+  type ResponsesReceiptRecord,
 } from "../../src/protocols/openai_responses/history.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
@@ -58,6 +63,8 @@ class RecordingHistory implements ResponsesHistory {
     record: Readonly<ResponsesHistoryRecord>,
     _ownership: Parameters<ResponsesHistory["recordCheckpoint"]>[1],
     checkpointState: "partial" | "complete",
+    _signal: AbortSignal,
+    finalize?: (() => void) | undefined,
   ): Promise<void> {
     await this.beforeCheckpoint?.();
     if (this.failAt === "checkpoint") {
@@ -65,6 +72,7 @@ class RecordingHistory implements ResponsesHistory {
     }
     this.records.push(record);
     this.checkpointStates.push(checkpointState);
+    finalize?.();
   }
 }
 
@@ -295,11 +303,12 @@ describe("Responses endpoint stream integration", () => {
 });
 
 async function streamGateway(
-  history: ResponsesHistory,
+  history: ResponsesHistory | undefined,
   expectations: readonly HttpExpectation[],
   options: {
     readonly runtime?: ReturnType<typeof defaultRuntimeConfigSnapshot>;
     readonly usageUpdates?: UsageUpdate[];
+    readonly reasoningCarriers?: boolean;
   } = {},
 ) {
   return await withSetupCleanup(async (own) => {
@@ -307,10 +316,27 @@ async function streamGateway(
     own(() => rm(dir, { recursive: true, force: true }));
     const database = openDatabase({
       path: path.join(dir, "state.db"),
-      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        ...(history === undefined || options.reasoningCarriers === true
+          ? [
+            embedMigration(historyMigration),
+            embedMigration(continuationMigration),
+            embedMigration(reasoningCarriersMigration),
+          ]
+          : []),
+      ],
       nowMs,
     });
     own(() => closeDatabase(database));
+    let carrierSequence = 0;
+    const reasoningCarriers = options.reasoningCarriers === true
+      ? new SqliteReasoningCarrierStore(database, {
+        nowMs, createId: () => `00000000-0000-4000-8000-${String(++carrierSequence).padStart(12, "0")}`,
+      })
+      : undefined;
+    const responsesHistory = history ?? new SqliteResponsesHistory(database, { nowMs });
     const credentials = new MemoryCredentialStore();
     const accountCoordinator = new AccountCoordinator();
     const accounts = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
@@ -331,6 +357,14 @@ async function streamGateway(
               supported_endpoints: ["/chat/completions"],
               chat_output_token_field: "max_tokens",
             },
+            capabilities: { supports: { tool_calls: true } },
+          }, {
+            id: "messages",
+            name: "Messages",
+            vendor: "github",
+            model_picker_enabled: true,
+            model_info: { supported_endpoints: ["/v1/messages"] },
+            capabilities: { supports: { tool_calls: true } },
           }, {
             id: "native",
             name: "Native",
@@ -353,16 +387,17 @@ async function streamGateway(
       registry,
       preferences: accounts.preferences,
       copilot: http.backend,
-      history,
+      history: responsesHistory,
       nowUnixSeconds: () => 1_700_000_000,
       createUuid: () => "00000000-0000-4000-8000-000000000001",
+      ...(reasoningCarriers === undefined ? {} : { reasoningCarriers }),
       ...(options.usageUpdates === undefined
         ? {}
         : { usageRecorder: { recordUsage: (update: UsageUpdate) => options.usageUpdates?.push(update) } }),
     })], { createRequestId: () => "req_stream" });
     own(() => gateway.close());
     return {
-      gateway, upstream: http.upstream, backend: http.backend,
+      gateway, upstream: http.upstream, backend: http.backend, reasoningCarriers,
       async close() {
         await closeAll([() => gateway.close(), () => registry.close(), () => http.close(), () => closeDatabase(database), () => rm(dir, { recursive: true, force: true })]);
       },
@@ -395,7 +430,88 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
+async function resumeToolCall(
+  opened: Awaited<ReturnType<typeof streamGateway>>,
+  model: "chat" | "messages",
+  continuation: "history" | "output",
+): Promise<Array<Record<string, unknown>>> {
+  const first = await opened.gateway.fetch(responsesRequest(model));
+  const completed = (await first.text()).split("\n").find((line) =>
+    line.startsWith("data: ") && line.includes("\"type\":\"response.completed\""));
+  if (completed === undefined) throw new Error("expected a completed response");
+  const { response: { id, output } } = JSON.parse(completed.slice(6)) as {
+    response: { id: string; output: unknown[] };
+  };
+  const next = await opened.gateway.fetch(new Request("http://127.0.0.1:31400/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model,
+      ...(continuation === "history" ? { previous_response_id: id } : {}),
+      input: [...(continuation === "output" ? output : []), { type: "function_call_output", call_id: "call_1", output: "ok" }],
+    }),
+  }));
+  expect(next.status).toBe(200);
+  await next.text();
+  return (JSON.parse(new TextDecoder().decode(opened.upstream.requests[1]?.body)) as {
+    messages: Array<Record<string, unknown>>;
+  }).messages;
+}
+
 describe("Responses stream durability ordering", () => {
+  it.each(["history", "output"] as const)("keeps late Chat reasoning with its tool call via %s", async (continuation) => {
+    const wire = [
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] }, finish_reason: "tool_calls" }] },
+      { choices: [{ delta: { content: "hi" }, finish_reason: null }] },
+      { choices: [{ delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }] },
+    ].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+    const opened = await streamGateway(undefined, [
+      { method: "POST", path: "/chat/completions", body: jsonStream(true), reply: {
+        headers: { "content-type": "text/event-stream" }, body: bytes(wire),
+      } },
+      { method: "POST", path: "/chat/completions", body: jsonStream(false), reply: {
+        body: bytes("{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}"),
+      } },
+    ], { reasoningCarriers: true });
+    try {
+      const messages = await resumeToolCall(opened, "chat", continuation);
+      expect(messages.find((message) => message.tool_calls !== undefined)).toMatchObject({
+        reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1" }],
+      });
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it.each(["history", "output"] as const)("keeps Messages thinking before its tool call via %s", async (continuation) => {
+    const wire = [
+      { type: "message_start", message: { id: "msg_source", type: "message", role: "assistant", model: "messages", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "opaque-blob" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} } },
+      { type: "content_block_stop", index: 1 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+    const opened = await streamGateway(undefined, [
+      { method: "POST", path: "/v1/messages", body: jsonStream(true), reply: {
+        headers: { "content-type": "text/event-stream" }, body: bytes(wire),
+      } },
+      { method: "POST", path: "/v1/messages", body: jsonStream(false), reply: {
+        body: bytes("{\"id\":\"msg_next\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"messages\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"),
+      } },
+    ], { reasoningCarriers: true });
+    try {
+      const messages = await resumeToolCall(opened, "messages", continuation);
+      expect(messages.find((message) => message.role === "assistant")?.content).toMatchObject([
+        { type: "redacted_thinking", data: "opaque-blob" },
+        { type: "tool_use", id: "call_1" },
+      ]);
+    } finally {
+      await opened.close();
+    }
+  });
+
   it("commits bridge stream checkpoints before completed bytes reach the caller", async () => {
     const checkpointStarted = deferred<void>();
     const releaseCheckpoint = deferred<void>();
@@ -408,10 +524,12 @@ describe("Responses stream durability ordering", () => {
       }
     });
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"reasoning_opaque\":\"opaque-blob\"},\"finish_reason\":null}]}\n\n"),
       bytes("data: [DONE]\n\n"),
     ]) } }];
-    const opened = await streamGateway(history, expectations);
+    const opened = await streamGateway(history, expectations, { reasoningCarriers: true });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       const reader = response.body?.getReader();
@@ -431,17 +549,25 @@ describe("Responses stream durability ordering", () => {
 
       await checkpointStarted.promise;
       expect(history.records).toHaveLength(0);
-      expect(delivered).not.toContain("response.output_text.done");
-      expect(delivered).not.toContain("response.output_item.done");
+      expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
+      expect(delivered.match(/"type":"response\.output_item\.done"/gu)).toHaveLength(1);
       expect(delivered).not.toContain("response.completed");
 
       releaseCheckpoint.resolve();
       await consumption;
       expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["partial", "complete"]);
-      expect(history.records).toHaveLength(2);
-      expect(delivered).toContain("response.output_item.done");
+      expect(history.checkpointStates).toEqual(["partial", "partial", "partial", "complete"]);
+      expect(history.records).toHaveLength(4);
       expect(delivered).toContain("response.completed");
+      expect([...delivered.matchAll(
+        /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
+      )].map((match) => Number(match[1]))).toEqual([0, 1, 2]);
+      expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
+      const token = /"encrypted_content":"([^"]+)"/u.exec(delivered)?.[1];
+      if (token === undefined) {
+        throw new Error("expected a reasoning carrier token");
+      }
+      expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").wireProtocol).toBe("responses");
     } finally {
       releaseCheckpoint.resolve();
       await opened.close();
