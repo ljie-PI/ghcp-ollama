@@ -2,7 +2,7 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
@@ -171,7 +171,15 @@ describe("Responses endpoint stream integration", () => {
   it.each([
     {
       item: "text",
-      upstream: "data: {\"id\":\"chatcmpl_text_truncated\",\"choices\":[{\"delta\":{\"content\":\"unfinished\"},\"finish_reason\":null}]}\n\n",
+      upstream: [
+        { type: "message_start", message: { id: "msg_truncated", type: "message", role: "assistant", model: "messages", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "plan", signature: "opaque-blob" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "content_block_start", index: 1, content_block: { type: "text", text: "unfinished" } },
+        { type: "content_block_stop", index: 1 },
+        { type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+      ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
       progressEvent: "response.output_text.delta",
     },
     {
@@ -179,17 +187,17 @@ describe("Responses endpoint stream integration", () => {
       upstream: "data: {\"id\":\"chatcmpl_tool_truncated\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}\n\n",
       progressEvent: "response.function_call_arguments.delta",
     },
-  ])("does not checkpoint an unfinished $item item when the upstream truncates", async ({ upstream, progressEvent }) => {
+  ])("does not commit complete checkpoints when $item output is interrupted", async ({ item, upstream, progressEvent }) => {
     const history = new RecordingHistory();
     const usageUpdates: UsageUpdate[] = [];
-    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([bytes(upstream)]) } }];
-    const opened = await streamGateway(history, expectations, { usageUpdates });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: item === "text" ? "/v1/messages" : "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([bytes(upstream)]) } }];
+    const opened = await streamGateway(history, expectations, { usageUpdates, reasoningCarriers: true });
     try {
-      const response = await opened.gateway.fetch(responsesRequest());
+      const response = await opened.gateway.fetch(responsesRequest(item === "text" ? "messages" : "chat"));
       expect(response.status).toBe(200);
       const reader = response.body?.getReader();
       let delivered = "";
-      await expect((async () => {
+      const consumption = (async () => {
         for (;;) {
           const next = await reader?.read();
           if (next?.done !== false) {
@@ -197,16 +205,26 @@ describe("Responses endpoint stream integration", () => {
           }
           delivered += new TextDecoder().decode(next.value, { stream: true });
         }
-      })()).rejects.toThrow();
+      })();
+      if (item === "text") {
+        await consumption;
+        expect(delivered).toContain("\"type\":\"response.incomplete\"");
+        expect(delivered).toContain("\"status\":\"completed\",\"role\":\"assistant\"");
+        const token = /"encrypted_content":"([^"]+)"/u.exec(delivered)?.[1];
+        if (token === undefined) throw new Error("expected a partial reasoning carrier token");
+        expect(() => opened.reasoningCarriers?.claim(token, "github.com/1", "responses")).toThrow();
+      } else {
+        await expect(consumption).rejects.toThrow();
+        expect(delivered).not.toContain("response.output_item.done");
+      }
 
       expect(delivered).toContain(progressEvent);
-      expect(delivered).not.toContain("response.output_item.done");
       expect(delivered).not.toContain("response.completed");
       expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual([]);
-      expect(history.records).toEqual([]);
+      expect(history.checkpointStates).toEqual(item === "text" ? ["partial"] : []);
+      expect(history.records).toHaveLength(item === "text" ? 1 : 0);
       expect(usageUpdates).toHaveLength(1);
-      expect(usageUpdates).toMatchObject([{ protocol: "openai_responses_bridge", outcome: "upstream_error" }]);
+      expect(usageUpdates).toMatchObject([{ protocol: "openai_responses_bridge", outcome: item === "text" ? "success" : "upstream_error" }]);
     } finally {
       await opened.close();
     }
@@ -434,28 +452,40 @@ async function resumeToolCall(
   opened: Awaited<ReturnType<typeof streamGateway>>,
   model: "chat" | "messages",
   continuation: "history" | "output",
-): Promise<Array<Record<string, unknown>>> {
+): Promise<{ readonly messages: Array<Record<string, unknown>>; readonly wire: string }> {
   const first = await opened.gateway.fetch(responsesRequest(model));
-  const completed = (await first.text()).split("\n").find((line) =>
+  const wire = await first.text();
+  const completed = wire.split("\n").find((line) =>
     line.startsWith("data: ") && line.includes("\"type\":\"response.completed\""));
   if (completed === undefined) throw new Error("expected a completed response");
   const { response: { id, output } } = JSON.parse(completed.slice(6)) as {
     response: { id: string; output: unknown[] };
   };
+  const carriers = opened.reasoningCarriers;
+  if (carriers === undefined) throw new Error("expected a reasoning carrier store");
+  const discard = vi.spyOn(carriers, "discard");
   const next = await opened.gateway.fetch(new Request("http://127.0.0.1:31400/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       model,
+      stream: true,
       ...(continuation === "history" ? { previous_response_id: id } : {}),
       input: [...(continuation === "output" ? output : []), { type: "function_call_output", call_id: "call_1", output: "ok" }],
     }),
   }));
   expect(next.status).toBe(200);
-  await next.text();
-  return (JSON.parse(new TextDecoder().decode(opened.upstream.requests[1]?.body)) as {
+  const nextWire = await next.text();
+  const token = /"encrypted_content":"([^"]+)"/u.exec(nextWire)?.[1];
+  if (token === undefined) throw new Error("expected a provisional reasoning carrier token");
+  expect(nextWire).toContain("\"type\":\"response.completed\"");
+  expect(discard).toHaveBeenCalledWith([token], expect.objectContaining({ accountId: "github.com/1", wireProtocol: "responses" }));
+  expect(() => carriers.claim(token, "github.com/1", "responses")).toThrow();
+  discard.mockRestore();
+  const { messages } = JSON.parse(new TextDecoder().decode(opened.upstream.requests[1]?.body)) as {
     messages: Array<Record<string, unknown>>;
-  }).messages;
+  };
+  return { messages, wire };
 }
 
 describe("Responses stream durability ordering", () => {
@@ -469,12 +499,13 @@ describe("Responses stream durability ordering", () => {
       { method: "POST", path: "/chat/completions", body: jsonStream(true), reply: {
         headers: { "content-type": "text/event-stream" }, body: bytes(wire),
       } },
-      { method: "POST", path: "/chat/completions", body: jsonStream(false), reply: {
-        body: bytes("{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}"),
+      { method: "POST", path: "/chat/completions", body: jsonStream(true), reply: {
+        headers: { "content-type": "text/event-stream" },
+        body: bytes("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"next plan\",\"reasoning_opaque\":\"next-opaque\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
       } },
     ], { reasoningCarriers: true });
     try {
-      const messages = await resumeToolCall(opened, "chat", continuation);
+      const { messages } = await resumeToolCall(opened, "chat", continuation);
       expect(messages.find((message) => message.tool_calls !== undefined)).toMatchObject({
         reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1" }],
       });
@@ -486,10 +517,12 @@ describe("Responses stream durability ordering", () => {
   it.each(["history", "output"] as const)("keeps Messages thinking before its tool call via %s", async (continuation) => {
     const wire = [
       { type: "message_start", message: { id: "msg_source", type: "message", role: "assistant", model: "messages", content: [], stop_reason: null, usage: { input_tokens: 1, output_tokens: 0 } } },
-      { type: "content_block_start", index: 0, content_block: { type: "redacted_thinking", data: "opaque-blob" } },
+      { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "plan", signature: "opaque-blob" } },
       { type: "content_block_stop", index: 0 },
-      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} } },
+      { type: "content_block_start", index: 1, content_block: { type: "text", text: "hi" } },
       { type: "content_block_stop", index: 1 },
+      { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} } },
+      { type: "content_block_stop", index: 2 },
       { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
       { type: "message_stop" },
     ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
@@ -497,16 +530,31 @@ describe("Responses stream durability ordering", () => {
       { method: "POST", path: "/v1/messages", body: jsonStream(true), reply: {
         headers: { "content-type": "text/event-stream" }, body: bytes(wire),
       } },
-      { method: "POST", path: "/v1/messages", body: jsonStream(false), reply: {
-        body: bytes("{\"id\":\"msg_next\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"messages\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"),
+      { method: "POST", path: "/v1/messages", body: jsonStream(true), reply: {
+        headers: { "content-type": "text/event-stream" },
+        body: bytes([
+          { type: "message_start", message: { id: "msg_next", type: "message", role: "assistant", model: "messages", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
+          { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "next plan", signature: "next-opaque" } },
+          { type: "content_block_stop", index: 0 },
+          { type: "content_block_start", index: 1, content_block: { type: "text", text: "done" } },
+          { type: "content_block_stop", index: 1 },
+          { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+          { type: "message_stop" },
+        ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("")),
       } },
     ], { reasoningCarriers: true });
     try {
-      const messages = await resumeToolCall(opened, "messages", continuation);
-      expect(messages.find((message) => message.role === "assistant")?.content).toMatchObject([
-        { type: "redacted_thinking", data: "opaque-blob" },
+      const { messages, wire } = await resumeToolCall(opened, "messages", continuation);
+      const content = messages.find((message) => message.role === "assistant")?.content as Array<Record<string, unknown>>;
+      expect(content.filter((part) => part.type !== "text")).toMatchObject([
+        { type: "thinking", thinking: "plan", signature: "opaque-blob" },
         { type: "tool_use", id: "call_1" },
       ]);
+      expect([...wire.matchAll(
+        /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
+      )].map((match) => Number(match[1]))).toEqual([0, 1, 2]);
+      expect(wire.indexOf("\"type\":\"response.output_item.done\"")).toBeLessThan(wire.indexOf("\"type\":\"message\""));
+      expect(wire).not.toContain("opaque-blob");
     } finally {
       await opened.close();
     }
@@ -518,15 +566,15 @@ describe("Responses stream durability ordering", () => {
     let checkpointCalls = 0;
     const history = new RecordingHistory(undefined, async () => {
       checkpointCalls += 1;
-      if (checkpointCalls === 1) {
+      if (checkpointCalls === 2) {
         checkpointStarted.resolve();
         await releaseCheckpoint.promise;
       }
     });
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\",\"reasoning_opaque\":\"opaque-blob\"},\"finish_reason\":null}]}\n\n"),
       bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"),
       bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"reasoning_opaque\":\"opaque-blob\"},\"finish_reason\":null}]}\n\n"),
       bytes("data: [DONE]\n\n"),
     ]) } }];
     const opened = await streamGateway(history, expectations, { reasoningCarriers: true });
@@ -548,25 +596,27 @@ describe("Responses stream durability ordering", () => {
       })();
 
       await checkpointStarted.promise;
-      expect(history.records).toHaveLength(0);
+      expect(history.records).toHaveLength(1);
       expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
-      expect(delivered.match(/"type":"response\.output_item\.done"/gu)).toHaveLength(1);
+      expect(delivered.match(/"type":"response\.output_item\.done"/gu)).toHaveLength(2);
       expect(delivered).not.toContain("response.completed");
+      const token = /"encrypted_content":"([^"]+)"/u.exec(delivered)?.[1];
+      if (token === undefined) throw new Error("expected a partial reasoning carrier token");
+      expect(() => opened.reasoningCarriers?.claim(token, "github.com/1", "responses")).toThrow();
+      expect(delivered.indexOf("\"type\":\"response.output_item.done\"")).toBeLessThan(delivered.indexOf("\"type\":\"message\""));
 
       releaseCheckpoint.resolve();
       await consumption;
       expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["partial", "partial", "partial", "complete"]);
-      expect(history.records).toHaveLength(4);
+      expect(history.checkpointStates).toEqual(["partial", "partial", "partial", "partial", "complete"]);
+      expect(history.records).toHaveLength(5);
       expect(delivered).toContain("response.completed");
       expect([...delivered.matchAll(
         /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
       )].map((match) => Number(match[1]))).toEqual([0, 1, 2]);
       expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
-      const token = /"encrypted_content":"([^"]+)"/u.exec(delivered)?.[1];
-      if (token === undefined) {
-        throw new Error("expected a reasoning carrier token");
-      }
+      expect([...delivered.matchAll(/"encrypted_content":"([^"]+)"/gu)].map((match) => match[1])).toEqual([token, token]);
+      expect(delivered).not.toContain("opaque-blob");
       expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").wireProtocol).toBe("responses");
     } finally {
       releaseCheckpoint.resolve();

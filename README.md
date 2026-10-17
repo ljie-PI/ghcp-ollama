@@ -72,6 +72,8 @@ If the selected model is no longer available, use `ghcg models set` to select an
 
 When the selected model supports the requested API, the request is forwarded unchanged except for the model name, and Copilot validates it.
 
+For converted Responses streams, a message that finishes before an `incomplete` response keeps its `completed` item status; buffered conversion instead uses the response status for messages. Reasoning carrier tokens may appear before the response finishes, but become replayable only after a successful tool-call checkpoint. Provisional tokens from other turns are discarded.
+
 ## Configuration
 
 Global options are `--data-dir <path>` and `--json`. Startup settings use CLI values first, then environment variables, then defaults:

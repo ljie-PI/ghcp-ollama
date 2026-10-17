@@ -1366,6 +1366,9 @@ class ResponsesEmitter implements StreamEmitter {
     }
     const reasoning = this.ensureReasoning(item.key, item.itemId);
     if (reasoning.done) return;
+    if (this.context.carrier !== undefined && item.opaqueState !== undefined) {
+      reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
+    }
     yield* this.reasoningWireEvents(reasoning, item);
     reasoning.done = true;
     const completed = this.reasoningPayload(reasoning, item, item.status ?? "completed");
@@ -1380,12 +1383,8 @@ class ResponsesEmitter implements StreamEmitter {
         },
       };
     }
-    // A reasoning item that carries opaque state can only complete once the terminal decided whether
-    // it has a carrier token, so its completion waits for `finish` (after any message items).
-    if (this.context.carrier === undefined || item.opaqueState === undefined) {
-      reasoning.closed = true;
-      yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
-    }
+    reasoning.closed = true;
+    yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
@@ -1585,10 +1584,7 @@ class ResponsesEmitter implements StreamEmitter {
       yield* this.closeMessageItem(message);
     }
     if (this.context.carrier !== undefined) {
-      // Deferred reasoning completions are flushed after the message items: a message lifecycle must
-      // stay contiguous, so it cannot be split by a completion that only became decidable at the
-      // terminal (a carrier token exists only for tool-call turns). Opaque-only Chat reasoning is
-      // announced here as well, since it is only emitted when the turn actually carries a token.
+      // Opaque-only Chat reasoning still waits for a tool-call carrier before being announced.
       for (const item of items) {
         if (item.type !== "reasoning" || item.key === undefined || item.opaqueState === undefined) continue;
         const reasoning = this.reasoning.get(item.key);

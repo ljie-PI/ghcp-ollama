@@ -113,10 +113,13 @@ export async function createConvertedStreamResponse(input: {
         lifecycle.terminal === "completed"
         &&
         input.carrier !== undefined
-        && input.carrierFinalization !== "checkpoint"
         && createdCarrierTokens.size > 0
       ) {
-        input.carrier.store.promote([...createdCarrierTokens], input.carrier.binding);
+        if (input.carrierFinalization === "checkpoint") {
+          input.carrier.store.discard([...createdCarrierTokens], input.carrier.binding);
+        } else {
+          input.carrier.store.promote([...createdCarrierTokens], input.carrier.binding);
+        }
       }
       lifecycle.completed = true;
     },
