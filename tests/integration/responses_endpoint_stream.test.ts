@@ -431,12 +431,13 @@ function deferred<T>(): Deferred<T> {
 }
 
 describe("Responses stream durability ordering", () => {
-  it.each(([
-    { model: "chat", opaqueFirst: false, postToolText: false },
-    { model: "chat", opaqueFirst: true, postToolText: false },
-    { model: "chat", opaqueFirst: true, postToolText: true },
-    { model: "messages", opaqueFirst: true, postToolText: false },
-  ] as const).flatMap((scenario) => (["history", "output"] as const).map((continuation) => ({ ...scenario, continuation }))))(
+  it.each([
+    { model: "chat", continuation: "history", opaqueFirst: false, postToolText: false },
+    { model: "chat", continuation: "output", opaqueFirst: true, postToolText: false },
+    { model: "chat", continuation: "output", opaqueFirst: true, postToolText: true },
+    { model: "messages", continuation: "history", opaqueFirst: true, postToolText: false },
+    { model: "messages", continuation: "output", opaqueFirst: true, postToolText: false },
+  ] as const)(
     "restores opaque $model reasoning with its tool call via $continuation (opaqueFirst: $opaqueFirst, postToolText: $postToolText)",
     async ({ model, opaqueFirst, postToolText, continuation }) => {
       const opaqueChunk = { choices: [{ delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }] };

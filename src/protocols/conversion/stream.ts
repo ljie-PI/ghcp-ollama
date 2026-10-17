@@ -1621,10 +1621,6 @@ class ResponsesEmitter implements StreamEmitter {
     }
   }
 
-  /**
-   * Announces a message item and the content parts it opened so far. Parts opened after the item was
-   * announced are reported by their own delta path.
-   */
   private *openMessageItem(message: ResponsesOutputMessageState): Iterable<ConvertedStreamEmission> {
     if (message.itemAdded) return;
     message.itemAdded = true;
@@ -1641,7 +1637,6 @@ class ResponsesEmitter implements StreamEmitter {
     }
   }
 
-  /** Emits the completion events of a message whose content is already known to be complete. */
   private *closeMessageItem(message: ResponsesOutputMessageState): Iterable<ConvertedStreamEmission> {
     if (message.done || message.closeStatus === undefined || !message.itemAdded) return;
     message.done = true;
@@ -1672,10 +1667,6 @@ class ResponsesEmitter implements StreamEmitter {
     yield this.itemEvent("response.output_item.done", message.outputIndex, completed);
   }
 
-  /**
-   * Completes every message still open once a subsequent output item takes over: a message can no
-   * longer receive content at that point, so its item is reported as completed in output order.
-   */
   private *closeCompletedMessages(status: "completed" | "incomplete"): Iterable<ConvertedStreamEmission> {
     for (const message of this.messages.values()) {
       if (message.closeStatus !== undefined) continue;
@@ -1684,7 +1675,6 @@ class ResponsesEmitter implements StreamEmitter {
     }
   }
 
-  /** Announces a reasoning item if needed and closes the parts the source already finished. */
   private *reasoningWireEvents(
     reasoning: ResponsesOutputReasoningState,
     item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
@@ -1792,8 +1782,6 @@ class ResponsesEmitter implements StreamEmitter {
     items: readonly SemanticResponseItem[],
     status: "completed" | "incomplete",
   ): ReturnType<typeof wireObject>[] {
-    // Replay groups associate reasoning with subsequent tools, independently of wire indices.
-    // Chat reasoning belongs to the assistant turn even when its opaque state arrives last.
     const ordered = this.context.source === "chat"
       ? [...items.filter((item) => item.type === "reasoning"), ...items.filter((item) => item.type !== "reasoning")]
       : items;
