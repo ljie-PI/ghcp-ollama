@@ -2,7 +2,7 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
@@ -171,7 +171,8 @@ describe("Responses endpoint stream integration", () => {
   it.each([
     {
       item: "text",
-      upstream: "data: {\"id\":\"chatcmpl_text_truncated\",\"choices\":[{\"delta\":{\"content\":\"unfinished\"},\"finish_reason\":null}]}\n\n",
+      upstream: `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: "x".repeat(2_100_000), reasoning_opaque: "opaque-blob" }, finish_reason: null }] })}\n\n`
+        + "data: {\"id\":\"chatcmpl_text_truncated\",\"choices\":[{\"delta\":{\"content\":\"unfinished\"},\"finish_reason\":null}]}\n\n",
       progressEvent: "response.output_text.delta",
     },
     {
@@ -183,7 +184,7 @@ describe("Responses endpoint stream integration", () => {
     const history = new RecordingHistory();
     const usageUpdates: UsageUpdate[] = [];
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([bytes(upstream)]) } }];
-    const opened = await streamGateway(history, expectations, { usageUpdates });
+    const opened = await streamGateway(history, expectations, { usageUpdates, reasoningCarriers: true });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       expect(response.status).toBe(200);
@@ -200,7 +201,8 @@ describe("Responses endpoint stream integration", () => {
       })()).rejects.toThrow();
 
       expect(delivered).toContain(progressEvent);
-      expect(delivered).not.toContain("response.output_item.done");
+      expect(delivered).not.toMatch(/"type":"response\.output_item\.done",[^\n]*"type":"(?:message|function_call)"/u);
+      expect(delivered).not.toContain("\"encrypted_content\"");
       expect(delivered).not.toContain("response.completed");
       expect(history.receiptStates).toEqual(["route_only"]);
       expect(history.checkpointStates).toEqual([]);
@@ -436,12 +438,19 @@ async function resumeToolCall(
   continuation: "history" | "output",
 ): Promise<Array<Record<string, unknown>>> {
   const first = await opened.gateway.fetch(responsesRequest(model));
-  const completed = (await first.text()).split("\n").find((line) =>
+  const wire = await first.text();
+  const completed = wire.split("\n").find((line) =>
     line.startsWith("data: ") && line.includes("\"type\":\"response.completed\""));
   if (completed === undefined) throw new Error("expected a completed response");
   const { response: { id, output } } = JSON.parse(completed.slice(6)) as {
     response: { id: string; output: unknown[] };
   };
+  expect([...wire.matchAll(
+    /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
+  )].map((match) => Number(match[1]))).toEqual(output.map((_, index) => index));
+  const token = /"encrypted_content":"([^"]+)"/u.exec(wire)?.[1];
+  if (token === undefined) throw new Error("expected a completed reasoning carrier token");
+  expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").wireProtocol).toBe("responses");
   const next = await opened.gateway.fetch(new Request("http://127.0.0.1:31400/v1/responses", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -512,25 +521,37 @@ describe("Responses stream durability ordering", () => {
     }
   });
 
-  it("commits bridge stream checkpoints before completed bytes reach the caller", async () => {
+  it("commits bridge checkpoints before success and keeps incomplete turns partial", async () => {
     const checkpointStarted = deferred<void>();
     const releaseCheckpoint = deferred<void>();
     let checkpointCalls = 0;
     const history = new RecordingHistory(undefined, async () => {
       checkpointCalls += 1;
-      if (checkpointCalls === 1) {
+      if (checkpointCalls === 2) {
         checkpointStarted.resolve();
         await releaseCheckpoint.promise;
       }
     });
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"),
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"reasoning_opaque\":\"opaque-blob\"},\"finish_reason\":null}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\",\"reasoning_opaque\":\"opaque-blob\"},\"finish_reason\":null}]}\n\n"),
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
       bytes("data: [DONE]\n\n"),
-    ]) } }];
+    ]) } }, { method: "POST", path: "/v1/messages", body: jsonStream(true), reply: {
+      headers: { "content-type": "text/event-stream" }, body: bytes([
+        { type: "message_start", message: { id: "msg_incomplete", type: "message", role: "assistant", model: "messages", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "plan", signature: "signature" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "content_block_start", index: 1, content_block: { type: "text", text: "partial answer" } },
+        { type: "content_block_stop", index: 1 },
+        { type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+      ].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("")),
+    } }];
     const opened = await streamGateway(history, expectations, { reasoningCarriers: true });
     try {
+      const carriers = opened.reasoningCarriers;
+      if (carriers === undefined) throw new Error("expected a reasoning carrier store");
+      const discard = vi.spyOn(carriers, "discard");
       const response = await opened.gateway.fetch(responsesRequest());
       const reader = response.body?.getReader();
       if (reader === undefined) {
@@ -548,26 +569,36 @@ describe("Responses stream durability ordering", () => {
       })();
 
       await checkpointStarted.promise;
-      expect(history.records).toHaveLength(0);
-      expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
+      expect(history.records).toHaveLength(1);
+      expect(delivered).not.toContain("\"type\":\"response.output_text.done\"");
       expect(delivered.match(/"type":"response\.output_item\.done"/gu)).toHaveLength(1);
       expect(delivered).not.toContain("response.completed");
+      const token = /"encrypted_content":"([^"]+)"/u.exec(delivered)?.[1];
+      if (token === undefined) throw new Error("expected a partial reasoning carrier token");
+      expect(() => opened.reasoningCarriers?.claim(token, "github.com/1", "responses")).toThrow();
+      expect(delivered.indexOf("\"type\":\"response.output_item.done\"")).toBeLessThan(delivered.indexOf("\"type\":\"message\""));
 
       releaseCheckpoint.resolve();
       await consumption;
       expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["partial", "partial", "partial", "complete"]);
-      expect(history.records).toHaveLength(4);
+      expect(history.checkpointStates).toEqual(["partial", "partial", "complete"]);
+      expect(history.records).toHaveLength(3);
       expect(delivered).toContain("response.completed");
       expect([...delivered.matchAll(
         /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
-      )].map((match) => Number(match[1]))).toEqual([0, 1, 2]);
+      )].map((match) => Number(match[1]))).toEqual([0, 1]);
       expect(delivered.match(/"type":"response\.output_text\.done"/gu)).toHaveLength(1);
-      const token = /"encrypted_content":"([^"]+)"/u.exec(delivered)?.[1];
-      if (token === undefined) {
-        throw new Error("expected a reasoning carrier token");
-      }
-      expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").wireProtocol).toBe("responses");
+      expect([...delivered.matchAll(/"encrypted_content":"([^"]+)"/gu)].map((match) => match[1])).toEqual([token, token]);
+      expect(delivered).not.toContain("opaque-blob");
+      expect(discard).toHaveBeenCalledWith([token], expect.objectContaining({ wireProtocol: "responses" }));
+      expect(() => carriers.claim(token, "github.com/1", "responses")).toThrow();
+      discard.mockRestore();
+
+      const incomplete = await (await opened.gateway.fetch(responsesRequest("messages"))).text();
+      expect(incomplete).toContain("\"type\":\"response.incomplete\"");
+      expect(incomplete).not.toContain("\"type\":\"response.completed\"");
+      expect(incomplete.match(/"status":"completed","role":"assistant"/gu)).toHaveLength(2);
+      expect(history.checkpointStates.filter((state) => state === "complete")).toHaveLength(1);
     } finally {
       releaseCheckpoint.resolve();
       await opened.close();

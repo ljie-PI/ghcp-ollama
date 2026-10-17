@@ -210,7 +210,9 @@ describe("shared conversion response codecs", () => {
     expect(text).not.toContain("response.reasoning_summary");
     const snapshots = wireText(emissions).split("\n")
       .filter((line) => line.startsWith("data: "))
-      .map((line) => JSON.parse(line.slice(6)) as { response?: { status: string; text: unknown } })
+      .map((line) => JSON.parse(line.slice(6)) as {
+        response?: { status: string; text: unknown; output: Array<{ type: string; status: string }> };
+      })
       .flatMap((event) => event.response === undefined ? [] : [event.response]);
     expect(snapshots.map((snapshot) => snapshot.status)).toEqual([
       "in_progress", "in_progress", source === "chat" ? "incomplete" : "completed",
@@ -222,6 +224,20 @@ describe("shared conversion response codecs", () => {
     expect(emissions.find((emission) => emission.kind === "terminal")).toEqual({
       kind: "terminal", terminal: source === "chat" ? "incomplete" : "completed",
     });
+    if (source === "chat") {
+      expect(snapshots.at(-1)?.output.find((item) => item.type === "message")?.status).toBe("completed");
+      const buffered = decoded(convertBufferedResponse(encoder.encode(JSON.stringify({
+        choices: [{
+          message: {
+            content: "answer before tools",
+            tool_calls: [{ id: "call_custom", type: "function", function: { name: "render", arguments: "{\"input\":\"hello\",\"extra\":1}" } }],
+          },
+          finish_reason: "length",
+        }],
+      })), context("chat", "responses")).bytes);
+      expect(buffered.status).toBe("incomplete");
+      expect(buffered.output).toContainEqual(expect.objectContaining({ type: "message", status: "incomplete" }));
+    }
   });
 
   it("converts a final-only Responses stream to Chat without duplicate snapshots", async () => {

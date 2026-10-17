@@ -21,6 +21,7 @@ import type {
 import { wireArray, wireNumber, wireObject } from "./wire.js";
 import { encodeResponsesTextConfig } from "./request/format.js";
 import { managedConvertedResponseId } from "./ids.js";
+import { ReasoningCarrierCapacityError } from "./reasoning_carriers.js";
 import {
   resolveResponsesToolRestorationPolicy,
   type RestoredExtendedToolArguments,
@@ -355,6 +356,7 @@ interface ResponsesOutputReasoningState {
     started: boolean;
   }>;
   carrierToken?: string | undefined;
+  carrierCapacityError?: ReasoningCarrierCapacityError | undefined;
 }
 
 interface ResponsesOutputToolState {
@@ -1366,6 +1368,15 @@ class ResponsesEmitter implements StreamEmitter {
     }
     const reasoning = this.ensureReasoning(item.key, item.itemId);
     if (reasoning.done) return;
+    if (this.context.carrier !== undefined && item.opaqueState !== undefined) {
+      try {
+        reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
+      } catch (error: unknown) {
+        if (!(error instanceof ReasoningCarrierCapacityError)) throw error;
+        reasoning.carrierCapacityError = error;
+        yield { kind: "degradation", ruleId: "reasoning.state_omitted" };
+      }
+    }
     yield* this.reasoningWireEvents(reasoning, item);
     reasoning.done = true;
     const completed = this.reasoningPayload(reasoning, item, item.status ?? "completed");
@@ -1380,12 +1391,8 @@ class ResponsesEmitter implements StreamEmitter {
         },
       };
     }
-    // A reasoning item that carries opaque state can only complete once the terminal decided whether
-    // it has a carrier token, so its completion waits for `finish` (after any message items).
-    if (this.context.carrier === undefined || item.opaqueState === undefined) {
-      reasoning.closed = true;
-      yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
-    }
+    reasoning.closed = true;
+    yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
@@ -1536,6 +1543,7 @@ class ResponsesEmitter implements StreamEmitter {
         for (const item of items) {
           if (item.type !== "reasoning" || item.opaqueState === undefined || item.key === undefined) continue;
           const reasoning = this.ensureReasoning(item.key, item.itemId);
+          if (reasoning.carrierCapacityError !== undefined) throw reasoning.carrierCapacityError;
           reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
           this.reasoningPayload(reasoning, item, item.status ?? terminal.status);
         }
@@ -1585,10 +1593,7 @@ class ResponsesEmitter implements StreamEmitter {
       yield* this.closeMessageItem(message);
     }
     if (this.context.carrier !== undefined) {
-      // Deferred reasoning completions are flushed after the message items: a message lifecycle must
-      // stay contiguous, so it cannot be split by a completion that only became decidable at the
-      // terminal (a carrier token exists only for tool-call turns). Opaque-only Chat reasoning is
-      // announced here as well, since it is only emitted when the turn actually carries a token.
+      // Opaque-only Chat reasoning still waits for a tool-call carrier before being announced.
       for (const item of items) {
         if (item.type !== "reasoning" || item.key === undefined || item.opaqueState === undefined) continue;
         const reasoning = this.reasoning.get(item.key);
