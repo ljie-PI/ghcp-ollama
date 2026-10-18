@@ -2,7 +2,7 @@ import { GatewayFailureError } from "../../gateway/failures.js";
 import { encodeAnthropicMessagesSseEvent } from "../anthropic_messages/wire.js";
 import { encodeOpenaiChatCompletionsDone, encodeOpenaiChatCompletionsSseChunk } from "../openai_chat_completions/wire.js";
 import { encodeOpenaiResponsesSseEvent } from "../openai_responses/wire.js";
-import { SemanticItemLedger } from "./ledger.js";
+import { SemanticItemLedger, sameOpaqueState } from "./ledger.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import { diagnosticObjectShape, diagnosticShape } from "./diagnostics.js";
 import { decodeProtocolStream } from "./stream_decoders.js";
@@ -27,7 +27,7 @@ import {
   type RestoredExtendedToolArguments,
   type ResponsesToolRestorationPolicy,
 } from "./request/responses_extended_tool_restoration.js";
-import type { SemanticReasoningItem } from "./types.js";
+import type { SemanticOpaqueReasoningState, SemanticReasoningItem } from "./types.js";
 import {
   responseMessageKey,
   responseMessagePartKey,
@@ -356,6 +356,7 @@ interface ResponsesOutputReasoningState {
     started: boolean;
   }>;
   carrierToken?: string | undefined;
+  carrierMintedState?: SemanticOpaqueReasoningState | undefined;
   carrierCapacityError?: ReasoningCarrierCapacityError | undefined;
 }
 
@@ -1370,7 +1371,7 @@ class ResponsesEmitter implements StreamEmitter {
     if (reasoning.done) return;
     if (this.context.carrier !== undefined && item.opaqueState !== undefined) {
       try {
-        reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
+        this.refreshReasoningCarrier(reasoning, item);
       } catch (error: unknown) {
         if (!(error instanceof ReasoningCarrierCapacityError)) throw error;
         reasoning.carrierCapacityError = error;
@@ -1544,7 +1545,12 @@ class ResponsesEmitter implements StreamEmitter {
           if (item.type !== "reasoning" || item.opaqueState === undefined || item.key === undefined) continue;
           const reasoning = this.ensureReasoning(item.key, item.itemId);
           if (reasoning.carrierCapacityError !== undefined) throw reasoning.carrierCapacityError;
-          reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
+          try {
+            this.refreshReasoningCarrier(reasoning, item);
+          } catch (error: unknown) {
+            // A first mint stays fatal; a re-mint that exceeds capacity keeps the previous carrier.
+            if (reasoning.carrierMintedState === undefined || !(error instanceof ReasoningCarrierCapacityError)) throw error;
+          }
           this.reasoningPayload(reasoning, item, item.status ?? terminal.status);
         }
         if (this.carrierTokens().length > 0) {
@@ -1576,6 +1582,22 @@ class ResponsesEmitter implements StreamEmitter {
     }
     for (const message of this.messages.values()) {
       message.closeStatus ??= terminal.status;
+    }
+    if (this.context.carrier !== undefined) {
+      // Re-mint carriers whose recorded state was extended after reasoning_done (e.g. a late reasoning_opaque).
+      for (const item of items) {
+        if (item.type !== "reasoning" || item.opaqueState === undefined || item.key === undefined) continue;
+        const reasoning = this.reasoning.get(item.key);
+        if (reasoning === undefined || reasoning.carrierToken === undefined) continue;
+        let refreshed = false;
+        try {
+          refreshed = this.refreshReasoningCarrier(reasoning, item);
+        } catch (error: unknown) {
+          // Keep the previously minted carrier when the extended state does not fit.
+          if (!(error instanceof ReasoningCarrierCapacityError)) throw error;
+        }
+        if (refreshed) this.reasoningPayload(reasoning, item, item.status ?? terminal.status);
+      }
     }
     const output = responseOutput(items, terminal.status, this.messages, this.reasoning, this.tools);
     if (terminal.status === "completed") {
@@ -1730,6 +1752,21 @@ class ResponsesEmitter implements StreamEmitter {
         );
       }
     }
+  }
+
+  private refreshReasoningCarrier(
+    reasoning: ResponsesOutputReasoningState,
+    item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+  ): boolean {
+    if (item.opaqueState === undefined) return false;
+    if (reasoning.carrierToken !== undefined
+      && reasoning.carrierMintedState !== undefined
+      && sameOpaqueState(reasoning.carrierMintedState, item.opaqueState)) {
+      return false;
+    }
+    reasoning.carrierToken = createStreamCarrier(item, this.context, "responses", this.responseId);
+    reasoning.carrierMintedState = item.opaqueState;
+    return true;
   }
 
   private reasoningPayload(

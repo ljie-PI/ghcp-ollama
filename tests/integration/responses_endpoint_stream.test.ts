@@ -19,6 +19,7 @@ import { migration as historyMigration } from "../../src/persistence/migrations/
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
+import { isWireJsonObject, memberValues } from "../../src/serialization/wire_json.js";
 import type { ResponsesRequest } from "../../src/protocols/openai_responses/dto.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
@@ -448,8 +449,10 @@ async function resumeToolCall(
   expect([...wire.matchAll(
     /"type":"response\.output_item\.done","sequence_number":\d+,"output_index":(\d+)/gu,
   )].map((match) => Number(match[1]))).toEqual(output.map((_, index) => index));
-  const token = /"encrypted_content":"([^"]+)"/u.exec(wire)?.[1];
-  if (token === undefined) throw new Error("expected a completed reasoning carrier token");
+  const token = (output as Array<Record<string, unknown>>)
+    .find((item) => item?.type === "reasoning")
+    ?.encrypted_content;
+  if (typeof token !== "string") throw new Error("expected a completed reasoning carrier token");
   expect(opened.reasoningCarriers?.claim(token, "github.com/1", "responses").wireProtocol).toBe("responses");
   const next = await opened.gateway.fetch(new Request("http://127.0.0.1:31400/v1/responses", {
     method: "POST",
@@ -487,6 +490,60 @@ describe("Responses stream durability ordering", () => {
       expect(messages.find((message) => message.tool_calls !== undefined)).toMatchObject({
         reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1" }],
       });
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it.each(["history", "output"] as const)("keeps a late Chat opaque state after visible reasoning closes via %s", async (continuation) => {
+    const wire = [
+      { choices: [{ delta: { reasoning_content: "plan" }, finish_reason: null }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }] }, finish_reason: "tool_calls" }] },
+      { choices: [{ delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }] },
+    ].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+    const opened = await streamGateway(undefined, [
+      { method: "POST", path: "/chat/completions", body: jsonStream(true), reply: {
+        headers: { "content-type": "text/event-stream" }, body: bytes(wire),
+      } },
+      { method: "POST", path: "/chat/completions", body: jsonStream(false), reply: {
+        body: bytes("{\"choices\":[{\"message\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}"),
+      } },
+    ], { reasoningCarriers: true });
+    try {
+      const messages = await resumeToolCall(opened, "chat", continuation);
+      expect(messages.find((message) => message.tool_calls !== undefined)).toMatchObject({
+        reasoning_content: "plan", reasoning_opaque: "opaque-blob", tool_calls: [{ id: "call_1" }],
+      });
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it("keeps a late Chat opaque state after a text close", async () => {
+    const wire = [
+      { choices: [{ delta: { reasoning_content: "plan" }, finish_reason: null }] },
+      { choices: [{ delta: { content: "hi" }, finish_reason: "stop" }] },
+      { choices: [{ delta: { reasoning_opaque: "opaque-blob" }, finish_reason: null }] },
+    ].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+    const opened = await streamGateway(undefined, [
+      { method: "POST", path: "/chat/completions", body: jsonStream(true), reply: {
+        headers: { "content-type": "text/event-stream" }, body: bytes(wire),
+      } },
+    ], { reasoningCarriers: true });
+    try {
+      const carriers = opened.reasoningCarriers;
+      if (carriers === undefined) throw new Error("expected a reasoning carrier store");
+      // Text-only turns never promote carriers (tool-gated), so assert the final mint at the store boundary.
+      const create = vi.spyOn(carriers, "create");
+      const response = await opened.gateway.fetch(responsesRequest());
+      expect(response.status).toBe(200);
+      const delivered = await response.text();
+      expect(delivered).toContain("\"type\":\"response.completed\"");
+      const lastPayload = create.mock.calls.at(-1)?.[0].payload;
+      const finalState = lastPayload === undefined ? undefined : memberValues(lastPayload, "state")[0];
+      if (finalState === undefined || !isWireJsonObject(finalState)) throw new Error("expected a chat_state carrier payload");
+      expect(memberValues(finalState, "reasoning_content")).toEqual(["plan"]);
+      expect(memberValues(finalState, "reasoning_opaque")).toEqual(["opaque-blob"]);
     } finally {
       await opened.close();
     }
