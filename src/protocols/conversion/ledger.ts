@@ -1,5 +1,5 @@
 import { GatewayFailureError } from "../../gateway/failures.js";
-import { isWireJsonObject, parseWireJson, type WireJsonObject } from "../../serialization/wire_json.js";
+import { isWireJsonObject, memberValues, parseWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
 import type {
   SemanticOpaqueReasoningState,
@@ -494,6 +494,9 @@ export class SemanticItemLedger {
       if (reasoning.opaqueState !== undefined && !sameOpaqueState(reasoning.opaqueState, opaqueState)) {
         if (reasoning.frozen && opaqueState.kind === "responses_item") {
           this.reserveOpaqueState(opaqueState);
+        } else if (reasoning.frozen && extendsChatOpaqueState(reasoning.opaqueState, opaqueState)) {
+          // A frozen Chat item may still receive a monotone extension (e.g. a late reasoning_opaque).
+          this.rebindOpaqueState(reasoning.opaqueState, opaqueState);
         } else {
           invalid();
         }
@@ -506,9 +509,7 @@ export class SemanticItemLedger {
   }
 
   private reserveOpaqueState(state: SemanticOpaqueReasoningState): void {
-    const value = state.kind === "responses_item" ? state.item
-      : state.kind === "messages_block" ? state.block : state.state;
-    this.usedBytes += canonicalizeWireJson(value).byteLength;
+    this.usedBytes += opaqueStateByteLength(state);
     if (this.usedBytes > this.maxBytes) {
       throw new GatewayFailureError({
         kind: "invalid_upstream_response",
@@ -516,6 +517,12 @@ export class SemanticItemLedger {
         phase: "stream",
       });
     }
+  }
+
+  // Rebinds the byte reservation to the extended snapshot, charging only the growth.
+  private rebindOpaqueState(previous: SemanticOpaqueReasoningState, next: SemanticOpaqueReasoningState): void {
+    this.usedBytes -= opaqueStateByteLength(previous);
+    this.reserveOpaqueState(next);
   }
 }
 
@@ -526,16 +533,24 @@ function sameMessagesState(left: SemanticMessagesReasoningState, right: Semantic
       : left.data === (right as typeof left).data);
 }
 
-function sameOpaqueState(left: SemanticOpaqueReasoningState, right: SemanticOpaqueReasoningState): boolean {
+export function sameOpaqueState(left: SemanticOpaqueReasoningState, right: SemanticOpaqueReasoningState): boolean {
   if (left.kind !== right.kind) return false;
   const leftValue = left.kind === "responses_item" ? normalizedResponseOpaqueItem(left.item)
     : left.kind === "messages_block" ? left.block : left.state;
   const rightValue = right.kind === "responses_item" ? normalizedResponseOpaqueItem(right.item)
     : right.kind === "messages_block" ? right.block : right.state;
-  const leftBytes = canonicalizeWireJson(leftValue);
-  const rightBytes = canonicalizeWireJson(rightValue);
-  return leftBytes.byteLength === rightBytes.byteLength
-    && leftBytes.every((value, index) => value === rightBytes[index]);
+  return sameWireJsonBytes(canonicalizeWireJson(leftValue), canonicalizeWireJson(rightValue));
+}
+
+function opaqueStateByteLength(state: SemanticOpaqueReasoningState): number {
+  const value = state.kind === "responses_item" ? state.item
+    : state.kind === "messages_block" ? state.block : state.state;
+  return canonicalizeWireJson(value).byteLength;
+}
+
+function sameWireJsonBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength
+    && left.every((value, index) => value === right[index]);
 }
 
 function normalizedResponseOpaqueItem(item: WireJsonObject): WireJsonObject {
@@ -543,6 +558,28 @@ function normalizedResponseOpaqueItem(item: WireJsonObject): WireJsonObject {
     kind: "object",
     members: item.members.filter((member) => member.key !== "id" && member.key !== "status"),
   };
+}
+
+function extendsChatOpaqueState(
+  existing: SemanticOpaqueReasoningState,
+  incoming: SemanticOpaqueReasoningState,
+): boolean {
+  if (existing.kind !== "chat_state" || incoming.kind !== "chat_state") return false;
+  for (const member of existing.state.members) {
+    const candidates = memberValues(incoming.state, member.key);
+    if (candidates.length === 0) return false;
+    const accepted = member.key === "reasoning_content"
+      ? candidates.some((value) => (
+        typeof member.value === "string" && typeof value === "string" && value.startsWith(member.value)
+      ))
+      : candidates.some((value) => sameWireJsonValue(member.value, value));
+    if (!accepted) return false;
+  }
+  return true;
+}
+
+function sameWireJsonValue(left: WireJson, right: WireJson): boolean {
+  return sameWireJsonBytes(canonicalizeWireJson(left), canonicalizeWireJson(right));
 }
 
 function compareResponseItemKeys(
