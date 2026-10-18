@@ -24,7 +24,6 @@ export interface AgentManagerOptions {
 export class FileAgentsManager implements AgentsManager {
   private readonly home: string;
   private readonly root: string;
-  private readonly legacyRoot: string;
   private readonly paths: Record<AgentId, readonly string[]>;
   private readonly busy = new Set<AgentId>();
   private closed = false;
@@ -37,7 +36,6 @@ export class FileAgentsManager implements AgentsManager {
     this.home = fs.realpathSync.native(path.resolve(options.home ?? os.homedir()));
     const dataDir = path.resolve(options.dataDir ?? path.join(this.home, ".ghc-gateway"));
     this.root = path.join(dataDir, "agents");
-    this.legacyRoot = path.join(this.home, ".ghc-gateway-agents");
     const env = options.env ?? {};
     const claude = path.resolve(env.CLAUDE_CONFIG_DIR ?? path.join(this.home, ".claude"));
     const codex = path.resolve(env.CODEX_HOME ?? path.join(this.home, ".codex"));
@@ -75,7 +73,7 @@ export class FileAgentsManager implements AgentsManager {
       validateMappings(request.agent, request.mappings);
       const store = this.store(request.agent);
       // Parse and validate BEFORE making a recovery directory or lock file.
-      const initial = this.upgradeState(request.agent, await this.readInitialState(store));
+      const initial = await store.read();
       const paths = this.targetPaths(request.agent, initial);
       const before = await this.images(paths, initial);
       this.requireRevision(request.expectedRevision, initial, paths, origin);
@@ -84,10 +82,10 @@ export class FileAgentsManager implements AgentsManager {
       signal.throwIfAborted();
       assertCurrent();
       return await store.locked(async (save) => {
-        let state = await store.read();
+        const state = await store.read();
         let livePaths = this.targetPaths(request.agent, state);
         let current = await this.images(livePaths, state);
-        this.requireRevision(request.expectedRevision, this.upgradeState(request.agent, state), this.targetPaths(request.agent, state), origin);
+        this.requireRevision(request.expectedRevision, state, this.targetPaths(request.agent, state), origin);
         assertCurrent();
         signal.throwIfAborted();
         const recovering = state.pending !== null;
@@ -96,7 +94,6 @@ export class FileAgentsManager implements AgentsManager {
           await this.execute(request.agent, state, save);
           await this.finish(request.agent, state, save);
         }
-        state = this.upgradeState(request.agent, state);
         livePaths = this.targetPaths(request.agent, state);
         current = await this.images(livePaths, state);
         if (initial.pending === null) this.requireRevision(request.expectedRevision, state, livePaths, origin);
@@ -150,7 +147,6 @@ export class FileAgentsManager implements AgentsManager {
     state.targets = paths.map((target, index) => ({
       path: target, original: current[index]!, expected: current[index]!, backups: [],
     }));
-    state.version = 4;
     return current;
   }
 
@@ -233,7 +229,7 @@ export class FileAgentsManager implements AgentsManager {
     let takeover: AgentStatus["takeover"] = null;
     const images: (FileImage | null)[] = [];
     try {
-      state = this.upgradeState(agent, inspection?.state ?? await this.store(agent).read());
+      state = inspection?.state ?? await this.store(agent).read();
       paths = inspection?.paths ?? this.fallbackTargetPaths(agent, state);
       if (inspection?.images !== undefined) {
         images.push(...inspection.images);
@@ -293,54 +289,27 @@ export class FileAgentsManager implements AgentsManager {
       endpoint: agent === "claude" ? origin : `${origin}/v1`,
       backupAvailable,
       lastAppliedAt: state?.lastAppliedAt ?? null,
-      mappings: state?.version === 1 && agent === "claude" ? state.mappings.slice(0, 3) : state?.mappings ?? [],
+      mappings: state?.mappings ?? [],
       takeover,
     };
   }
 
   private store(agent: AgentId): AgentStore {
-    return new AgentStore(this.root, agent, this.legacyRoot);
-  }
-
-  private async readInitialState(store: AgentStore): Promise<AgentState> {
-    try { return await store.read(); } catch (error: unknown) {
-      if (!(error instanceof AgentError && error.code === "agent_recovery_required")) throw error;
-      return await store.locked<AgentState>(async () => {
-        await store.read();
-        throw new AgentError("agent_busy");
-      });
-    }
+    return new AgentStore(this.root, agent);
   }
 
   private backupAvailable(agent: AgentId, state: AgentState): boolean {
-    if (state.version === 4 && state.targets.length > 0) {
-      const tracked = state.targets.flatMap((target) => (target.backups ?? []).map((backup) => backup.path));
-      const pending = state.pending?.steps.flatMap((step) => step.backup === undefined ? [] : [step.backup]) ?? [];
+    if (state.targets.length > 0) {
+      const tracked = state.targets.flatMap((target) => target.backups.map((backup) => backup.path));
+      const pending = state.pending?.steps.map((step) => step.backup) ?? [];
       return [...tracked, ...pending].some(exists);
     }
     return this.liveConfigurationPaths(agent, state).some((target) => this.timestampBackups(target).length > 0);
   }
 
-  private upgradeState(agent: AgentId, state: AgentState): AgentState {
-    if (state.version === 4) {
-      for (const target of state.targets) target.backups ??= [];
-      return state;
-    }
-    if (state.pending !== null) return state;
-    if (agent === "claude" && state.version === 1) state.mappings = state.mappings.slice(0, 3);
-    if (state.targets.length > 0) {
-      state.targets = (agent === "claude" ? state.targets.slice(-1) : state.targets.slice(-2))
-        .map((target) => ({ ...target, backups: [] }));
-    }
-    state.version = 4;
-    return state;
-  }
-
   private liveConfigurationPaths(agent: AgentId, state: AgentState): readonly string[] {
     if (state.targets.length === 0) return this.paths[agent].map(canonical);
-    const targets = state.version === 4 ? state.targets
-      : agent === "claude" ? state.targets.slice(-1) : state.targets.slice(-2);
-    return targets.map((target) => process.platform === "win32"
+    return state.targets.map((target) => process.platform === "win32"
       ? path.resolve(target.path).toLowerCase() : path.resolve(target.path));
   }
 
@@ -366,12 +335,7 @@ export class FileAgentsManager implements AgentsManager {
     while (!exists(parent)) parent = path.dirname(parent);
     await assertOwned(parent, true);
     const stage = state?.pending?.steps.find((step) => step.target === index);
-    const image = await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"));
-    if (state !== undefined && state.version !== 1 && state.version !== 4 && state.targets.length > 0
-      && (index === 0 || state.version === 3 && state.targets.length === 4 && index === 1) && image !== null) {
-      await assertPrivate(target, false);
-    }
-    return image;
+    return await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"));
   }
   private revision(state: AgentState, paths: readonly string[], origin: string): string {
     return digest({ state, paths, origin });
@@ -392,7 +356,7 @@ export class FileAgentsManager implements AgentsManager {
     const current = images;
     let changed = false;
     for (const step of state.pending.steps) {
-      changed = await this.validateDisplaced(state, step) || changed;
+      changed = await this.validateDisplaced(step) || changed;
       this.classify(step, current[step.target]!);
     }
     if (changed && save !== undefined) await save(state);
@@ -402,12 +366,12 @@ export class FileAgentsManager implements AgentsManager {
     }
     return current;
   }
-  private async validateDisplaced(state: AgentState, step: StepState): Promise<boolean> {
+  private async validateDisplaced(step: StepState): Promise<boolean> {
     const displaced = path.join(step.scratch, "previous");
     if (!exists(displaced)) return false;
     const saved = await this.privateChildImage(step.scratch, displaced, step.backup);
     if (sameImage(saved, step.before)) return false;
-    if (state.version !== 4 || step.backup === undefined || step.phase === "published") {
+    if (step.phase === "published") {
       throw new AgentError("agent_recovery_required");
     }
     step.before = saved;
@@ -415,7 +379,7 @@ export class FileAgentsManager implements AgentsManager {
   }
   private classify(step: StepState, image: FileImage | null): "before" | "after" | "gap" {
     const displaced = path.join(step.scratch, "previous");
-    if (step.backup !== undefined && step.phase === "planned" && !exists(displaced)) return "before";
+    if (step.phase === "planned" && !exists(displaced)) return "before";
     if (sameImage(image, step.after)) return "after";
     if (sameImage(image, step.before)) return "before";
     if (image === null && step.before !== null && exists(displaced)) return "gap";
@@ -450,7 +414,7 @@ export class FileAgentsManager implements AgentsManager {
       const target = state.targets[step.target]!.path;
       assertNoLinks(target);
       const stage = path.join(step.scratch, "next");
-      if (await this.validateDisplaced(state, step)) await save(state);
+      if (await this.validateDisplaced(step)) await save(state);
       const position = this.classify(step, await this.securityImage(target, step));
       positions.set(step, position);
       if (position === "after") { step.phase = "published"; await save(state); continue; }
@@ -479,31 +443,25 @@ export class FileAgentsManager implements AgentsManager {
       this.hit("staged", agent, step.target);
     }
     const boundary = await this.images(state.targets.map((target) => target.path), state);
-    if (state.version === 4) {
-      let changed = false;
-      for (const step of steps) {
-        if (positions.get(step) === "after" || step.phase !== "planned"
-          || exists(path.join(step.scratch, "previous"))) continue;
-        const latest = boundary[step.target]!;
-        if (!sameImage(step.before, latest)) {
-          step.before = latest;
-          changed = true;
-        }
-        positions.set(step, "before");
+    let changed = false;
+    for (const step of steps) {
+      if (positions.get(step) === "after" || step.phase !== "planned"
+        || exists(path.join(step.scratch, "previous"))) continue;
+      const latest = boundary[step.target]!;
+      if (!sameImage(step.before, latest)) {
+        step.before = latest;
+        changed = true;
       }
-      if (changed) await save(state);
-    } else if ([...positions.values()].every((position) => position === "before")) {
-      this.requireExpected(state, boundary);
-    } else {
-      await this.requireRecoverable(state, boundary, undefined, save);
+      positions.set(step, "before");
     }
+    if (changed) await save(state);
     for (const step of steps) {
       let position = positions.get(step)!;
       if (position === "after") continue;
       const target = state.targets[step.target]!.path;
       const stage = path.join(step.scratch, "next");
       const displaced = path.join(step.scratch, "previous");
-      if (position === "before" && state.version === 4) {
+      if (position === "before") {
         const scratchObservation = observeSecurityPath(step.scratch);
         const expectedEntries = step.after === null ? [] : ["next"];
         const entries = fs.readdirSync(step.scratch).sort();
@@ -538,37 +496,8 @@ export class FileAgentsManager implements AgentsManager {
           this.hit("displaced_raw", agent, step.target);
         }
         position = "gap";
-      } else if (position === "before" && step.before !== null) {
-        // Legacy transactions retain their original compare-before-publish semantics.
-        const scratchObservation = observeSecurityPath(step.scratch);
-        const expectedEntries = step.after === null ? [] : ["next"];
-        const entries = fs.readdirSync(step.scratch).sort();
-        if (exists(displaced) || entries.length !== expectedEntries.length
-          || entries.some((entry, index) => entry !== expectedEntries[index])) {
-          throw new AgentError("agent_recovery_required");
-        }
-        if (step.after !== null && !sameImage(
-          await this.privateChildImage(step.scratch, stage, target, scratchObservation),
-          step.after,
-        )) throw new AgentError("agent_recovery_required");
-        if (!sameImage(await readImage(target, stage), step.before)) throw new AgentError("agent_conflict");
-        assertSecurityPathUnchanged(step.scratch, scratchObservation, true);
-        const beforeMove = fs.lstatSync(target);
-        fs.renameSync(target, displaced);
-        const afterMove = fs.lstatSync(displaced);
-        syncDirectory(path.dirname(target));
-        syncDirectory(step.scratch);
-        const actual = await this.privateChildImage(step.scratch, displaced);
-        const matches = beforeMove.dev === afterMove.dev && beforeMove.ino === afterMove.ino
-          && sameDisplacedContent(actual, step.before);
-        await protect(displaced);
-        if (!matches) throw new AgentError("agent_recovery_required");
-        step.phase = "displaced";
-        await save(state);
-        this.hit("displaced", agent, step.target);
-        position = "gap";
       }
-      if (state.version === 4 && position === "gap" && step.before !== null && exists(displaced)) {
+      if (position === "gap" && step.before !== null && exists(displaced)) {
         await this.archiveDisplaced(agent, step, save, state);
         if (step.phase !== "displaced") {
           step.phase = "displaced";
@@ -584,8 +513,6 @@ export class FileAgentsManager implements AgentsManager {
         fs.linkSync(stage, target);
         this.hit("linked", agent, step.target);
         fs.unlinkSync(stage);
-      } else if (position === "before" && step.before === null && exists(target)) {
-        throw new AgentError("agent_recovery_required");
       }
       syncDirectory(path.dirname(target));
       step.phase = "published";
@@ -600,9 +527,8 @@ export class FileAgentsManager implements AgentsManager {
     save: (state: AgentState) => Promise<void>,
     state: AgentState,
   ): Promise<void> {
-    if (step.backup === undefined || step.before === null) return;
+    if (step.before === null) return;
     const target = state.targets[step.target]!;
-    target.backups ??= [];
     const intended = step.before;
     const intendedDigest = backupDigest(intended);
     const archiveStage = path.join(step.scratch, "backup");
@@ -677,28 +603,20 @@ export class FileAgentsManager implements AgentsManager {
     for (const step of pending.steps) {
       this.hit("cleanup", agent, step.target);
       await this.cleanup(agent, step.scratch, state.targets[step.target]?.path, step);
-      if (step.before !== null && step.backup !== undefined && exists(step.backup)) {
+      if (step.before !== null && exists(step.backup)) {
         await protect(step.backup);
         syncDirectory(path.dirname(step.backup));
         const backup = await readImage(step.backup);
         if (backup === null) throw new AgentError("agent_recovery_required");
         const target = state.targets[step.target]!;
-        target.backups ??= [];
         if (!target.backups.some((candidate) => candidate.path === step.backup)) {
           target.backups.push({ path: step.backup, digest: backupDigest(backup) });
         }
       }
     }
     for (const scratch of pending.garbage) await this.cleanup(agent, scratch);
-    if (state.version === 4) {
-      for (const target of state.targets) {
-        if (!await this.trimTimestampBackups(agent, target, 365)) throw new AgentError("agent_conflict");
-      }
-    }
-    if (pending.kind === "restore") {
-      state.targets = [];
-      state.mappings = [];
-      state.lastAppliedAt = null;
+    for (const target of state.targets) {
+      if (!await this.trimTimestampBackups(agent, target, 365)) throw new AgentError("agent_conflict");
     }
     state.pending = null;
     state.revision += 1;
@@ -749,8 +667,8 @@ export class FileAgentsManager implements AgentsManager {
     target: AgentState["targets"][number],
     retain: number,
   ): Promise<boolean> {
-    const owned: NonNullable<typeof target.backups> = [];
-    for (const backup of target.backups ?? []) {
+    const owned: typeof target.backups = [];
+    for (const backup of target.backups) {
       try {
         const image = await readImage(backup.path);
         if (image !== null && backupDigest(image) === backup.digest) owned.push(backup);
