@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
-import { AgentStore, type AgentState } from "../../src/agents/store.js";
+import { AgentStore } from "../../src/agents/store.js";
 
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
@@ -27,7 +28,6 @@ const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((mod
 }));
 const mappings = models.map((model) => ({ displayName: `Label ${model.modelId}`, modelId: model.modelId }));
 function harness(options: Omit<AgentManagerOptions, "home"> = {}) {
-  // Legacy images use the same canonical home anchor as the production manager.
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-")));
   homes.push(home);
   const manager = new FileAgentsManager({ home, now: () => new Date("2026-01-02T03:04:05Z"), ...options });
@@ -135,7 +135,7 @@ describe("private repeatable agent configuration", () => {
   it.skipIf(process.platform === "win32")("rejects world-readable recovery state", async () => {
     const h = harness();
     await apply(h.manager, "claude");
-    fs.chmodSync(path.join(h.home, ".ghc-gateway-agents/claude/state.db"), 0o644);
+    fs.chmodSync(path.join(stateRoot(h.home), "claude", "state.db"), 0o644);
     expect((await h.status("claude")).state).toBe("unsafe_path");
   }, 180_000);
 });
@@ -144,47 +144,138 @@ function stateRoot(home: string, dataDir = path.join(home, ".ghc-gateway")): str
   return path.join(dataDir, "agents");
 }
 
-function legacyStateRoot(home: string): string {
-  return path.join(home, ".ghc-gateway-agents");
-}
-
-async function saveState(root: string, agent: AgentId, state: AgentState): Promise<void> {
-  await new AgentStore(root, agent).locked(async (save) => save(state));
-}
-
 function homeWithCrash(): string {
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-")));
   homes.push(home);
   return home;
 }
 
-describe("Agent migration and hostile filesystem evidence", () => {
-  it("converges concurrent migration and remains restart-safe", async () => {
+describe("Agent state storage and hostile filesystem evidence", () => {
+  it.each([
+    ["claude", "default"], ["codex", "default"], ["grokbuild", "default"],
+    ["claude", "custom"], ["codex", "custom"], ["grokbuild", "custom"],
+  ] as const)("keeps %s state only in the %s data directory across Apply and restart", async (agent, location) => {
     const h = harness();
-    const state = { version: 2 as const, revision: 9, mappings: [mappings[1]!], targets: [], lastAppliedAt: null, pending: null };
-    await saveState(legacyStateRoot(h.home), "codex", state);
-    const one = new FileAgentsManager({ home: h.home });
-    const two = new FileAgentsManager({ home: h.home });
-    const results = await Promise.allSettled([one.inspect(origin), two.inspect(origin)]);
-    expect(results.some((result) => result.status === "fulfilled")).toBe(true);
-    const restarted = new FileAgentsManager({ home: h.home });
-    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")).toMatchObject({
-      state: "not_managed",
-      mappings: state.mappings,
+    const dataName = location === "default" ? ".ghc-gateway" : "gateway-data";
+    const dataDir = path.join(h.home, dataName);
+    const manager = new FileAgentsManager({ home: h.home, dataDir });
+    expect((await manager.inspect(origin)).every((item) => item.state === "not_managed")).toBe(true);
+    expect(fs.readdirSync(h.home)).toEqual([]);
+    expect((await apply(manager, agent)).state).toBe("installed");
+    const root = stateRoot(h.home, dataDir);
+    const saved = await new AgentStore(root, agent).read();
+    expect(saved).toMatchObject({ version: 4, revision: 1, mappings, pending: null });
+    expect(fs.readdirSync(root)).toEqual([agent]);
+    expect(fs.readdirSync(path.join(root, agent)).sort()).toEqual(["lock.db", "state.db"]);
+    manager.close();
+    const restarted = new FileAgentsManager({ home: h.home, dataDir });
+    expect((await restarted.inspect(origin)).find((item) => item.id === agent)).toMatchObject({
+      state: "installed", mappings,
     });
-    expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+    expect(await new AgentStore(root, agent).read()).toEqual(saved);
+    expect((await apply(restarted, agent, [...mappings].reverse())).state).toBe("installed");
+    const configName = agent === "claude" ? ".claude" : agent === "codex" ? ".codex" : ".grok";
+    expect(fs.readdirSync(h.home).sort()).toEqual([configName, dataName].sort());
+    restarted.close();
   }, 180_000);
 
-  it("rejects a hard-linked legacy state database", async () => {
+  it.each(["default", "custom"] as const)("keeps Codex Takeover state only in the %s data directory", async (location) => {
     const h = harness();
-    const state = { version: 2 as const, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null };
-    await saveState(legacyStateRoot(h.home), "codex", state);
-    const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const dataName = location === "default" ? ".ghc-gateway" : "gateway-data";
+    const dataDir = path.join(h.home, dataName);
+    seed(h.home, ".codex/models.json", "{\"models\":[]}\n");
+    seed(h.home, ".codex/config.toml", "model=\"external\"\n");
+    const manager = new FileAgentsManager({ home: h.home, dataDir });
+    const status = (await manager.inspect(origin)).find((item) => item.id === "codex")!;
+    expect(status.takeover).not.toBeNull();
+    expect(fs.readdirSync(h.home)).toEqual([".codex"]);
+    expect((await manager.takeover({
+      agent: "codex", expectedRevision: status.revision, takeoverRevision: status.takeover!.revision,
+      catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal)).state).toBe("installed");
+    manager.close();
+    const restarted = new FileAgentsManager({ home: h.home, dataDir });
+    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")?.state).toBe("installed");
+    expect((await new AgentStore(stateRoot(h.home, dataDir), "codex").read()).targets).toHaveLength(2);
+    expect(fs.readdirSync(h.home).sort()).toEqual([".codex", dataName].sort());
+    restarted.close();
+  }, 180_000);
+
+  it("rejects a hard-linked state database", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const state = path.join(stateRoot(h.home), "codex", "state.db");
     const alias = path.join(h.home, "state-alias.db");
-    fs.linkSync(legacyState, alias);
+    fs.linkSync(state, alias);
     expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
     expect(fs.lstatSync(alias).nlink).toBe(2);
-  });
+  }, 180_000);
+
+  it.each(["version", "backups", "backup", "kind"] as const)("rejects an invalid %s without resetting durable state", async (field) => {
+    const h = harness({
+      checkpoint: (point) => { if (point === "intent") throw new Error("interrupted"); },
+    });
+    await expect(apply(h.manager, "claude")).rejects.toMatchObject({ code: "agent_recovery_required" });
+    const file = path.join(stateRoot(h.home), "claude", "state.db");
+    const store = new AgentStore(stateRoot(h.home), "claude");
+    const state = await store.read();
+    const document = JSON.stringify({
+      ...state,
+      ...(field === "version" ? { version: 999 } : {}),
+      ...(field === "backups" ? { targets: state.targets.map((target) => ({ ...target, backups: undefined })) } : {}),
+      pending: {
+        ...state.pending,
+        ...(field === "backup" ? { steps: state.pending!.steps.map((step) => ({ ...step, backup: undefined })) } : {}),
+        ...(field === "kind" ? { kind: "invalid" } : {}),
+      },
+    });
+    const db = new DatabaseSync(file);
+    try { db.prepare("UPDATE state SET document=? WHERE id=1").run(document); }
+    finally { db.close(); }
+    await expect(store.read()).rejects.toMatchObject({ code: "agent_recovery_required" });
+    const restarted = new FileAgentsManager({ home: h.home });
+    expect((await restarted.inspect(origin)).find((item) => item.id === "claude")?.state).toBe("recovery_required");
+    await expect(apply(restarted, "claude")).rejects.toMatchObject({ code: "agent_recovery_required" });
+    const unchanged = new DatabaseSync(file, { readOnly: true });
+    try { expect(unchanged.prepare("SELECT document FROM state WHERE id=1").get()?.document).toBe(document); }
+    finally { unchanged.close(); }
+    expect(fs.readdirSync(h.home)).toEqual([".ghc-gateway"]);
+    restarted.close();
+  }, 180_000);
+
+  it.each([
+    ["intent", -1], ["staged", 0], ["displaced_raw", 0], ["displaced", 0],
+    ["linked", 0], ["published", 0], ["cleanup", 0], ["quarantined", 0],
+    ["staged", 1], ["displaced_raw", 1], ["displaced", 1], ["linked", 1],
+    ["published", 1], ["cleanup", 1], ["quarantined", 1],
+  ] as const)("recovers a current Apply interrupted at %s for target %s", async (boundary, target) => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const root = stateRoot(h.home);
+    const previous = await new AgentStore(root, "codex").read();
+    h.manager.close();
+    const manager = new FileAgentsManager({
+      home: h.home,
+      checkpoint: (point, agent, index) => {
+        if (point === boundary && agent === "codex" && index === target) throw new Error("interrupted");
+      },
+    });
+    const nextMappings = [...mappings].reverse();
+    await expect(apply(manager, "codex", nextMappings)).rejects.toMatchObject({ code: "agent_recovery_required" });
+    manager.close();
+    const restarted = new FileAgentsManager({ home: h.home });
+    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")?.state).toBe("recovery_required");
+    expect((await apply(restarted, "codex", nextMappings)).state).toBe("installed");
+    const recovered = await new AgentStore(root, "codex").read();
+    expect(recovered).toMatchObject({ version: 4, revision: 3, mappings: nextMappings, pending: null });
+    for (const [index, entry] of recovered.targets.entries()) {
+      expect(fs.readFileSync(entry.path).toString("base64")).toBe(entry.expected!.bytes);
+      expect(entry.backups.some((backup) => fs.readFileSync(backup.path).toString("base64") === previous.targets[index]!.expected!.bytes)).toBe(true);
+      expect(fs.readdirSync(path.dirname(entry.path)).some((name) => name.startsWith(".ghcg-agents-"))).toBe(false);
+    }
+    expect(fs.readdirSync(h.home).sort()).toEqual([".codex", ".ghc-gateway"]);
+    restarted.close();
+  }, 180_000);
 
   it("rejects a replaced staged pathname before displacing the live target", async () => {
     const home = homeWithCrash();
